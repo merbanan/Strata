@@ -4843,6 +4843,10 @@ int main(int argc, char** argv) {
                              (d1.entries - ds0.entries) / (w * L), (d1.hits - ds0.hits) / (w * L), (d1.pcie - ds0.pcie) / (w * L));
                 const std::string pr = ver.profile_report();
                 if (!pr.empty()) std::fprintf(stderr, "strata decode GPU stages (ms/window):%s\n", pr.c_str());
+                if (drive.d.skipped_entries > 0)
+                    std::fprintf(stderr, "strata decode timing: STRATA_CPU_SKIP_W skipped %lld CPU entries so far "
+                                         "(of %lld CPU entries computed)\n", (long long) drive.d.skipped_entries,
+                                 (long long) drive.d.multi_entries);
             }
             if (!cancelled) {
                 // a prompt stopped halfway leaves the session somewhere between two chunks: nothing to continue from

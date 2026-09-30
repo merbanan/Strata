@@ -1,4 +1,5 @@
 // src/core/verify.cpp - see include/strata/core/verify.hpp.
+#include "strata/core/expert_source.hpp"
 #include "strata/core/verify.hpp"
 #if defined(_WIN32)
 #include <intrin.h>
@@ -1025,6 +1026,7 @@ bool Verifier::run(int T, const int32_t* tokens, int64_t pos0, PoolMultiFn pool,
         set_plan_slot(grp);
         const int tb = gtb[grp], n = gte[grp] - gtb[grp];
         progress_at("verify window: the CPU experts of layer", l);
+        g_window_weights = h_w_ + (size_t) tb * ss.k;
         if (pool != nullptr)
             pool(user, h_x_ + (size_t) tb * g.n_embd, h_ids_ + (size_t) tb * ss.k, n, ss.k,
                  h_ymiss_ + (size_t) tb * ss.k * g.n_embd, l);

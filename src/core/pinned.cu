@@ -209,7 +209,14 @@ void* reserve(uint64_t bytes, PageBacking& got, std::string& note, const std::st
     note = "MAP_HUGETLB unavailable (no hugetlb pool configured?); using 4 KB pages";
     p = mmap(nullptr, bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     got = PageBacking::NormalPages;
-    return p == MAP_FAILED ? nullptr : p;
+    if (p == MAP_FAILED) return nullptr;
+    // Transparent huge pages where the kernel offers them (THP "madvise" mode needs the ask; "always" ignores it).
+    // The CPU pool streams ~1.4 MB expert blobs scattered over the arena: on 4 KB pages that is ~340 TLB entries a
+    // blob and a hardware-prefetcher restart every 4 KB; 2 MB pages remove both.  Asked before the arena is
+    // touched, so the first-touch faults can take huge pages.  STRATA_NO_THP=1 skips it (A/B).
+    if (std::getenv("STRATA_NO_THP") == nullptr && madvise(p, bytes, MADV_HUGEPAGE) == 0)
+        note = "MAP_HUGETLB unavailable (no hugetlb pool configured?); 4 KB pages with MADV_HUGEPAGE (transparent huge pages)";
+    return p;
 #endif
 }
 

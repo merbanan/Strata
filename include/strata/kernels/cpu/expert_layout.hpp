@@ -45,6 +45,8 @@ bool cpu_avx512_ok();
 void q2_rows_any(const uint8_t* w, size_t row_bytes, int nblocks, const ActQ* const* a, int nt, float* const* out,
                  int r0, int r1);
 void act_quant_any(const float* x, int n, ActQ& a);
+/// out = silu(g) * u: the AVX-2 kernel on CPUs without AVX-512 (STRATA_SCALAR_SILU=1: the scalar libm loop).
+void swiglu_any(const float* g, const float* u, float* out, int n);
 
 /// The process-wide layout (canonical Q2_0 until `expert_layout_load` finds a native pack).
 const ExpertLayout& expert_layout();
