@@ -11,6 +11,7 @@
 #include "strata/kernels/cpu/expert_layout.hpp"
 #include "strata/kernels/bf16_gemv.hpp"
 #include "strata/kernels/native_router.hpp"
+#include "strata/kernels/router_top10.hpp"
 #include "strata/kernels/native_moe.hpp"
 #include "strata/kernels/cpu/expert.hpp"
 #include "strata/kernels/elementwise.hpp"
@@ -616,7 +617,11 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
         for (int t = tb; t < te; ++t) {
             MoEBuffers mb = ss.moe;
             mb.logits = logits_ + t * NE; mb.ids = ids_ + t * K; mb.weights = w_ + t * K;
-            if (!moe_route(wt, g, l, K, mb, mixed_ + t * N, cs, err, nullptr)) return false;
+            static const float res_beta = [] { const char* v = std::getenv("STRATA_ROUTE_RES_BIAS"); return v ? (float) std::atof(v) : 0.f; }();
+            if (res_beta > 0.f && hits_.d_res != nullptr) router_residency_bias(hits_.d_res + l * g.n_expert, res_beta);
+            const bool routed = moe_route(wt, g, l, K, mb, mixed_ + t * N, cs, err, nullptr);
+            router_residency_bias(nullptr, 0.f);
+            if (!routed) return false;
         }
         if (device_plan_)   // E-6: every routed expert resident: this group's plan without the host
             resident_plan(ids_ + tb * K, n * (int) K, (int) K, hits_.d_res + l * g.n_expert, (int) g.n_expert,

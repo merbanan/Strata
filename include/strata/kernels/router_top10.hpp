@@ -14,6 +14,10 @@ namespace strata::kernels {
 
 // `stream` may be null, in which case the call synchronises before returning.  `ids` is (n_tokens, k) int32 and
 // `weights` is (n_tokens, k) f32, both device pointers.  k must be <= 64.
+/// Experiment (STRATA_ROUTE_RES_BIAS): the next `router_top10` calls on this thread select with a VRAM-resident
+/// expert's probability scaled by (1 + beta) (`res[e] >= 0` = resident, a device table of n_expert slots); the
+/// combine weights stay the true probabilities.  beta <= 0 or res == nullptr: the exact router.
+void router_residency_bias(const int32_t* res, float beta);
 void router_top10(const float* logits, int n_tokens, int n_expert, int k, int* ids, float* weights,
                   void* stream);
 
