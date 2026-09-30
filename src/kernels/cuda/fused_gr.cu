@@ -1,6 +1,7 @@
 // src/kernels/cuda/fused_gr.cu - see include/strata/kernels/fused_gr.hpp.
 #include "strata/kernels/fused_gr.hpp"
 #include "strata/kernels/bf16_bits.hpp"
+#include "strata/kernels/verify_kernels.hpp"
 
 #include <cuda_runtime.h>
 
@@ -178,7 +179,11 @@ __global__ void __launch_bounds__(THREADS) gr_norm_multi_kernel(GrMulti m) {
     for (int i = t; i < D; i += THREADS) xn[i] *= s_rs[i / N];
 }
 
+#if defined(__HIPCC__)
+constexpr int TILE = 1280;             // eight-token tile fits RDNA3/RDNA4's 64 KiB LDS limit
+#else
 constexpr int TILE = 2560;             // xn floats per token staged at a time: 320 chunks of 8, 10 per lane
+#endif
 constexpr int TQ = TILE / 8 / 32;      // uint4 weight chunks per lane per tile
 
 // Step 2 of `gr_down_kernel` for T tokens.  One warp per row (so each lane accumulates the same chunks in the
@@ -295,12 +300,15 @@ __global__ void __launch_bounds__(THREADS) gr_up_multi_kernel(GrMulti m) {
 
 }  // namespace
 
-void fused_gr_read_multi(const FusedGrArgs* a, int n_tok, float* xn_scratch, void* stream) {
+void fused_gr_read_multi(const FusedGrArgs* a, int n_tok, float* xn_scratch, void* stream, unsigned long long* stamp_buf,
+                         int stamp_i0) {
     if (n_tok < 1 || n_tok > kFusedGrMaxT || xn_scratch == nullptr) {
         std::fprintf(stderr, "fused_gr_read_multi: invalid arguments\n");
         std::exit(1);
     }
+    GrMulti m;
     for (int t = 0; t < n_tok; ++t) {
+        m.a[t] = a[t];
         const FusedGrArgs& x = a[t];
         if (!x.R || !x.w_norm || !x.w_down || !x.w_up || !x.lo || !x.rs || !x.mixed || (x.w_inject && !x.inject_out) ||
             (x.apply && (!x.bo_prev || !x.inj_prev || !x.R_out)) || x.w_down != a[0].w_down || x.w_up != a[0].w_up ||
@@ -309,42 +317,63 @@ void fused_gr_read_multi(const FusedGrArgs* a, int n_tok, float* xn_scratch, voi
             std::exit(1);
         }
     }
+    m.xn = xn_scratch;
+    m.T = n_tok;
     cudaStream_t st = (cudaStream_t) stream;
-    // gr_down_multi_kernel's tile is T * TILE floats of dynamic shared memory: at kFusedGrMaxT (8) that is
-    // 80 KiB, which fits Ampere+'s opt-in ceiling but NOT Volta/Turing's 64 KiB (see STRATA_VOLTA_BUILD and
-    // ninfer-flash-next-v100-backport). The old code asked for the full 80 KiB unconditionally and never
-    // checked cudaFuncSetAttribute's result, so on a 64 KiB card the opt-in silently failed and the next
-    // launch died with "invalid argument" on the very first multi-token call. Instead, size the opt-in (once)
-    // from what THIS device actually allows, and read the window in groups of that many tokens: each group is
-    // bitwise `fused_gr_read` per token, exactly like the undivided call - this only changes how many rows of
-    // the weights are read together.
-    static int max_t_per_launch = 0;
-    if (max_t_per_launch == 0) {
-        int dev = 0, max_shared = 0;
-        cudaGetDevice(&dev);
-        cudaDeviceGetAttribute(&max_shared, cudaDevAttrMaxSharedMemoryPerBlockOptin, dev);
-        int cap = max_shared / (int) (TILE * sizeof(float));
-        if (cap < 1) cap = 1;
-        if (cap > kFusedGrMaxT) cap = kFusedGrMaxT;
-        const cudaError_t e = cudaFuncSetAttribute(gr_down_multi_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
-                                                    cap * (int) (TILE * sizeof(float)));
-        if (e != cudaSuccess) {
-            std::fprintf(stderr, "fused_gr_read_multi: shared memory opt-in (%d of %d bytes): %s\n",
-                         cap * (int) (TILE * sizeof(float)), max_shared, cudaGetErrorString(e));
-            std::exit(1);
+    gr_norm_multi_kernel<<<n_tok, THREADS, 0, st>>>(m);
+    if (stamp_buf) gpu_stamp(stamp_buf, stamp_i0, stream);
+    // the shared-memory opt-in is a per-DEVICE setting: once per device, not once per process (a layer split
+    // runs this kernel on two cards)
+    static bool attr[64] = {};
+    static int chunk[64] = {};   // Turing port: tokens the down kernel may carry in one launch on this card
+    int dev = 0;
+    cudaGetDevice(&dev);
+    if (dev >= 0 && dev < 64 && !attr[dev]) {
+        // at most what the card allows (Turing: 64 KB - enough for windows of up to 6 tokens)
+        int optin = 0;
+        cudaDeviceGetAttribute(&optin, cudaDevAttrMaxSharedMemoryPerBlockOptin, dev);
+        int want = (int) (kFusedGrMaxT * TILE * sizeof(float));
+        if (optin > 0 && want > optin) want = optin;
+        cudaFuncSetAttribute(gr_down_multi_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, want);
+        cudaGetLastError();      // drop any error the attempt left behind
+        // Turing port: the down kernel stages n_tok*TILE floats of dynamic shared memory - 80 KB at the full
+        // 8 tokens.  A card whose opt-in is below that (Turing: 64 KB, so 7+ tokens fail to launch as
+        // "invalid argument") processes the tokens in slices that fit; a card that reports no opt-in gets what
+        // fits the 48 KB default (4 tokens of the CUDA tile; all 8 of HIP's smaller tile).  The down kernel's
+        // outputs (lo, inject_out) are strictly per-token, so the chunk boundaries are safe, and the up kernel
+        // below still sees every token of the batch in one launch.
+        //
+        // The opt-in is a promise a pre-Volta card does not keep: an sm_60 answers 65536 and accepts the
+        // cudaFuncSetAttribute for 61440 B, then fails the LAUNCH with "invalid argument".  What such a card
+        // will launch is its per-block limit, so the capacity comes from that below sm_70 - the same 4 tokens
+        // the "no opt-in" branch assumes, but taken from the attribute that is actually enforced.
+#if defined(__HIPCC__)
+        const int usable = optin > 0 ? optin : 48 * 1024;
+#else
+        int cc = 0, per_block = 0;
+        cudaDeviceGetAttribute(&cc, cudaDevAttrComputeCapabilityMajor, dev);
+        cudaDeviceGetAttribute(&per_block, cudaDevAttrMaxSharedMemoryPerBlock, dev);
+        const int usable = (cc >= 7 && optin > 0) ? optin : per_block;
+#endif
+        const int capacity = usable / (int) (TILE * sizeof(float));
+        chunk[dev] = capacity < 1 ? 1 : (capacity > kFusedGrMaxT ? kFusedGrMaxT : capacity);
+        attr[dev] = true;
+    }
+    const int chunk_tok = (dev >= 0 && dev < 64 && chunk[dev]) ? chunk[dev] : kFusedGrMaxT;
+    if (chunk_tok >= n_tok) {
+        gr_down_multi_kernel<<<DOWN_BLOCKS + 1, THREADS, (size_t) n_tok * TILE * sizeof(float), st>>>(m);
+    } else {
+        for (int c0 = 0; c0 < n_tok; c0 += chunk_tok) {
+            const int ct = n_tok - c0 < chunk_tok ? n_tok - c0 : chunk_tok;
+            GrMulti c{};
+            c.xn = xn_scratch + (size_t) c0 * D;
+            c.T = ct;
+            for (int k = 0; k < ct; ++k) c.a[k] = a[c0 + k];
+            gr_down_multi_kernel<<<DOWN_BLOCKS + 1, THREADS, (size_t) ct * TILE * sizeof(float), st>>>(c);
         }
-        max_t_per_launch = cap;
     }
-    for (int t0 = 0; t0 < n_tok; t0 += max_t_per_launch) {
-        const int csz = (n_tok - t0) < max_t_per_launch ? (n_tok - t0) : max_t_per_launch;
-        GrMulti m;
-        for (int t = 0; t < csz; ++t) m.a[t] = a[t0 + t];
-        m.xn = xn_scratch + (size_t) t0 * D;
-        m.T = csz;
-        gr_norm_multi_kernel<<<csz, THREADS, 0, st>>>(m);
-        gr_down_multi_kernel<<<DOWN_BLOCKS + 1, THREADS, (size_t) csz * TILE * sizeof(float), st>>>(m);
-        gr_up_multi_kernel<<<UPM_BLOCKS, THREADS, 0, st>>>(m);
-    }
+    if (stamp_buf) gpu_stamp(stamp_buf, stamp_i0 + 1, stream);
+    gr_up_multi_kernel<<<UPM_BLOCKS, THREADS, 0, st>>>(m);
     const cudaError_t e = cudaGetLastError();
     if (e != cudaSuccess) {
         std::fprintf(stderr, "fused_gr_read_multi: %s\n", cudaGetErrorString(e));

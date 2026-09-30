@@ -22,6 +22,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <random>
 #include <string>
 #include <vector>
@@ -37,6 +38,14 @@ static double rel(const std::vector<float>& a, const std::vector<float>& b) {
 int main(int argc, char** argv) {
     setvbuf(stdout, nullptr, _IONBF, 0);   // keep the trail on a crash
     if (argc < 2) { std::fprintf(stderr, "usage: native_expert_parity <shard1.gguf> [layer ...]\n"); return 2; }
+    // #152's width check tests the opt-in rule (the multi-token kernels from one token on)
+    if (std::getenv("STRATA_IQ_MT_MIN") == nullptr) {
+#ifdef _WIN32
+        _putenv_s("STRATA_IQ_MT_MIN", "1");
+#else
+        setenv("STRATA_IQ_MT_MIN", "1", 1);
+#endif
+    }
     strata::GgufFile gguf(argv[1]);
     std::vector<int> layers;
     for (int i = 2; i < argc; ++i) layers.push_back(std::atoi(argv[i]));
@@ -132,8 +141,14 @@ int main(int argc, char** argv) {
                     float* gp[NT];
                     for (int k = 0; k < NT; ++k) gp[k] = g.data() + k * FF;
                     (is512 ? cpu::iq512_rows : cpu::iq256_rows)(f.gu_type, blob.data(), f.gu_row, (int) H, a, NT, gp, 0, (int) FF);
+                    const double rg = rel(g, gref);
                     std::printf("          %s %s gate rows vs ggml vec_dot: rel %.2e\n",
-                                ggml_type_name((ggml_type) f.gu_type), tag, rel(g, gref));
+                                ggml_type_name((ggml_type) f.gu_type), tag, rg);
+                    if (rg > 1e-5) {   // ggml's own vec_dot is the reference: above 1e-5 it is a real mismatch,
+                        std::printf("          %s %s gate rows MISMATCH (rel %.2e > 1e-5)\n",
+                                    ggml_type_name((ggml_type) f.gu_type), tag, rg);   // not rounding (measured 3e-8)
+                        ++failures;
+                    }
                     float* f1[1] = {ffp[0]};
                     const int it = 50;
                     const auto gu = is512 ? cpu::iq512_gu_rows : cpu::iq256_gu_rows;
@@ -157,6 +172,27 @@ int main(int argc, char** argv) {
                 op[k] = got_c.data() + k * H;
             }
             cpu::native_down_rows(f, blob.data(), hp, NT, op, 0, (int) H);
+            {   // #152: a token's rows must not depend on how many tokens share the call - each token alone (nt = 1)
+                // against its row of the NT-token call above, bit for bit, gate/up and down
+                size_t gu_diff = 0, dn_diff = 0;
+                std::vector<float> one_ff(FF), one_out(H);
+                // the NT-token gate/up rows again: the throughput loops above overwrote ff with other kernels' rows
+                for (int k = 0; k < NT; ++k) ffp[k] = ff[k].data();
+                cpu::native_gu_rows(f, blob.data(), a, NT, ffp, 0, (int) FF);
+                for (int k = 0; k < NT; ++k) {
+                    const void* a1[1] = {a[k]};
+                    float* f1[1] = {one_ff.data()};
+                    cpu::native_gu_rows(f, blob.data(), a1, 1, f1, 0, (int) FF);
+                    for (int64_t r = 0; r < FF; ++r) gu_diff += std::memcmp(&one_ff[r], &ff[k][r], 4) != 0;
+                    const void* h1[1] = {hp[k]};
+                    float* o1[1] = {one_out.data()};
+                    cpu::native_down_rows(f, blob.data(), h1, 1, o1, 0, (int) H);
+                    for (int64_t r = 0; r < H; ++r) dn_diff += std::memcmp(&one_out[r], &got_c[k * H + r], 4) != 0;
+                }
+                std::printf("          width invariance (1 vs %d tokens): gate/up %zu, down %zu rows differ\n", NT,
+                            gu_diff, dn_diff);
+                if (gu_diff || dn_diff) ++failures;
+            }
             if (f.d_type == 42) {
                 // (b2) the GGUF-layout Q2_0 kernel the pool uses for Q2_0 down projections - the AVX-512 one
                 // where the CPU has it, the AVX-2 one (q2_avx2.cpp) where it does not.  Calling the AVX-512
@@ -177,16 +213,21 @@ int main(int argc, char** argv) {
             if (f.d_type == 20) {
                 // (b3) the IQ4_NL multi-token AVX-2 kernel the pool now uses for IQ4_NL down projections,
                 // against ggml-cpu's single-token vec_dot on the SAME Q8_0 activations (h), plus timing.
-                std::vector<float> alt((size_t) NT * H), ref((size_t) NT * H);
+                std::vector<float> alt((size_t) NT * H), refd((size_t) NT * H);
                 float* altp[NT];
                 for (int k = 0; k < NT; ++k) altp[k] = alt.data() + k * H;
                 cpu::iq4nl256_down_rows(blob.data() + f.down_off, f.d_row, (int) FF, hp, NT, altp, 0, (int) H);
                 const auto* tdc = ggml_get_type_traits_cpu((ggml_type) f.d_type);
                 for (int k = 0; k < NT; ++k)
                     for (int64_t r = 0; r < H; ++r)
-                        tdc->vec_dot((int) FF, ref.data() + k * H + r, 0,
+                        tdc->vec_dot((int) FF, refd.data() + k * H + r, 0,
                                      blob.data() + f.down_off + (size_t) r * f.d_row, 0, hp[k], 0, 1);
-                std::printf("          iq4_nl AVX-2 multi-token down vs ggml down: rel %.2e\n", rel(alt, ref));
+                const double rdn = rel(alt, refd);
+                std::printf("          iq4_nl AVX-2 multi-token down vs ggml down: rel %.2e\n", rdn);
+                if (rdn > 1e-5) {   // measured 1e-7; same reasoning as the gate/up rows above
+                    std::printf("          iq4_nl down MISMATCH (rel %.2e > 1e-5)\n", rdn);
+                    ++failures;
+                }
                 const int it = 50;
                 const auto t0 = std::chrono::steady_clock::now();
                 for (int i = 0; i < it; ++i)
@@ -195,7 +236,7 @@ int main(int argc, char** argv) {
                 for (int i = 0; i < it; ++i)
                     for (int k = 0; k < NT; ++k)
                         for (int64_t r = 0; r < H; ++r)
-                            tdc->vec_dot((int) FF, ref.data() + k * H + r, 0,
+                            tdc->vec_dot((int) FF, refd.data() + k * H + r, 0,
                                         blob.data() + f.down_off + (size_t) r * f.d_row, 0, hp[k], 0, 1);
                 const auto t2 = std::chrono::steady_clock::now();
                 const double usn = std::chrono::duration<double, std::micro>(t1 - t0).count() / it;
