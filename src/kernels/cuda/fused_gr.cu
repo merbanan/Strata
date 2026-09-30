@@ -300,9 +300,7 @@ void fused_gr_read_multi(const FusedGrArgs* a, int n_tok, float* xn_scratch, voi
         std::fprintf(stderr, "fused_gr_read_multi: invalid arguments\n");
         std::exit(1);
     }
-    GrMulti m;
     for (int t = 0; t < n_tok; ++t) {
-        m.a[t] = a[t];
         const FusedGrArgs& x = a[t];
         if (!x.R || !x.w_norm || !x.w_down || !x.w_up || !x.lo || !x.rs || !x.mixed || (x.w_inject && !x.inject_out) ||
             (x.apply && (!x.bo_prev || !x.inj_prev || !x.R_out)) || x.w_down != a[0].w_down || x.w_up != a[0].w_up ||
@@ -311,18 +309,42 @@ void fused_gr_read_multi(const FusedGrArgs* a, int n_tok, float* xn_scratch, voi
             std::exit(1);
         }
     }
-    m.xn = xn_scratch;
-    m.T = n_tok;
     cudaStream_t st = (cudaStream_t) stream;
-    gr_norm_multi_kernel<<<n_tok, THREADS, 0, st>>>(m);
-    static bool attr = false;
-    if (!attr) {
-        cudaFuncSetAttribute(gr_down_multi_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
-                             (int) (kFusedGrMaxT * TILE * sizeof(float)));
-        attr = true;
+    // gr_down_multi_kernel's tile is T * TILE floats of dynamic shared memory: at kFusedGrMaxT (8) that is
+    // 80 KiB, which fits Ampere+'s opt-in ceiling but NOT Volta/Turing's 64 KiB (see STRATA_VOLTA_BUILD and
+    // ninfer-flash-next-v100-backport). The old code asked for the full 80 KiB unconditionally and never
+    // checked cudaFuncSetAttribute's result, so on a 64 KiB card the opt-in silently failed and the next
+    // launch died with "invalid argument" on the very first multi-token call. Instead, size the opt-in (once)
+    // from what THIS device actually allows, and read the window in groups of that many tokens: each group is
+    // bitwise `fused_gr_read` per token, exactly like the undivided call - this only changes how many rows of
+    // the weights are read together.
+    static int max_t_per_launch = 0;
+    if (max_t_per_launch == 0) {
+        int dev = 0, max_shared = 0;
+        cudaGetDevice(&dev);
+        cudaDeviceGetAttribute(&max_shared, cudaDevAttrMaxSharedMemoryPerBlockOptin, dev);
+        int cap = max_shared / (int) (TILE * sizeof(float));
+        if (cap < 1) cap = 1;
+        if (cap > kFusedGrMaxT) cap = kFusedGrMaxT;
+        const cudaError_t e = cudaFuncSetAttribute(gr_down_multi_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
+                                                    cap * (int) (TILE * sizeof(float)));
+        if (e != cudaSuccess) {
+            std::fprintf(stderr, "fused_gr_read_multi: shared memory opt-in (%d of %d bytes): %s\n",
+                         cap * (int) (TILE * sizeof(float)), max_shared, cudaGetErrorString(e));
+            std::exit(1);
+        }
+        max_t_per_launch = cap;
     }
-    gr_down_multi_kernel<<<DOWN_BLOCKS + 1, THREADS, (size_t) n_tok * TILE * sizeof(float), st>>>(m);
-    gr_up_multi_kernel<<<UPM_BLOCKS, THREADS, 0, st>>>(m);
+    for (int t0 = 0; t0 < n_tok; t0 += max_t_per_launch) {
+        const int csz = (n_tok - t0) < max_t_per_launch ? (n_tok - t0) : max_t_per_launch;
+        GrMulti m;
+        for (int t = 0; t < csz; ++t) m.a[t] = a[t0 + t];
+        m.xn = xn_scratch + (size_t) t0 * D;
+        m.T = csz;
+        gr_norm_multi_kernel<<<csz, THREADS, 0, st>>>(m);
+        gr_down_multi_kernel<<<DOWN_BLOCKS + 1, THREADS, (size_t) csz * TILE * sizeof(float), st>>>(m);
+        gr_up_multi_kernel<<<UPM_BLOCKS, THREADS, 0, st>>>(m);
+    }
     const cudaError_t e = cudaGetLastError();
     if (e != cudaSuccess) {
         std::fprintf(stderr, "fused_gr_read_multi: %s\n", cudaGetErrorString(e));

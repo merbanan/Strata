@@ -693,9 +693,13 @@ def build_engine(gpu, vision, yes, llama) -> Path:
     if not engine_ok:
         say("  The engine's source changed: compiling it again (only what changed, a few minutes) ..."
             if local and (eng / EXE).exists() else "  Compiling the Strata engine for your GPU (10-20 minutes, once) ...")
-        cmake_build(ROOT, ROOT / "build", "strata",
-                    ["-DSTRATA_ENABLE_CUDA=ON", "-DSTRATA_BUILD_TESTS=OFF", f"-DCMAKE_CUDA_ARCHITECTURES={gpu['arch']}",
-                     f"-DCMAKE_CUDA_COMPILER={nvcc}", f"-DSTRATA_GGML_DIR={llama}"], vcvars, "build-strata.bat")
+        defs = ["-DSTRATA_ENABLE_CUDA=ON", "-DSTRATA_BUILD_TESTS=OFF", f"-DCMAKE_CUDA_ARCHITECTURES={gpu['arch']}",
+                f"-DCMAKE_CUDA_COMPILER={nvcc}", f"-DSTRATA_GGML_DIR={llama}"]
+        # Backport opt-in (see CMakeLists.txt and ninfer-flash-next-v100-backport): below sm_80, the engine
+        # only builds when this trades the tf32-mma QSA scorer for a plain-SIMT one (STRATA_VOLTA_BUILD).
+        if os.environ.get("STRATA_VOLTA_BUILD"):
+            defs.append("-DSTRATA_VOLTA_BUILD=ON")
+        cmake_build(ROOT, ROOT / "build", "strata", defs, vcvars, "build-strata.bat")
         shutil.copy2(ROOT / "build" / EXE, eng / EXE)
     if not vision_ok:
         say("  Compiling the image encoder" + (" with CUDA (10-20 minutes, once) ..." if vision == "gpu" else " ..."))
@@ -1157,7 +1161,15 @@ def main() -> int:
         for x in gpus():
             say(f"         {x['index']}: {x['name']}, {x['vram_gb']:.0f} GB")
     if int(gpu["arch"]) < 80:
-        fail("this GPU is older than the RTX 30 series (compute capability 8.0 is required)")
+        # Backport opt-in (see CMakeLists.txt's STRATA_VOLTA_BUILD and ninfer-flash-next-v100-backport):
+        # the engine binary itself must ALSO have been compiled with -DSTRATA_VOLTA_BUILD=ON for an arch
+        # this old, or it refuses at its own runtime device check. This flag only skips the setup wizard's
+        # gate; it does not make an unpatched engine work.
+        if os.environ.get("STRATA_VOLTA_BUILD"):
+            warn(f"compute capability {gpu['arch'][:-1]}.{gpu['arch'][-1]} is below Strata's supported sm_80 "
+                 "floor; continuing because STRATA_VOLTA_BUILD is set (Volta/Turing backport, unsupported upstream)")
+        else:
+            fail("this GPU is older than the RTX 30 series (compute capability 8.0 is required)")
     if driver_major(gpu) < MIN_DRIVER:
         fail(f"the NVIDIA driver is too old ({gpu['driver']}; {MIN_DRIVER} or newer is needed)",
              "update it with the NVIDIA App or from https://www.nvidia.com/drivers, restart, and run this again")

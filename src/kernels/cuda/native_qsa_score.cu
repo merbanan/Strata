@@ -29,6 +29,7 @@ namespace strata::kernels {
 namespace {
 std::atomic<bool> enabled{false};
 constexpr int D=128, HEADS=4, R=4, ROWS=32, WARPS=2, STRIDE=36, COMBINE=68;
+#if !defined(STRATA_VOLTA_BUILD)
 struct TileA { uint32_t x[4]; };
 struct TileB { uint32_t x[2]; };
 struct TileC { float x[4]={0.0f,0.0f,0.0f,0.0f}; };
@@ -119,6 +120,34 @@ __global__ __launch_bounds__(64,1) void score_kernel(
         for(int i=row*R;i<n&&i<(row+1)*R;++i)cells[i]=sum;
     }
 }
+#else
+// STRATA_VOLTA_BUILD (backport, see docs/ and ninfer-flash-next-v100-backport): the MMA path above needs
+// tf32 mma.sync, which is sm_80+ only (ldmatrix itself is sm_75+, but tf32 mma is Ampere). This kernel is
+// not wired to any caller yet (Plan v0.3 P6), so on Volta/Turing we simply skip the tensor-core fast path
+// and do the same 128-wide dot product per head with plain FMAs instead of a warp-cooperative GEMM tile.
+__global__ __launch_bounds__(64,1) void score_kernel(
+        const float* __restrict__ pooled,const float* __restrict__ query,
+        const float* __restrict__ bias,const int32_t* __restrict__ step,
+        int max_cells,float* __restrict__ cells) {
+    const int n=step[kStepNKv],full=step[kStepNBid];
+    if(n<1||n>max_cells||step[kStepPos]!=n-1||full!=n/R||
+       step[kStepWidth]!=(n<2051?n:2051))return;
+    if(threadIdx.y!=0)return;
+    const int row=blockIdx.x*ROWS+threadIdx.x;
+    if(row>full)return;
+    float h[HEADS];
+#pragma unroll
+    for(int j=0;j<HEADS;++j){
+        float v=0.0f;
+        for(int col=0;col<D;++col)v=__fadd_rn(v,pooled[size_t(row)*D+col]*query[j*D+col]);
+        h[j]=fmaxf(v,0.0f);
+    }
+    float sum=__fadd_rn(__fadd_rn(__fadd_rn(h[0],h[1]),h[2]),h[3]);
+    if(bias)sum=__fadd_rn(sum,bias[row]);
+    sum=__fadd_rn(sum,row==full&&n%R?1e9f:0.0f);
+    for(int i=row*R;i<n&&i<(row+1)*R;++i)cells[i]=sum;
+}
+#endif
 struct Span{const void* p;size_t n;};
 void validate(Span s){
     const auto p=reinterpret_cast<uintptr_t>(s.p);

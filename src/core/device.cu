@@ -59,12 +59,25 @@ DeviceInfo device_info(int ordinal) {
     // The engine is written against sm_120.  Compiling for it is enforced by CMake; RUNNING on something else
     // is caught here, because a binary can be carried to a machine with an older card and would otherwise
     // silently take whatever path the driver chose.
+    //
+    // STRATA_VOLTA_BUILD (backport, see docs/ and ninfer-flash-next-v100-backport): this build was compiled
+    // with CMAKE_CUDA_ARCHITECTURES=70 and the tf32-mma QSA scorer swapped for a plain-SIMT one, specifically
+    // so it can run on Volta/Turing/Ampere+ (cc 7.0 and up) instead of only Blackwell.
+#if defined(STRATA_VOLTA_BUILD)
+    if (d.cc_major < 7) {
+        throw CudaError("device " + d.name + " reports compute capability " + std::to_string(d.cc_major) +
+                            "." + std::to_string(d.cc_minor) +
+                            "; this STRATA_VOLTA_BUILD needs compute capability 7.0 or newer",
+                        -1);
+    }
+#else
     if (d.cc_major != 12) {
         throw CudaError("device " + d.name + " reports compute capability " + std::to_string(d.cc_major) +
                             "." + std::to_string(d.cc_minor) +
                             "; Strata targets sm_120 (RTX 5000 series / Blackwell) only",
                         -1);
     }
+#endif
     return d;
 }
 

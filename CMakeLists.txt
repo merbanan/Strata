@@ -49,20 +49,43 @@ if(STRATA_ENABLE_CUDA)
   if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
     set(CMAKE_CUDA_ARCHITECTURES 120 CACHE STRING "CUDA architectures" FORCE)
   endif()
+  # Opt-in backport (see docs, and ninfer-flash-next-v100-backport for the same trick applied to ninfer):
+  # the ONLY code in this tree that needs sm_80 is native_qsa_score.cu's tf32 mma/ldmatrix attention scorer,
+  # and that kernel has no caller yet (Plan v0.3 P6, still unwired). Everything else - the routed-expert,
+  # RoPE, GDN, sampler and MMQ prefill kernels - is plain FP16/FP32 SIMT and already runs on Volta/Turing.
+  # STRATA_VOLTA_BUILD compiles a non-MMA fallback for that one file instead of refusing the whole build.
+  option(STRATA_VOLTA_BUILD "Backport: skip the sm_80 tf32-mma QSA scorer, allow sm_70/sm_75 (Volta/Turing)" OFF)
+  set(_strata_min_arch 80)
+  if(STRATA_VOLTA_BUILD)
+    set(_strata_min_arch 70)
+    add_compile_definitions(STRATA_VOLTA_BUILD)
+  endif()
   foreach(_a IN LISTS CMAKE_CUDA_ARCHITECTURES)
     string(REGEX REPLACE "-.*$" "" _base "${_a}")     # 120-real / 120-virtual are still 120
     # Plan v0.3 P6: developed and measured on sm_120 (RTX 50); the kernels need sm_80 or newer (tf32 mma in
-    # the attention scorer, bf16 math), so RTX 30 (86) and RTX 40 (89) build too.  Older cards are refused.
+    # the attention scorer, bf16 math), so RTX 30 (86) and RTX 40 (89) build too.  Older cards are refused,
+    # unless STRATA_VOLTA_BUILD trades that kernel's tensor-core path for a plain-SIMT one (sm_70 floor).
     if(_base STREQUAL "native" OR _base STREQUAL "all" OR _base STREQUAL "all-major")
       continue()
     endif()
-    if(_base LESS 80)
-      message(FATAL_ERROR
-        "Strata needs an NVIDIA GPU of compute capability 8.0 or newer (RTX 30 / 40 / 50 series), but "
-        "CMAKE_CUDA_ARCHITECTURES is '${CMAKE_CUDA_ARCHITECTURES}'.")
+    if(_base LESS _strata_min_arch)
+      if(STRATA_VOLTA_BUILD)
+        message(FATAL_ERROR
+          "Strata (STRATA_VOLTA_BUILD) needs compute capability 7.0 or newer (Volta/Turing/Ampere+), but "
+          "CMAKE_CUDA_ARCHITECTURES is '${CMAKE_CUDA_ARCHITECTURES}'.")
+      else()
+        message(FATAL_ERROR
+          "Strata needs an NVIDIA GPU of compute capability 8.0 or newer (RTX 30 / 40 / 50 series), but "
+          "CMAKE_CUDA_ARCHITECTURES is '${CMAKE_CUDA_ARCHITECTURES}'. For an older card (Volta/Turing), "
+          "reconfigure with -DSTRATA_VOLTA_BUILD=ON -DCMAKE_CUDA_ARCHITECTURES=70.")
+      endif()
     endif()
   endforeach()
-  message(STATUS "Strata: CUDA enabled, arch ${CMAKE_CUDA_ARCHITECTURES}")
+  if(STRATA_VOLTA_BUILD)
+    message(STATUS "Strata: CUDA enabled, arch ${CMAKE_CUDA_ARCHITECTURES} (STRATA_VOLTA_BUILD: non-MMA QSA scorer)")
+  else()
+    message(STATUS "Strata: CUDA enabled, arch ${CMAKE_CUDA_ARCHITECTURES}")
+  endif()
 endif()
 
 # Warnings live on an INTERFACE target the project's own code links, NOT in add_compile_options: applied

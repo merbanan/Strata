@@ -2351,12 +2351,18 @@ int main(int argc, char** argv) {
         return 0;
     };
     if (o.serve) {
-        if (o.spec < 2 || o.mtp.empty() || o.prefill_chunk <= 0 ||
+        if (o.spec < 2 || o.prefill_chunk <= 0 ||
             (graph_hits && (thits.d_res == nullptr || host_res.empty()))) {
-            std::fprintf(stderr, "strata serve: needs --spec T, --mtp DIR and --prefill CHUNK (and a fillable "
+            std::fprintf(stderr, "strata serve: needs --spec T and --prefill CHUNK (and a fillable "
                                  "--expert-cache; the graphed hit path additionally needs --expert-profile P)\n");
             return 2;
         }
+        // STRATA_VOLTA_BUILD backport (see docs/ and ninfer-flash-next-v100-backport): --mtp is optional here,
+        // mirroring the plain `generate` command's own use_mtp handling below. Without it, drafting falls back
+        // to the suffix/prompt-lookup drafter (DraftPolicy still picks Lookup vs plain per round) or, when
+        // neither fires, plain one-token-per-round decoding - slower, never wrong: the verify window still
+        // confirms every emitted token against the real model regardless of where the draft came from.
+        const bool use_mtp = !o.mtp.empty();
         strata::prefill::Prefill sp;
         void* borrow = nullptr;
         uint64_t borrow_bytes = 0;
@@ -2412,7 +2418,7 @@ int main(int argc, char** argv) {
         vh.cache_base = thits.cache_base;
         vh.blob = thits.blob;
         if (!ver.init(wt, g, ss, vh, native_head.loaded() ? &native_head : nullptr, o.spec, err) ||
-            !mtp.bind(wt, &native_head, ver.final_R_all(), err)) {
+            (use_mtp && !mtp.bind(wt, &native_head, ver.final_R_all(), err))) {
             std::fprintf(stderr, "strata serve: %s\n", err.c_str());
             return 1;
         }
@@ -2454,7 +2460,7 @@ int main(int argc, char** argv) {
         sp.on_chunk = [&](const float* R_rows, int64_t T, int64_t p0, std::string& e) -> bool {
             std::vector<int32_t> nxt((size_t) T);
             for (int64_t t = 0; t < T; ++t) nxt[(size_t) t] = (int32_t) cur[(size_t) (p0 + t + 1)];
-            if (!mtp.prefill(R_rows, nxt.data(), T, p0, e)) return false;
+            if (use_mtp && !mtp.prefill(R_rows, nxt.data(), T, p0, e)) return false;
             // progress for the server window: PP <position reached> <prompt tokens> <ms> <fresh tokens/s>
             const int64_t done = p0 + T;
             const double ms = std::chrono::duration<double, std::milli>(Clock::now() - pp_t0).count();
@@ -2659,7 +2665,7 @@ int main(int argc, char** argv) {
         int64_t rounds = 0;
         const int S = o.spec;
         const int S_mtp = o.mtp_max_t > 0 ? std::min(o.mtp_max_t, S) : S;   // the MTP's windows; suffixes go up to S
-        if (S_mtp < S) mtp.set_max_drafts(S_mtp - 1);
+        if (use_mtp && S_mtp < S) mtp.set_max_drafts(S_mtp - 1);
         strata::spec::SuffixDrafter sfx(std::max(1, o.suffix_draft), 64, (size_t) o.max_context + 4096);
         strata::spec::DraftPolicy policy(S);   // MTP or lookup window, learned over the whole process
         // The vision path (--vision): GENI <max_new> <embeddings file> <id,id,...> carries images.  The file is one
@@ -2892,9 +2898,9 @@ int main(int argc, char** argv) {
             }
             // KV streaming: the drafter's ring may hold cells past `resume` from a longer turn; the main layers'
             // host copies and slots are always current (every writer writes both), so they need nothing
-            if (resume > 0 && reread_to <= 0) mtp.kv_restore(resume);
+            if (use_mtp && resume > 0 && reread_to <= 0) mtp.kv_restore(resume);
             tr("request", n, geni ? 1 : 0);
-            mtp.set_prompt_len(n);
+            if (use_mtp) mtp.set_prompt_len(n);
             const int64_t read_from = reread_to > 0 ? 0 : resume;
             pp_total = n;
             pp_from = read_from;
@@ -2941,7 +2947,7 @@ int main(int argc, char** argv) {
                         if (drive.d.failed && drive.d.fail) e = drive.d.fail;
                         return false;
                     }
-                    if (!ver.commit(T, e) || !mtp.prefill(ver.final_R_all(), nxt.data(), T, q, e)) return false;
+                    if (!ver.commit(T, e) || (use_mtp && !mtp.prefill(ver.final_R_all(), nxt.data(), T, q, e))) return false;
                     q += T;
                 }
                 const double ms = std::chrono::duration<double, std::milli>(Clock::now() - pp_t0).count();
@@ -3086,8 +3092,8 @@ int main(int argc, char** argv) {
             const Clock::time_point d0 = Clock::now();
             if (cancelled) finish = "cancel";
             while (!cancelled && produced_n < max_new) {
-                int T = S_mtp;
-                if (req_spec_min_p > 0.0) {
+                int T = use_mtp ? S_mtp : 1;
+                if (use_mtp && req_spec_min_p > 0.0) {
                     T = 1;
                     while (T < S_mtp && dprob[(size_t) T - 1] >= (float) req_spec_min_p) ++T;
                 }
@@ -3099,7 +3105,7 @@ int main(int argc, char** argv) {
                 if (o.suffix_draft > 0 && !first_window) {
                     const int k = sfx.propose(S - 1, sbuf.data());
                     sfx_match = sfx.last_match();
-                    if (k > 0 && sbuf[0] == drafts[0]) {
+                    if (k > 0 && (!use_mtp || sbuf[0] == drafts[0])) {
                         const strata::spec::DraftPolicy::Pick pk = policy.choose(T, k, sfx_match);
                         if (pk.lookup) { T = pk.t; from_sfx = true; }
                     }
@@ -3155,7 +3161,7 @@ int main(int argc, char** argv) {
                 }
                 std::fflush(stdout);
                 ++rounds;
-                const bool drafted = eos || produced_n >= max_new ||
+                const bool drafted = !use_mtp || eos || produced_n >= max_new ||
                                      mtp.draft(T, outv.data(), p, a, drafts.data(), err, dprob.data(), (float) req_spec_min_p);
                 if (adapt_thr.joinable()) adapt_thr.join();
                 if (!adapt_ok) {
