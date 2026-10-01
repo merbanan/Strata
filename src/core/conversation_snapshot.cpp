@@ -1,3 +1,4 @@
+#include "strata/kernels/qsa.hpp"
 #include "strata/core/conversation_snapshot.hpp"
 #include "strata/kernels/kv_q4.hpp"
 #include "conversation_checked.hpp"
@@ -49,7 +50,7 @@ bool layout(const QsaState& st, const ModelGeometry& g, int64_t upto, bool index
     if (!product(l.data, {(uint64_t) cells, (uint64_t) g.n_head_kv, per}) ||
         !product(l.scales, {(uint64_t) cells, (uint64_t) g.n_head_kv,
                            int8_keys && !st.kv_q4 ? (uint64_t) (g.head_dim / 64) * 2 : 0}) ||
-        !product(l.pooled, {(uint64_t) pooled, (uint64_t) g.idx_key_dim, sizeof(float)})) {
+        !product(l.pooled, {(uint64_t) pooled, (uint64_t) g.idx_key_dim, (uint64_t) strata::kernels::qsa_idx_key_bytes()})) {
         error = "conversation snapshot: K/V byte count overflow";
         return false;
     }

@@ -19,6 +19,7 @@
 // SOFTWARE.
 
 #include "strata/kernels/native_qsa_indexer.hpp"
+#include "strata/kernels/qsa.hpp"
 #include "strata/kernels/mrope.hpp"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
@@ -39,13 +40,18 @@ __device__ float warp_sum(float x) {
         x += __shfl_xor_sync(0xffffffffu, x, offset);
     return x;
 }
+// STRATA_IDX_F16: one pooled key element into FP32 or FP16 storage
+__device__ __forceinline__ void st_key(void* pooled, bool f16, std::size_t i, float v) {
+    if (f16) reinterpret_cast<__half*>(pooled)[i] = __float2half_rn(v);
+    else reinterpret_cast<float*>(pooled)[i] = v;
+}
 __global__ void append(const float* __restrict__ raw, const int32_t* __restrict__ pos_dev,
                         int pos_base, const float* __restrict__ gamma, float epsilon,
                         float* __restrict__ tail, float* __restrict__ dead,
-                        float* __restrict__ pooled, int32_t* __restrict__ block_pos,
+                        void* __restrict__ pooled, int32_t* __restrict__ block_pos,
                         int max_cells, float theta_scale, float freq_scale, float corr_low,
                         float corr_high, float ext_factor, float mscale,
-                        const int32_t* __restrict__ mtab) {
+                        const int32_t* __restrict__ mtab, bool f16) {
     const int pos = *pos_dev, d = threadIdx.x;
     if (pos < 0 || pos >= max_cells) return;
     const int slot = pos % R;
@@ -93,9 +99,9 @@ __global__ void append(const float* __restrict__ raw, const int32_t* __restrict_
         const float a = values[pair], z = values[pair + ROT / 2];
         y = d < ROT / 2 ? a * c - z * s : a * s + z * c;
     }
-    pooled[std::size_t(b) * D + d] = y;
+    st_key(pooled, f16, std::size_t(b) * D + d, y);
     if (pos == 0) dead[d] = y;
-    else pooled[std::size_t(b + 1) * D + d] = dead[d];
+    else st_key(pooled, f16, std::size_t(b + 1) * D + d, dead[d]);
     if (d == 0 && pos != 0) *block_pos = rope_pos;
 }
 // ---- C-2: the batched append.  The pooled key of a completed block b (its last cell pos = 4b+3), computed with
@@ -132,9 +138,9 @@ __device__ __forceinline__ float norm_scale(float mean, float* partials, int d) 
 }
 // cell 0 of a sequence: the spare (every gather index names cell 0), written to pooled[0] and dead
 __global__ void append_first(const float* __restrict__ raw, const float* __restrict__ gamma, float epsilon,
-                             float* __restrict__ dead, float* __restrict__ pooled, float theta_scale,
+                             float* __restrict__ dead, void* __restrict__ pooled, float theta_scale,
                              float freq_scale, float corr_low, float corr_high, float ext_factor, float mscale,
-                             const int32_t* __restrict__ mtab) {
+                             const int32_t* __restrict__ mtab, bool f16) {
     const int d = threadIdx.x;
     __shared__ float values[D];
     __shared__ float partials[32];
@@ -153,15 +159,15 @@ __global__ void append_first(const float* __restrict__ raw, const float* __restr
     if (d >= D) return;
     const float y = pooled_value(values, d, 0, theta_scale, freq_scale, corr_low, corr_high, ext_factor, mscale,
                                  mtab, true);
-    pooled[d] = y;
+    st_key(pooled, f16, d, y);
     dead[d] = y;
 }
 __global__ void append_blocks(const float* __restrict__ raw, int64_t n, int64_t p0, int pos_base,
                               const float* __restrict__ gamma, float epsilon, const float* __restrict__ tail,
-                              const float* __restrict__ dead, float* __restrict__ pooled, int32_t* __restrict__ block_pos,
+                              const float* __restrict__ dead, void* __restrict__ pooled, int32_t* __restrict__ block_pos,
                               int64_t first_block, int64_t last_block, float theta_scale, float freq_scale,
                               float corr_low, float corr_high, float ext_factor, float mscale,
-                              const int32_t* __restrict__ mtab) {
+                              const int32_t* __restrict__ mtab, bool f16) {
     const int64_t b = first_block + blockIdx.x;
     const int d = threadIdx.x;
     __shared__ float values[D];
@@ -183,10 +189,10 @@ __global__ void append_blocks(const float* __restrict__ raw, int64_t n, int64_t 
     __syncthreads();
     if (d >= D) return;
     const int rope_pos = pos_base + R * (int) b;
-    pooled[std::size_t(b) * D + d] = pooled_value(values, d, rope_pos, theta_scale, freq_scale, corr_low, corr_high,
-                                                  ext_factor, mscale, mtab, false);
+    st_key(pooled, f16, std::size_t(b) * D + d, pooled_value(values, d, rope_pos, theta_scale, freq_scale, corr_low,
+                                                            corr_high, ext_factor, mscale, mtab, false));
     if (b == last_block) {
-        pooled[std::size_t(b + 1) * D + d] = dead[d];
+        st_key(pooled, f16, std::size_t(b + 1) * D + d, dead[d]);
         if (d == 0) *block_pos = rope_pos;
     }
 }
@@ -222,7 +228,7 @@ void native_qsa_indexer_append(const float* raw, const int32_t* relative_pos_dev
         rope_scaling_invalid(scaling) != nullptr)
         throw std::invalid_argument("native QSA indexer requires fixed geometry, aligned position base, positive capacity/epsilon, valid frequency/scaling and explicit stream");
     const Span spans[] = {{raw,D*4},{relative_pos_device,4},{gamma,D*4},{b.tail,(R-1)*D*4},
-        {b.dead,D*4},{b.pooled,std::size_t(max_cells/R+1)*D*4},{b.block_pos,4}};
+        {b.dead,D*4},{b.pooled,std::size_t(max_cells/R+1)*D*qsa_idx_key_bytes()},{b.block_pos,4}};
     for (const auto& span : spans) validate(span);
     for (int i = 0; i < 7; ++i) for (int j = i + 1; j < 7; ++j)
         if (overlaps(spans[i], spans[j])) throw std::invalid_argument("native QSA indexer buffers overlap");
@@ -230,7 +236,7 @@ void native_qsa_indexer_append(const float* raw, const int32_t* relative_pos_dev
     const RopeKernelArgs k = scaling.kernel_args(ROT);   // none: the identity constants
     append<<<1,THREADS,0,static_cast<cudaStream_t>(stream)>>>(raw,relative_pos_device,pos_base,gamma,epsilon,
         b.tail,b.dead,b.pooled,b.block_pos,int(max_cells),theta_scale,k.freq_scale,
-        k.corr_low,k.corr_high,k.ext_factor,k.attn_factor,mrope_table());
+        k.corr_low,k.corr_high,k.ext_factor,k.attn_factor,mrope_table(),qsa_idx_f16());
     const auto error = cudaGetLastError();
     if (error != cudaSuccess) throw std::runtime_error(cudaGetErrorString(error));
 }
@@ -248,14 +254,14 @@ void native_qsa_indexer_append_batch(const float* raw, int64_t n, int64_t p0, in
     const cudaStream_t st = static_cast<cudaStream_t>(stream);
     const int32_t* mtab = mrope_table();
     if (p0 == 0) append_first<<<1, THREADS, 0, st>>>(raw, gamma, epsilon, b.dead, b.pooled, theta_scale,
-                                                     fsf, cl, ch, ef, ms, mtab);
+                                                     fsf, cl, ch, ef, ms, mtab, qsa_idx_f16());
     // completed blocks: those whose last cell (4b+3) lies in [p0, p0 + n)
     const int64_t first = p0 <= R - 1 ? 0 : (p0 - (R - 1) + R - 1) / R;       // the smallest b with 4b+3 >= p0
     const int64_t hi = p0 + n - 1 >= R - 1 ? (p0 + n - 1 - (R - 1)) / R : -1;   // the largest b with 4b+3 <= p0+n-1
     if (hi >= first)
         append_blocks<<<(unsigned) (hi - first + 1), THREADS, 0, st>>>(raw, n, p0, pos_base, gamma, epsilon, b.tail,
                                                                        b.dead, b.pooled, b.block_pos, first, hi,
-                                                                       theta_scale, fsf, cl, ch, ef, ms, mtab);
+                                                                       theta_scale, fsf, cl, ch, ef, ms, mtab, qsa_idx_f16());
     append_tail<<<R - 1, D, 0, st>>>(raw, n, p0, b.tail);
     const auto error = cudaGetLastError();
     if (error != cudaSuccess) throw std::runtime_error(cudaGetErrorString(error));
