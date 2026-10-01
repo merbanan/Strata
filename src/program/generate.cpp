@@ -5516,6 +5516,25 @@ int main(int argc, char** argv) {
         }
         const double pool_ms0 = drive.cpu_ms;
         const int64_t misses0 = drive.d.multi_misses, entries0 = drive.d.multi_entries;
+        // STRATA_TF_DUMP=PATH (quality measurement): teacher-forced scoring through the real verify windows.  The
+        // --spec-oracle file is the text after the prompt; every window's inputs are that text (windows of 1, 2, ..
+        // --spec tokens in turn), every window is committed whole, and each window's head logits are written as
+        // rows (int32 n_vocab, int32 rows, then rows x n_vocab floats; row j predicts oracle token j).
+        std::FILE* tf_dump = nullptr;
+        std::vector<float> tf_rows;
+        int64_t tf_written = 0;
+        int64_t tf_from = 0;
+        if (const char* tp = std::getenv("STRATA_TF_DUMP")) {
+            if (oracle.empty()) { std::fprintf(stderr, "strata generate: STRATA_TF_DUMP needs --spec-oracle\n"); return 2; }
+            tf_dump = std::fopen(tp, "wb");
+            if (tf_dump == nullptr) { std::fprintf(stderr, "strata generate: cannot write %s\n", tp); return 1; }
+            // STRATA_TF_FROM=k: only rows j >= k are written (a long text scored at its end)
+            tf_from = std::getenv("STRATA_TF_FROM") ? std::max<int64_t>(0, std::atoll(std::getenv("STRATA_TF_FROM"))) : 0;
+            const int32_t hdr[2] = {(int32_t) n_vocab, (int32_t) std::max<int64_t>(0, (int64_t) oracle.size() - tf_from)};
+            std::fwrite(hdr, sizeof hdr, 1, tf_dump);
+            o.max_new = (int64_t) oracle.size();
+            tf_rows.resize((size_t) o.spec * (size_t) n_vocab);
+        }
         while ((int64_t) produced.size() < o.max_new) {
             const Clock::time_point t0 = Clock::now();
             int T = S_mtp;
@@ -5524,9 +5543,11 @@ int main(int argc, char** argv) {
                 while (T < S_mtp && dprob[(size_t) T - 1] >= (float) o.spec_min_p) ++T;
             }
             if (first_window) T = 1;
+            if (tf_dump != nullptr)
+                T = first_window ? 1 : (int) std::min<int64_t>(1 + rounds % o.spec, (int64_t) oracle.size() - (int64_t) produced.size());
             bool from_sfx = false;
             int sfx_match = 0;
-            if (o.suffix_draft > 0 && !first_window) {
+            if (o.suffix_draft > 0 && !first_window && tf_dump == nullptr) {
                 const int k = sfx.propose(o.spec - 1, sbuf.data());
                 sfx_match = sfx.last_match();
                 if (k > 0 && (!use_mtp || sbuf[0] == drafts[0])) {
@@ -5564,6 +5585,18 @@ int main(int argc, char** argv) {
             }
             int a = 0;
             while (a < T - 1 && window[(size_t) a + 1] == outv[(size_t) a]) ++a;
+            if (tf_dump != nullptr) {
+                const int64_t j0 = (int64_t) produced.size(), skip = std::max<int64_t>(0, std::min<int64_t>(T, tf_from - j0));
+                if (skip < T && (!ver.copy_logits(T, tf_rows.data()) ||
+                    std::fwrite(tf_rows.data() + (size_t) skip * (size_t) n_vocab, sizeof(float),
+                                (size_t) (T - skip) * (size_t) n_vocab, tf_dump) != (size_t) (T - skip) * (size_t) n_vocab)) {
+                    std::fprintf(stderr, "strata generate: STRATA_TF_DUMP write failed\n");
+                    return 1;
+                }
+                tf_written += T - skip;
+                a = T - 1;                                   // the text is committed whatever the model predicted
+                for (int i = 0; i < T; ++i) outv[(size_t) i] = (int32_t) oracle[produced.size() + (size_t) i];
+            }
             if (first_window) {
                 first_window = false;
                 ttft_ms = std::chrono::duration<double, std::milli>(Clock::now() - t_start).count();
@@ -5611,6 +5644,11 @@ int main(int argc, char** argv) {
             if (rounds % 64 == 0)
                 std::fprintf(stderr, "strata generate: position %lld, %lld tokens, %lld rounds\n", (long long) p,
                              (long long) produced.size(), (long long) rounds);
+        }
+        if (tf_dump != nullptr) {
+            std::fclose(tf_dump);
+            std::printf("%-24s %lld rows teacher-forced through %lld verify windows\n", "STRATA_TF_DUMP",
+                        (long long) tf_written, (long long) rounds);
         }
         std::printf("%-24s %lld rounds of %d, drafts accepted %lld of %lld (%.3f), %.2f tokens per round\n",
                     "speculation", (long long) rounds, o.spec, (long long) drafts_ok, (long long) drafts_total,
