@@ -67,7 +67,8 @@ constexpr int RT_MAX_THREADS = 512;
 /// One BLOCK per token, so the reductions have somewhere to happen.  `n_tokens` is 1 in decode; the grid keeps
 /// the batch case working without a second code path.
 __global__ void router_top10_kernel(const float* __restrict__ logits, int n_tokens, int n_expert, int k,
-                                    int* __restrict__ ids, float* __restrict__ weights) {
+                                    int* __restrict__ ids, float* __restrict__ weights,
+                                    const int32_t* __restrict__ res, float res_bias) {
     // **`s_taken` IS FIRST SO THE OTHER TWO KEEP THEIR ALIGNMENT WITHOUT AN OFFSET PARAMETER**, and `s_p`'s
     // existing `s_ex + n_expert` stays correct because it is relative to `s_ex`.  One byte per expert.
     extern __shared__ unsigned char s_raw[];
@@ -147,7 +148,9 @@ __global__ void router_top10_kernel(const float* __restrict__ logits, int n_toke
         int bi = n_expert;               // a sentinel that loses to every real index
         for (int e = tid; e < n_expert; e += nt) {
             if (s_taken[e]) continue;
-            const float pe = s_p[e];
+            // STRATA_ROUTE_RES_BIAS (experiment): a VRAM-resident expert competes with p * (1 + beta); its weight
+            // below is still its true p.  res == nullptr is the exact router.
+            const float pe = res == nullptr ? s_p[e] : (res[e] >= 0 ? s_p[e] * res_bias : s_p[e]);
             if (pe > bv) { bv = pe; bi = e; }
         }
         for (int off = 16; off > 0; off >>= 1) {
@@ -168,7 +171,7 @@ __global__ void router_top10_kernel(const float* __restrict__ logits, int n_toke
             }
             if (tid == 0 && ix < n_expert) {
                 ids[(size_t) t * k + i] = ix;
-                weights[(size_t) t * k + i] = v;
+                weights[(size_t) t * k + i] = res == nullptr ? v : s_p[ix];
                 s_taken[ix] = 1;
             }
         }
@@ -342,6 +345,16 @@ bool router_top10_variant(const float* logits, int n_tokens, int n_expert, int k
 #endif
 }
 
+namespace {
+thread_local const int32_t* g_res = nullptr;
+thread_local float g_res_bias = 1.0f;
+}  // namespace
+
+void router_residency_bias(const int32_t* res, float beta) {
+    g_res = beta > 0.0f ? res : nullptr;
+    g_res_bias = 1.0f + beta;
+}
+
 void router_top10(const float* logits, int n_tokens, int n_expert, int k, int* ids, float* weights,
                   void* stream) {
 #if defined(__HIPCC__)
@@ -383,7 +396,7 @@ void router_top10(const float* logits, int n_tokens, int n_expert, int k, int* i
     const size_t smem =
         taken_bytes + (size_t) n_expert * sizeof(double) + (size_t) n_expert * sizeof(float);
     router_top10_kernel<<<(unsigned) n_tokens, threads, smem, (cudaStream_t) stream>>>(
-        logits, n_tokens, n_expert, k, ids, weights);
+        logits, n_tokens, n_expert, k, ids, weights, g_res, g_res_bias);
     const cudaError_t e = cudaGetLastError();
     if (e != cudaSuccess) {
         std::fprintf(stderr, "router_top10 launch: %s\n", cudaGetErrorString(e));
