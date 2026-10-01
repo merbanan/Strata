@@ -469,8 +469,10 @@ bool WeightTable::load_hc_q8(const std::string& pack_dir, uint64_t& bytes, std::
         const bool hc = name.find(".hc_attn_down.") != std::string::npos || name.find(".hc_attn_up.") != std::string::npos ||
                         name.find(".hc_ffn_down.") != std::string::npos || name.find(".hc_ffn_up.") != std::string::npos;
         if (!hc || w.resident) continue;
-        if (w.kind != WeightKind::Bf16InF32 || w.ne0 % 32 != 0 || w.src_bytes != (uint64_t) w.elements * 4) {
-            err = "STRATA_HC_Q8: " + name + " is not an f32-promoted BF16 tensor of whole 32-value blocks";
+        // the pack holds BF16 either promoted to f32 (4 B/elem) or as it is in the GGUF (a native pack, 2 B/elem)
+        if (w.kind != WeightKind::Bf16InF32 || w.ne0 % 32 != 0 ||
+            (w.src_bytes != (uint64_t) w.elements * 4 && w.src_bytes != (uint64_t) w.elements * 2)) {
+            err = "STRATA_HC_Q8: " + name + " is not a BF16 tensor of whole 32-value blocks";
             return false;
         }
         todo.push_back(&w);
@@ -491,8 +493,18 @@ bool WeightTable::load_hc_q8(const std::string& pack_dir, uint64_t& bytes, std::
         std::FILE* f = std::fopen(path.c_str(), "rb");
         if (!f) { err = "STRATA_HC_Q8: cannot open " + path; return false; }
         src.resize((size_t) w->elements);
-        const bool ok = std::fseek(f, (long) w->src_off, SEEK_SET) == 0 &&   // dense.bin < 2 GiB
-                        std::fread(src.data(), 4, src.size(), f) == src.size();
+        const bool raw16 = w->src_bytes == (uint64_t) w->elements * 2;
+        bool ok = std::fseek(f, (long) w->src_off, SEEK_SET) == 0;   // dense.bin < 2 GiB
+        if (ok && raw16) {
+            std::vector<uint16_t> h(src.size());
+            ok = std::fread(h.data(), 2, h.size(), f) == h.size();
+            for (size_t i = 0; ok && i < h.size(); ++i) {
+                const uint32_t b = (uint32_t) h[i] << 16;   // bf16 -> f32 is exact
+                std::memcpy(&src[i], &b, 4);
+            }
+        } else if (ok) {
+            ok = std::fread(src.data(), 4, src.size(), f) == src.size();
+        }
         std::fclose(f);
         if (!ok) { err = "STRATA_HC_Q8: cannot read the source bytes"; return false; }
         const size_t nb = src.size() / 32;
