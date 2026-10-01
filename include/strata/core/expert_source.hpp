@@ -270,6 +270,7 @@ struct ExpertDispatch {
     std::vector<float> usage;
     int64_t multi_misses = 0;      ///< distinct (layer, expert) pairs the CPU computed in verify windows
     int64_t multi_entries = 0;     ///< routed (token, expert) entries the CPU served in verify windows
+    int64_t skipped_entries = 0;   ///< CPU entries dropped by STRATA_CPU_SKIP_W (experiment; see expert_source.cpp)
     /// Set when `dispatch` could not produce an answer.  The loop itself has no error channel, so this is
     /// where a source failure surfaces: the driver checks it after `session_loop` returns rather than the
     /// engine computing from a half-filled `parts`.
@@ -291,6 +292,10 @@ void expert_pool_dispatch(void* user, const float* x_f, const int32_t* ids, cons
 /// Plan v0.3 P6: the pool for a verify window of `n_tok` tokens.  `x_f` is (n_tok, n_embd), `ids` (n_tok, k) and
 /// `out` (n_tok * k, n_embd).  Each distinct missed expert is computed once for all the tokens routed to it;
 /// resident experts' rows are zeroed (the GPU adds them).  Requires `host_res` (the token-graph residency).
+/// The verify window's router weights for the token rows the next `expert_pool_dispatch_multi` serves (the mapped
+/// `h_w_`, same layout as its `ids`), set by the verifier right before it calls the pool; nullptr = unknown.
+/// Read only by the STRATA_CPU_SKIP_W experiment.
+extern const float* g_window_weights;
 void expert_pool_dispatch_multi(ExpertDispatch& d, const float* x_f, const int32_t* ids, int64_t n_tok, int64_t k,
                                 float* out);
 

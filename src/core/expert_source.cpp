@@ -975,6 +975,8 @@ constexpr int64_t kMaxWindowEntries = 128;
 static_assert(strata::kernels::cpu::MAXT * 10 <= kMaxWindowEntries, "a verify window's entries overflow the tables");
 }  // namespace
 
+const float* g_window_weights = nullptr;
+
 void expert_pool_dispatch_multi(ExpertDispatch& d, const float* x_f, const int32_t* ids, int64_t n_tok, int64_t k,
                                 float* out) {
     using namespace strata::kernels::cpu;
@@ -1136,6 +1138,16 @@ void expert_pool_dispatch_multi(ExpertDispatch& d, const float* x_f, const int32
                 continue;
             }
             ++d.cache_refused;
+            // STRATA_CPU_SKIP_W=eps (experiment, changes the output): a CPU-bound entry whose normalized router
+            // weight is below eps is not computed - its row stays zero, so the combine adds nothing for it and the
+            // remaining weights are NOT renormalized.  Hits and PCIe entries are never skipped (they cost the CPU
+            // nothing).  The top-1 entry of a token is never skipped.
+            static const float skip_w = [] { const char* v = std::getenv("STRATA_CPU_SKIP_W"); return v ? (float) std::atof(v) : 0.f; }();
+            if (skip_w > 0.f && g_window_weights != nullptr && j > 0 && g_window_weights[i] < skip_w) {
+                std::memset(row, 0, (size_t) H * sizeof(float));
+                ++d.skipped_entries;
+                continue;
+            }
             int16_t& jo = d.job_of[(size_t) e];
             if (jo < 0) {
                 const uint8_t* b = d.src->blob(d.layers, e);
