@@ -1178,6 +1178,13 @@ void Verifier::publish_plan(void* ctx) {
 }
 
 namespace { bool g_commit_async = false; }
+bool Verifier::copy_logits(int T, float* host) const {
+    const OnDevice on_device(device_);
+    if (head_logits_ == nullptr || T < 1) return false;
+    return cudaMemcpy(host, head_logits_, (size_t) T * (size_t) n_vocab_ * sizeof(float), cudaMemcpyDeviceToHost) ==
+           cudaSuccess;
+}
+
 void Verifier::set_commit_async(bool on) { g_commit_async = on && std::getenv("STRATA_COMMIT_SYNC") == nullptr; }
 
 bool Verifier::commit(int n_keep, std::string& err) {
