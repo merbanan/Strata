@@ -5538,11 +5538,14 @@ int main(int argc, char** argv) {
         std::FILE* tf_dump = nullptr;
         std::vector<float> tf_rows;
         int64_t tf_written = 0;
+        int64_t tf_from = 0;
         if (const char* tp = std::getenv("STRATA_TF_DUMP")) {
             if (oracle.empty()) { std::fprintf(stderr, "strata generate: STRATA_TF_DUMP needs --spec-oracle\n"); return 2; }
             tf_dump = std::fopen(tp, "wb");
             if (tf_dump == nullptr) { std::fprintf(stderr, "strata generate: cannot write %s\n", tp); return 1; }
-            const int32_t hdr[2] = {(int32_t) n_vocab, (int32_t) oracle.size()};
+            // STRATA_TF_FROM=k: only rows j >= k are written (a long text scored at its end)
+            tf_from = std::getenv("STRATA_TF_FROM") ? std::max<int64_t>(0, std::atoll(std::getenv("STRATA_TF_FROM"))) : 0;
+            const int32_t hdr[2] = {(int32_t) n_vocab, (int32_t) std::max<int64_t>(0, (int64_t) oracle.size() - tf_from)};
             std::fwrite(hdr, sizeof hdr, 1, tf_dump);
             o.max_new = (int64_t) oracle.size();
             tf_rows.resize((size_t) o.spec * (size_t) n_vocab);
@@ -5598,12 +5601,14 @@ int main(int argc, char** argv) {
             int a = 0;
             while (a < T - 1 && window[(size_t) a + 1] == outv[(size_t) a]) ++a;
             if (tf_dump != nullptr) {
-                if (!ver.copy_logits(T, tf_rows.data()) ||
-                    std::fwrite(tf_rows.data(), sizeof(float), (size_t) T * (size_t) n_vocab, tf_dump) != (size_t) T * (size_t) n_vocab) {
+                const int64_t j0 = (int64_t) produced.size(), skip = std::max<int64_t>(0, std::min<int64_t>(T, tf_from - j0));
+                if (skip < T && (!ver.copy_logits(T, tf_rows.data()) ||
+                    std::fwrite(tf_rows.data() + (size_t) skip * (size_t) n_vocab, sizeof(float),
+                                (size_t) (T - skip) * (size_t) n_vocab, tf_dump) != (size_t) (T - skip) * (size_t) n_vocab)) {
                     std::fprintf(stderr, "strata generate: STRATA_TF_DUMP write failed\n");
                     return 1;
                 }
-                tf_written += T;
+                tf_written += T - skip;
                 a = T - 1;                                   // the text is committed whatever the model predicted
                 for (int i = 0; i < T; ++i) outv[(size_t) i] = (int32_t) oracle[produced.size() + (size_t) i];
             }
