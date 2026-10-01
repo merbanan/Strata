@@ -227,6 +227,37 @@ void bitplane_image(ActQ& a) {
 }
 }  // namespace
 
+// exp(x) for |x| <= 88: x = n ln2 + r (Cody-Waite, two-part ln2), e^r by the degree-6 Cephes polynomial, 2^n into
+// the exponent bits.  ~1 ulp against libm expf; below -87.3 it flushes to 0 and above 88.3 it saturates, which is
+// all silu needs (g / (1 + e^-g) is then g or 0 exactly as with expf).
+static inline __m256 exp256(__m256 x) {
+    x = _mm256_min_ps(_mm256_max_ps(x, _mm256_set1_ps(-87.3f)), _mm256_set1_ps(88.3f));
+    const __m256 n = _mm256_round_ps(_mm256_mul_ps(x, _mm256_set1_ps(1.44269504088896341f)),
+                                     _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
+    __m256 r = _mm256_fnmadd_ps(n, _mm256_set1_ps(0.693359375f), x);
+    r = _mm256_fnmadd_ps(n, _mm256_set1_ps(-2.12194440e-4f), r);
+    __m256 p = _mm256_set1_ps(1.9875691500e-4f);
+    p = _mm256_fmadd_ps(p, r, _mm256_set1_ps(1.3981999507e-3f));
+    p = _mm256_fmadd_ps(p, r, _mm256_set1_ps(8.3334519073e-3f));
+    p = _mm256_fmadd_ps(p, r, _mm256_set1_ps(4.1665795894e-2f));
+    p = _mm256_fmadd_ps(p, r, _mm256_set1_ps(1.6666665459e-1f));
+    p = _mm256_fmadd_ps(p, r, _mm256_set1_ps(5.0000001201e-1f));
+    p = _mm256_fmadd_ps(p, _mm256_mul_ps(r, r), _mm256_add_ps(r, _mm256_set1_ps(1.f)));
+    const __m256i e = _mm256_slli_epi32(_mm256_add_epi32(_mm256_cvtps_epi32(n), _mm256_set1_epi32(127)), 23);
+    return _mm256_mul_ps(p, _mm256_castsi256_ps(e));
+}
+
+void swiglu_avx2(const float* g, const float* u, float* out, int n) {
+    int i = 0;
+    const __m256 one = _mm256_set1_ps(1.f), zero = _mm256_setzero_ps();
+    for (; i + 8 <= n; i += 8) {
+        const __m256 gv = _mm256_loadu_ps(g + i);
+        const __m256 den = _mm256_add_ps(one, exp256(_mm256_sub_ps(zero, gv)));
+        _mm256_storeu_ps(out + i, _mm256_mul_ps(_mm256_div_ps(gv, den), _mm256_loadu_ps(u + i)));
+    }
+    for (; i < n; ++i) out[i] = (g[i] / (1.f + std::exp(-g[i]))) * u[i];
+}
+
 void act_quant_q8_1_avx2(const float* x, int n, ActQ& a) {
     a.nchunks = n / QKA;
     const __m256 absmask = _mm256_castsi256_ps(_mm256_set1_epi32(0x7fffffff));

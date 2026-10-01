@@ -267,6 +267,15 @@ private:
     std::vector<SplitBufMulti> split_multi_;
     PoolAffinity affinity_ = PoolAffinity::All;
     CpuTopology topo_;
+    // native layers' row bodies (modes 5, 6 and the fused 7)
+    void native_gu(int e, int r0, int r1);
+    void native_quant_mid(int e);
+    void native_down(int e, int r0, int r1);
+    // mode 7 (fused gate/up -> down, one batch): parts per expert, and per expert the gate/up parts still running
+    // and whether its intermediate is quantized.  Reset by the host while every worker is parked.
+    int fz_nb_ = 0, fz_p_ = 1, fz_q_ = 1;
+    std::unique_ptr<std::atomic<int>[]> fz_left_{new std::atomic<int>[kMaxSplitMulti]};
+    std::unique_ptr<std::atomic<int>[]> fz_ready_{new std::atomic<int>[kMaxSplitMulti]};
 };
 
 }  // namespace strata::kernels::cpu
