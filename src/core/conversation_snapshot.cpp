@@ -1,3 +1,4 @@
+#include "strata/kernels/qsa.hpp"
 #include "strata/core/conversation_snapshot.hpp"
 #include "strata/kernels/kv_q4.hpp"
 #include "conversation_checked.hpp"
@@ -49,7 +50,7 @@ bool layout(const QsaState& st, const ModelGeometry& g, int64_t upto, bool index
     if (!product(l.data, {(uint64_t) cells, (uint64_t) g.n_head_kv, per}) ||
         !product(l.scales, {(uint64_t) cells, (uint64_t) g.n_head_kv,
                            int8_keys && !st.kv_q4 ? (uint64_t) (g.head_dim / 64) * 2 : 0}) ||
-        !product(l.pooled, {(uint64_t) pooled, (uint64_t) g.idx_key_dim, sizeof(float)})) {
+        !product(l.pooled, {(uint64_t) pooled, (uint64_t) g.idx_key_dim, (uint64_t) strata::kernels::qsa_idx_key_bytes()})) {
         error = "conversation snapshot: K/V byte count overflow";
         return false;
     }
@@ -162,7 +163,7 @@ bool conversation_kv_save(ConversationKv& image, const QsaState& st, const Model
     for (size_t i = 0; i < dst.size(); ++i) {
         // Recopy the partial page and the indexer's moving spare row. Completed
         // pages/rows strictly before the first rewritten token remain identical.
-        const size_t keep = i == 4 ? (index ? size_t(unchanged_tokens / strata::kernels::qsa_real_shapes().idx_block) * g.idx_key_dim * 4 : 0)
+        const size_t keep = i == 4 ? (index ? size_t(unchanged_tokens / strata::kernels::qsa_real_shapes().idx_block) * g.idx_key_dim * strata::kernels::qsa_idx_key_bytes() : 0)
                                   : l.cells ? (sizes[i] / size_t(l.cells)) * size_t(whole_cells) : 0;
         if (keep > dst[i]->size()) { error = "conversation snapshot: missing reusable prefix"; return false; }
         dst[i]->resize(sizes[i]);

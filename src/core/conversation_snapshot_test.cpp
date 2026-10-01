@@ -1,3 +1,6 @@
+#include "strata/kernels/f16_bits.hpp"
+#include <cstring>
+#include "strata/kernels/qsa.hpp"
 #include "strata/core/conversation_snapshot.hpp"
 #include "strata/kernels/kv_q4.hpp"
 #include <cuda_runtime.h>
@@ -12,6 +15,24 @@ using namespace strata::core;
 using namespace strata::kernels;
 
 namespace {
+
+// The indexer's spare pooled row as the kernels keep it: a copy of the FP32 dead key, rounded to FP16 when
+// STRATA_IDX_F16 stores the pooled keys in FP16.
+std::vector<uint8_t> spare_bytes(const std::vector<uint8_t>& dead) {
+    if (!strata::kernels::qsa_idx_f16()) return dead;
+    std::vector<uint8_t> out(dead.size() / 2);
+    for (size_t k = 0; k < dead.size() / 4; ++k) {
+        float v; std::memcpy(&v, dead.data() + k * 4, 4);
+        const uint16_t h = strata::kernels::f16_from_f32(v); std::memcpy(out.data() + k * 2, &h, 2);
+    }
+    return out;
+}
+void write_spare(float* pooled, const float* dead_dev, size_t row, size_t dim, size_t dead_bytes) {
+    std::vector<uint8_t> d(dead_bytes);
+    cudaMemcpy(d.data(), dead_dev, dead_bytes, cudaMemcpyDeviceToHost);
+    const std::vector<uint8_t> sp = spare_bytes(d);
+    cudaMemcpy((uint8_t*) pooled + row * dim * strata::kernels::qsa_idx_key_bytes(), sp.data(), sp.size(), cudaMemcpyHostToDevice);
+}
 int checks = 0;
 void check(bool ok, const char* label) {
     ++checks;
@@ -48,10 +69,10 @@ struct Fixture {
         const size_t per = fmt==kKvQ4 ? kv_q4_bytes_per_head((int)g.head_dim) : g.head_dim*((st.kv_int8 || st.kv_hybrid) ? 1:2);
         const size_t rows = st.max_cells*g.n_head_kv, slot_rows = st.n_slots*4*g.n_head_kv;
         sizes = {rows*per, rows*per, fmt==kKvInt8 ? rows*(g.head_dim/64)*2:0,
-                 fmt==kKvInt8 ? rows*(g.head_dim/64)*2:0, (size_t)st.idx_pooled_rows*g.idx_key_dim*4};
+                 fmt==kKvInt8 ? rows*(g.head_dim/64)*2:0, (size_t)st.idx_pooled_rows*g.idx_key_dim*strata::kernels::qsa_idx_key_bytes()};
         if (fmt==3) {
             sizes = {rows*per, rows*kv_q4_bytes_per_head((int)g.head_dim), rows*(g.head_dim/64)*2, 0,
-                     (size_t)st.idx_pooled_rows*g.idx_key_dim*4};
+                     (size_t)st.idx_pooled_rows*g.idx_key_dim*strata::kernels::qsa_idx_key_bytes()};
             alloc(st.k_q,sizes[0]); alloc(st.v_q4,sizes[1]); alloc(st.k_scale,sizes[2]);
             sources[0]=st.k_q; sources[1]=st.v_q4; sources[2]=st.k_scale;
         } else if (fmt==kKvQ4) {
@@ -92,7 +113,7 @@ struct Fixture {
     }
     void fill_after(uint8_t salt, int64_t first_dirty) {
         for (size_t i=0;i<sources.size();++i) {
-            const size_t offset = i == 4 ? size_t(first_dirty/4)*g.idx_key_dim*4
+            const size_t offset = i == 4 ? size_t(first_dirty/4)*g.idx_key_dim*strata::kernels::qsa_idx_key_bytes()
                                          : (sizes[i]/size_t(state.max_cells))*size_t((first_dirty/4)*4);
             if (sizes[i] > offset)
                 cuda_check(cudaMemset(static_cast<uint8_t*>(sources[i])+offset, salt, sizes[i]-offset));
@@ -129,8 +150,7 @@ void full_session(int fmt, int mode, int experts) {
                  {main.state.idx_dead,sizes.dead},{main.state.idx_block_pos,sizes.block_pos}})
             cuda_check(cudaMemset(p,salt,n));
         // A real indexer maintains its spare pooled row as a copy of idx_dead.
-        cuda_check(cudaMemcpy(main.state.idx_pooled+(ids.size()/4)*g.idx_key_dim,
-                              main.state.idx_dead,sizes.dead,cudaMemcpyDeviceToDevice));
+        write_spare(main.state.idx_pooled,main.state.idx_dead,ids.size()/4,g.idx_key_dim,sizes.dead);
         cuda_check(cudaDeviceSynchronize());
     };
     fill(13);
@@ -167,8 +187,7 @@ void full_session(int fmt, int mode, int experts) {
         cuda_check(cudaMemset(ss.gdn_state,91,sizes.gdn));
         ids.resize(70);
         for (size_t i=65;i<ids.size();++i) ids[i]=int32_t(i+1);
-        cuda_check(cudaMemcpy(main.state.idx_pooled+(ids.size()/4)*g.idx_key_dim,
-                              main.state.idx_dead,sizes.dead,cudaMemcpyDeviceToDevice));
+        write_spare(main.state.idx_pooled,main.state.idx_dead,ids.size()/4,g.idx_key_dim,sizes.dead);
         SavedConversation fresh,incremental;
         check(conversation_snapshot_save(fresh,view,ss,g,draft.state,err),"full capture reference after growth or rewind");
         size_t peak=0,reused=0;
@@ -188,9 +207,10 @@ void full_session(int fmt, int mode, int experts) {
         ids.resize(65);
     }
     check(conversation_checkpoint_restore(a.checkpoints[0],ss,g,err),"restore early running checkpoint");
-    std::vector<uint8_t> spare(sizes.dead);
-    cuda_check(cudaMemcpy(spare.data(),main.state.idx_pooled,sizes.dead,cudaMemcpyDeviceToHost));
-    check(spare==a.checkpoints[0].dead,"checkpoint rebuilds spare row over a later completed block");
+    const std::vector<uint8_t> want = spare_bytes(a.checkpoints[0].dead);
+    std::vector<uint8_t> spare(want.size());
+    cuda_check(cudaMemcpy(spare.data(),main.state.idx_pooled,spare.size(),cudaMemcpyDeviceToHost));
+    check(spare==want,"checkpoint rebuilds spare row over a later completed block");
     check(ss.ple_prev[0]==2 && ss.ple_prev[1]==3,"checkpoint PLE token window");
 }
 }
