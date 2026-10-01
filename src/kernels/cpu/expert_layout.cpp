@@ -1,6 +1,7 @@
 // src/kernels/cpu/expert_layout.cpp - plan v0.3 P6: the per-layer expert table.  See the header.
 #include "strata/kernels/cpu/expert_layout.hpp"
 
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #if defined(_MSC_VER)
@@ -55,6 +56,12 @@ void q2_rows_any(const uint8_t* w, size_t row_bytes, int nblocks, const ActQ* co
                  int r0, int r1) {
     if (cpu_avx512_ok()) q2_0_gguf_rows_multi(w, row_bytes, nblocks, a, nt, out, r0, r1);
     else q2_0_gguf_rows_multi_avx2(w, row_bytes, nblocks, a, nt, out, r0, r1);
+}
+
+void swiglu_any(const float* g, const float* u, float* out, int n) {
+    static const bool scalar = cpu_avx512_ok() || std::getenv("STRATA_SCALAR_SILU") != nullptr;
+    if (!scalar) { swiglu_avx2(g, u, out, n); return; }
+    for (int i = 0; i < n; ++i) out[i] = (g[i] / (1.f + std::exp(-g[i]))) * u[i];
 }
 
 void act_quant_any(const float* x, int n, ActQ& a) {

@@ -184,6 +184,8 @@ void q2_0_gguf_rows_multi_avx2(const uint8_t* w, size_t row_bytes, int nblocks, 
 void q2_0_gguf_rows_multi_avx2_legacy(const uint8_t* w, size_t row_bytes, int nblocks, const ActQ* const* a, int nt,
                                       float* const* out, int r0, int r1);
 void act_quant_q8_1_avx2(const float* x, int n, ActQ& a);
+/// out[i] = silu(g[i]) * u[i], AVX-2 (a polynomial exp, ~1 ulp from libm's).
+void swiglu_avx2(const float* g, const float* u, float* out, int n);
 
 void s2_expert_scalar(const uint8_t* blob, const float* x, float* out, bool quant_acts);
 
