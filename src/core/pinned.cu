@@ -213,8 +213,10 @@ void* reserve(uint64_t bytes, PageBacking& got, std::string& note, const std::st
     // Transparent huge pages where the kernel offers them (THP "madvise" mode needs the ask; "always" ignores it).
     // The CPU pool streams ~1.4 MB expert blobs scattered over the arena: on 4 KB pages that is ~340 TLB entries a
     // blob and a hardware-prefetcher restart every 4 KB; 2 MB pages remove both.  Asked before the arena is
-    // touched, so the first-touch faults can take huge pages.  STRATA_NO_THP=1 skips it (A/B).
-    if (std::getenv("STRATA_NO_THP") == nullptr && madvise(p, bytes, MADV_HUGEPAGE) == 0)
+    // touched, so the first-touch faults can take huge pages.  OPT-IN (STRATA_THP=1): measured on a Ryzen 9 3900X +
+    // RTX 2060 SUPER with the pruned256 Q2_0 pack it gave no decode gain (32.9 vs 32.9-33.3 tok/s) and the
+    // compaction behind the faults stretched the 15.8 GiB arena load from 21 s to 100-140 s.
+    if (std::getenv("STRATA_THP") != nullptr && madvise(p, bytes, MADV_HUGEPAGE) == 0)
         note = "MAP_HUGETLB unavailable (no hugetlb pool configured?); 4 KB pages with MADV_HUGEPAGE (transparent huge pages)";
     return p;
 #endif
