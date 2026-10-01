@@ -1,3 +1,4 @@
+#include "strata/kernels/qsa.hpp"
 #include "strata/core/conversation_snapshot.hpp"
 #include "strata/kernels/kv_q4.hpp"
 #include <cuda_runtime.h>
@@ -48,10 +49,10 @@ struct Fixture {
         const size_t per = fmt==kKvQ4 ? kv_q4_bytes_per_head((int)g.head_dim) : g.head_dim*((st.kv_int8 || st.kv_hybrid) ? 1:2);
         const size_t rows = st.max_cells*g.n_head_kv, slot_rows = st.n_slots*4*g.n_head_kv;
         sizes = {rows*per, rows*per, fmt==kKvInt8 ? rows*(g.head_dim/64)*2:0,
-                 fmt==kKvInt8 ? rows*(g.head_dim/64)*2:0, (size_t)st.idx_pooled_rows*g.idx_key_dim*4};
+                 fmt==kKvInt8 ? rows*(g.head_dim/64)*2:0, (size_t)st.idx_pooled_rows*g.idx_key_dim*strata::kernels::qsa_idx_key_bytes()};
         if (fmt==3) {
             sizes = {rows*per, rows*kv_q4_bytes_per_head((int)g.head_dim), rows*(g.head_dim/64)*2, 0,
-                     (size_t)st.idx_pooled_rows*g.idx_key_dim*4};
+                     (size_t)st.idx_pooled_rows*g.idx_key_dim*strata::kernels::qsa_idx_key_bytes()};
             alloc(st.k_q,sizes[0]); alloc(st.v_q4,sizes[1]); alloc(st.k_scale,sizes[2]);
             sources[0]=st.k_q; sources[1]=st.v_q4; sources[2]=st.k_scale;
         } else if (fmt==kKvQ4) {
@@ -92,7 +93,7 @@ struct Fixture {
     }
     void fill_after(uint8_t salt, int64_t first_dirty) {
         for (size_t i=0;i<sources.size();++i) {
-            const size_t offset = i == 4 ? size_t(first_dirty/4)*g.idx_key_dim*4
+            const size_t offset = i == 4 ? size_t(first_dirty/4)*g.idx_key_dim*strata::kernels::qsa_idx_key_bytes()
                                          : (sizes[i]/size_t(state.max_cells))*size_t((first_dirty/4)*4);
             if (sizes[i] > offset)
                 cuda_check(cudaMemset(static_cast<uint8_t*>(sources[i])+offset, salt, sizes[i]-offset));
