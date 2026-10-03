@@ -11,7 +11,11 @@ byte array (contiguous per-expert blocks), confirmed against blk.0 of the Q2_0 s
 Everything else (attention, hyper-connection mixer, SSM/GDN state, shared-expert path, output head,
 token embedding) is copied through byte-for-byte, unchanged.
 
-The second shard (the PLE n-gram table) is untouched by expert pruning and is reused as-is.
+Run it once per shard. In the ISTA-DASLab Q2_0 release the second shard is the PLE n-gram table only,
+which has no expert tensors and can be reused as-is. Size-capped splits (e.g. orcarouter's Uncensored GGUFs:
+layers 0-14 in shard 1, 14-47 in shard 2) carry expert tensors in every shard, so every shard is pruned. A
+non-first shard holds only the split.* keys and no general.architecture; its output keeps exactly the keys
+it had.
 """
 from __future__ import annotations
 
@@ -61,7 +65,7 @@ def parse_kept_experts(mask_path: Path, expert_count: int, kept_count: int) -> d
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument('--input', type=Path, required=True, help='source GGUF (shard 1)')
+    ap.add_argument('--input', type=Path, required=True, help='source GGUF shard (run once per shard)')
     ap.add_argument('--output', type=Path, required=True, help='pruned GGUF to write')
     ap.add_argument('--mask', type=Path, required=True, help='rco-allocation.txt with the retained-index mask')
     ap.add_argument('--expert-count-key', default='qwen4exp.expert_count')
@@ -80,7 +84,8 @@ def main() -> int:
 
     print(f'* opening: {args.input}')
     reader = gguf.GGUFReader(args.input, 'r')
-    arch = reader.get_field(gguf.Keys.General.ARCHITECTURE).contents()
+    arch_field = reader.get_field(gguf.Keys.General.ARCHITECTURE)
+    arch = arch_field.contents() if arch_field is not None else None
 
     def kept_for(name: str) -> list[int] | None:
         m = EXPERT_TENSOR_RE.match(name)
@@ -92,7 +97,11 @@ def main() -> int:
         return kept_per_layer[layer]
 
     print(f'* writing: {args.output}')
-    writer = gguf.GGUFWriter(args.output, arch=arch, endianess=reader.endianess)
+    writer = gguf.GGUFWriter(args.output, arch=arch or '', endianess=reader.endianess)
+    if arch is None:
+        # A non-first split shard: GGUFWriter always adds general.architecture; drop it so the output
+        # carries exactly the source's keys (split.* only).
+        writer.kv_data[0].pop(gguf.Keys.General.ARCHITECTURE, None)
 
     alignment = reader.get_field(gguf.Keys.General.ALIGNMENT)
     if alignment is not None:
