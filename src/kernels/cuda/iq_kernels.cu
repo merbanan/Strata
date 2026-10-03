@@ -310,6 +310,11 @@ template<> struct Fmt<22> { static constexpr int qk = 256, ipb = 8, step = 2;
     __device__ static float dot(const void* v, const block_q8_1* y, int kbx, int iqs) { return vec_dot_iq2_s_q8_1(v, y, kbx, iqs); } };
 template<> struct Fmt<29> { static constexpr int qk = 256, ipb = 8, step = 1;
     __device__ static float dot(const void* v, const block_q8_1* y, int kbx, int iqs) { return vec_dot_iq1_m_q8_1(v, y, kbx, iqs); } };
+template<int TY> struct Split;
+template<> struct Split<11>;
+__device__ float q3_k_dot(const void* v, const block_q8_1* y, int kbx, int iqs);
+template<> struct Fmt<11> { static constexpr int qk = 256, ipb = 16, step = 1;
+    __device__ static float dot(const void* v, const block_q8_1* y, int kbx, int iqs) { return q3_k_dot(v, y, kbx, iqs); } };
 template<> struct Fmt<42> { static constexpr int qk = 64, ipb = 2, step = 1;
     __device__ static float dot(const void* v, const block_q8_1* y, int kbx, int iqs) { return vec_dot_q2_0_q8_1(v, y, kbx, iqs); } };
 
@@ -625,6 +630,44 @@ template<> struct Split<42> {   // Q2_0
         return r.d2 * d8 * sumi;
     }
 };
+
+template<> struct Split<11> {   // Q3_K: llama.cpp's vec_dot_q3_K_q8_1 (QI3_K 16, VDR 1), the uncensored Q3_K_L's experts
+    struct W { int vl, vh, sc[4]; float d3; };
+    __device__ static W load(const void* __restrict__ vbq, int kbx, int iqs) {
+        const block_q3_K* bq3 = (const block_q3_K*) vbq + kbx;
+        const int bq8_offset = 4 * (iqs / 8);
+        const int scale_offset = iqs - iqs % 8 + (iqs % 8) / 4;
+        W r;
+        r.vl = get_int_b2(bq3->qs, iqs);
+        r.vh = ~get_int_b2(bq3->hmask, iqs % 8) >> bq8_offset;
+#pragma unroll
+        for (int i = 0; i < 4; ++i) {
+            const int isc = scale_offset + 2 * i;
+            const int sc_low = (bq3->scales[isc % 8] >> (4 * (isc / 8))) & 0xf;
+            const int sc_high = ((bq3->scales[8 + isc % 4] >> (2 * (isc / 4))) & 3) << 4;
+            r.sc[i] = (sc_low | sc_high) - 32;
+        }
+        r.d3 = __half2float(bq3->d);
+        return r;
+    }
+    __device__ static float apply(const W& r, const block_q8_1* __restrict__ bq8_1, int iqs) {
+        const int bq8_offset = 4 * (iqs / 8);
+        float sumf = 0.0f;
+#pragma unroll
+        for (int i = 0; i < 4; ++i) {
+            const int vil = (r.vl >> (2 * i)) & 0x03030303;
+            const int vih = ((r.vh >> i) << 2) & 0x04040404;
+            const int vi = __vsubss4(vil, vih);
+            const int u = get_int_b4(bq8_1[bq8_offset + i].qs, iqs % 8);
+            sumf += __low2float(bq8_1[bq8_offset + i].ds) * (ggml_cuda_dp4a(vi, u, 0) * r.sc[i]);
+        }
+        return r.d3 * sumf;
+    }
+};
+
+__device__ float q3_k_dot(const void* v, const block_q8_1* y, int kbx, int iqs) {
+    return Split<11>::apply(Split<11>::load(v, kbx, iqs), y, iqs);
+}
 
 // One row against the n <= NC activations x + off[0..n) (n >= 1, warp-uniform; offsets in q8_1 blocks, 32-bit to
 // spare registers), the whole warp.  Per activation this is row_dot: the same calls k, lane-strided the same way,
@@ -1157,6 +1200,7 @@ void native_expert_grouped(const NativeExpertLayout& L, const unsigned long long
         case 22: launch_gu<22>(ggu, s, grp_ptr, grp_start, n_groups, ent_tok, X, L, gate, up); break;
         case 23: launch_gu<23>(ggu, s, grp_ptr, grp_start, n_groups, ent_tok, X, L, gate, up); break;
         case 29: launch_gu<29>(ggu, s, grp_ptr, grp_start, n_groups, ent_tok, X, L, gate, up); break;
+        case 11: launch_gu<11>(ggu, s, grp_ptr, grp_start, n_groups, ent_tok, X, L, gate, up); break;
         case 42: launch_gu<42>(ggu, s, grp_ptr, grp_start, n_groups, ent_tok, X, L, gate, up); break;
         default: std::fprintf(stderr, "native_expert_grouped: gate/up type %d\n", L.gu_type); std::exit(1);
     }
@@ -1168,6 +1212,7 @@ void native_expert_grouped(const NativeExpertLayout& L, const unsigned long long
     switch (L.d_type) {
         case 20: launch_down<20>(gd, s, grp_ptr, grp_start, n_groups, ent_dst, hq, L, out); break;
         case 23: launch_down<23>(gd, s, grp_ptr, grp_start, n_groups, ent_dst, hq, L, out); break;
+        case 11: launch_down<11>(gd, s, grp_ptr, grp_start, n_groups, ent_dst, hq, L, out); break;
         case 42: launch_down<42>(gd, s, grp_ptr, grp_start, n_groups, ent_dst, hq, L, out); break;
         default: std::fprintf(stderr, "native_expert_grouped: down type %d\n", L.d_type); std::exit(1);
     }
