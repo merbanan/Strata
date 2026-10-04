@@ -4294,6 +4294,49 @@ int main(int argc, char** argv) {
         // the prompt path's own buffers (no loan) are not priced into them: with the whole arena pinned (#253) a
         // `--prefill auto` split could stop at start with "device buffers for a chunk of 2048 tokens do not fit".  A
         // chunk that does not fit is tried again one size smaller, down to 512 tokens (a smaller chunk only reads slower).
+        // STRATA_MTP_SPLIT=1: the drafter attends to the last --mtp-window cells only, so the part of a long prompt
+        // before them needs no draft layer.  For that part the prompt path also borrows the draft layer's expert
+        // buffer (675 MiB with Q2_0) - a bigger chunk, so every streamed expert crosses PCIe fewer times - and the
+        // drafter reads its experts back (MtpDrafter::restore_experts) before the window's part is read with it.
+        // One GPU only.  `split_chunk`: the chunk for that part (0: none bigger fits).
+        int64_t split_chunk = 0;
+        bool mtp_lent = false;   // the drafter's expert buffer is the prompt path's right now
+        static const bool mtp_split_on = [] { const char* v = std::getenv("STRATA_MTP_SPLIT"); return v && v[0] == '1'; }();
+        const uint64_t mtp_lend_bytes = mtp.experts_bytes() > (64ull << 20) ? mtp.experts_bytes() - (64ull << 20) : 0;
+        // the first slot a split loan of `c` tokens takes: what the slots must hold beside the drafter's buffer (less
+        // 64 MiB: that region takes whole buffers); -1 when the cache cannot lend it within the auto rules
+        auto split_first_for = [&](int64_t c, bool cap) -> int32_t {
+            if (pf_parts.size() != 1 || pf_parts[0].first < 0) return -1;
+            const PfPart& p = pf_parts[0];
+            const uint64_t need = strata::prefill::Prefill::bytes_needed(g, *p.ses, c);
+            const uint64_t own = need > mtp_lend_bytes ? need - mtp_lend_bytes : 0;
+            strata::core::ExpertCache& xc = *p.cache;
+            int64_t k = 0;
+            if (xc.slot_offsets() != nullptr) {
+                while (k < xc.slots() && (uint64_t) (xc.bytes() - (int64_t) xc.slot_offsets()[xc.slots() - k]) < own) ++k;
+            } else {
+                const int64_t blob = (int64_t) strata::kernels::cpu::expert_layout().max_blob;
+                k = (int64_t) ((own + (uint64_t) blob - 1) / (uint64_t) blob);
+            }
+            if (k <= 0 || k + 128 > xc.slots() || (cap && k * 100 > kAutoLendPct * xc.slots())) return -1;
+            return (int32_t) (xc.slots() - k);
+        };
+        if (mtp_split_on && !multi_gpu && mtp_lend_bytes > 0 && pf_parts.size() == 1 && pf_parts[0].first >= 0) {
+            // the auto sizes (above 8192 only up to --prefill auto:N and the context, #282), and 5120 between 4096 and 6144
+            static constexpr int64_t kSplitChunks[] = {32768, 16384, 8192, 6144, 5120};
+            for (const int64_t c : kSplitChunks) {
+                if (c > 8192 && (!o.prefill_auto || c > o.prefill_auto_max || c > o.max_context)) continue;
+                if (c > o.prefill_chunk && split_first_for(c, o.prefill_auto) >= 0) { split_chunk = c; break; }
+            }
+            if (split_chunk > 0)
+                std::fprintf(stderr, "strata serve: STRATA_MTP_SPLIT: a prompt's part before the drafter's last %lld "
+                                     "cells reads in %lld-token chunks (the draft layer's %.2f GiB lent), the rest in "
+                                     "%lld\n", (long long) mtp.window(), (long long) split_chunk,
+                             (double) mtp.experts_bytes() / 1073741824.0, (long long) o.prefill_chunk);
+            else
+                std::fprintf(stderr, "strata serve: STRATA_MTP_SPLIT: no chunk above %lld fits with the draft layer's "
+                                     "buffer: off\n", (long long) o.prefill_chunk);
+        }
         auto init_prompt_paths = [&]() -> int {   // 0: ready; 1: failed (err set); 2: failed with "do not fit"
             for (size_t i = 0; i < stages.size(); ++i) {
                 GpuStage& st = *stages[i];
@@ -4313,6 +4356,20 @@ int main(int argc, char** argv) {
                 }
             }
             if (multi_gpu) sp.set_stage(0, split_at[0], &stages[0]->sp);
+            if (split_chunk > 0) {   // sized for the split chunk, then laid out for the usual one
+                const int32_t sf = split_first_for(split_chunk, o.prefill_auto);
+                if (sf >= 0 && sp.init(wt, g, ss, srcp, &xcache, host_res.data(), split_chunk, main_cs, err,
+                                       xcache.device_slot(sf), part_bytes(pf_parts[0], sf), mtp.experts_device(),
+                                       mtp.experts_bytes()) &&
+                    sp.relayout(o.prefill_chunk, borrow, borrow_bytes, err) && mtp.restore_experts(err))
+                    return 0;
+                std::fprintf(stderr, "strata serve: STRATA_MTP_SPLIT: %s: off\n", err.c_str());
+                split_chunk = 0;
+                sp.reset();
+                (void) cudaGetLastError();
+                err.clear();
+                if (!mtp.restore_experts(err)) return 1;
+            }
             if (!sp.init(wt, g, ss, srcp, &xcache, host_res.data(), o.prefill_chunk, main_cs, err, borrow, borrow_bytes))
                 return err.find("do not fit") != std::string::npos ? 2 : 1;
             return 0;
@@ -4687,8 +4744,11 @@ int main(int argc, char** argv) {
             std::vector<int32_t> nxt((size_t) T);
             for (int64_t t = 0; t < T; ++t) nxt[(size_t) t] = (int32_t) cur[(size_t) (p0 + t + 1)];
             // E-9: batched through the prompt path when it can (one GPU: a layer split's drafter is on the last stage)
-            const bool batched = !multi_gpu && sp.draft_kv(mtp, R_rows, nxt.data(), T, p0, e);
-            if (!e.empty() || (!batched && !mtp.prefill(R_rows, nxt.data(), T, p0, e))) return false;
+            // STRATA_MTP_SPLIT: while the drafter's buffer is lent the chunk's cells all lie before its window, which its
+            // prefill skips anyway
+            const bool draft = !mtp_lent;
+            const bool batched = draft && !multi_gpu && sp.draft_kv(mtp, R_rows, nxt.data(), T, p0, e);
+            if (!e.empty() || (draft && !batched && !mtp.prefill(R_rows, nxt.data(), T, p0, e))) return false;
             if (std::getenv("STRATA_SNAPSHOT_VERIFY") != nullptr)
                 std::fprintf(stderr, "strata serve: DRAFT_PREFILL path=%s mode=%d cells=%lld\n",
                              batched ? "batched" : "token", mtp.kv_state().kv_mode, (long long) T);
@@ -5563,6 +5623,56 @@ int main(int argc, char** argv) {
                 }
                 return true;
             };
+            // STRATA_MTP_SPLIT: the part before the drafter's window in split_chunk-token chunks, its buffers in the
+            // cache's top slots and then the drafter's expert buffer; split_done hands both back
+            auto lend_split = [&](int64_t tokens, std::string& e) -> bool {
+                PfPart& p = pf_parts[0];
+                const int64_t want = request_chunk(tokens, split_chunk);
+                const int32_t first = split_first_for(want, false);
+                if (want <= 0 || first < 0) { e = "STRATA_MTP_SPLIT: no loan for the segment"; return false; }
+                if (!p.lent.empty() && !refill_one(p, e)) return false;
+                if (!p.sp->relayout(want, xcache.device_slot(first), part_bytes(p, first), e, mtp.experts_device(),
+                                    mtp.experts_bytes()))
+                    return false;
+                p.first_now = first;
+                mtp_lent = true;
+                for (int64_t l = p.lb; l < p.le; ++l)
+                    for (int64_t ex = 0; ex < g.n_expert; ++ex) {
+                        const size_t i = (size_t) (l * g.n_expert + ex);
+                        if (host_res[i] >= first) {
+                            p.lent.emplace_back((int32_t) i, host_res[i]);
+                            host_res[i] = strata::core::kNotResident;
+                        }
+                    }
+                p.lent_chunk = want;
+                res_upload();
+                if (trace) {
+                    std::fprintf(stderr, "strata trace: split loan: %zu slots and the drafter's experts for %lld-token "
+                                         "chunks\n", p.lent.size(), (long long) want);
+                    std::fflush(stderr);
+                }
+                return true;
+            };
+            auto split_done = [&](std::string& e) -> bool {
+                if (!mtp_lent) return true;
+                PfPart& p = pf_parts[0];
+                const auto t0 = Clock::now();
+                // the usual layout before anything else runs (relayout waits for the prompt path's streams), then the
+                // slots and the drafter's experts back
+                const int32_t first = std::max<int32_t>(p.first, (int32_t) (p.cache->slots() - part_slots(p, o.prefill_chunk)));
+                if (!p.sp->relayout(o.prefill_chunk, p.cache->device_slot(first), part_bytes(p, first), e)) return false;
+                p.first_now = first;
+                if (!refill_one(p, e)) return false;
+                res_upload();
+                mtp_lent = false;
+                if (!mtp.restore_experts(e)) return false;
+                if (trace) {
+                    std::fprintf(stderr, "strata trace: split loan back in %.1f ms\n",
+                                 std::chrono::duration<double, std::milli>(Clock::now() - t0).count());
+                    std::fflush(stderr);
+                }
+                return true;
+            };
             apply_pending(true);
             // per-request sampling for the verify window's head (greedy when temperature is absent)
             strata::kernels::SamplerParams req_sp;
@@ -5610,15 +5720,29 @@ int main(int argc, char** argv) {
                         break;
                     }
             int64_t at = read_from;
-            for (const int64_t to : {reread_to, root_at, turn_at, n - 1}) {
+            // STRATA_MTP_SPLIT: the cells before the drafter's window (MtpDrafter::prefill's first_needed) are a part of
+            // their own, read with the drafter's buffer lent - when they hold at least one split chunk
+            int64_t mtp_split_at = -1;
+            if (split_chunk > 0 && reread_to <= 0) {
+                const int64_t fn = n - mtp.window() - 64;
+                if (fn - read_from >= split_chunk) mtp_split_at = fn;
+            }
+            std::vector<int64_t> parts_to = {reread_to, root_at, mtp_split_at, turn_at, n - 1};
+            std::sort(parts_to.begin(), parts_to.end());
+            for (const int64_t to : parts_to) {
                 if (to <= at) continue;
                 err.clear();
                 const bool win = windows_ok(at, to);
+                const bool split_part = to == mtp_split_at && !win;
+                if (!split_part && !split_done(err)) {
+                    std::printf("ERR giving the draft layer its experts back failed: %s\n", err.c_str());
+                    return 1;
+                }
                 if (win && !refill(err)) {
                     std::printf("ERR refilling a lent slot failed: %s\n", err.c_str());
                     return 1;
                 }
-                if (!win && !lend(to - at, err)) {
+                if (!win && !(split_part ? lend_split(to - at, err) : lend(to - at, err))) {
                     std::printf("ERR lending the prompt path its slots failed: %s\n", err.c_str());
                     return 1;
                 }
@@ -5651,6 +5775,10 @@ int main(int argc, char** argv) {
                     std::printf("ERR saving a conversation checkpoint failed\n");
                     return 1;
                 }
+            }
+            if (!split_done(err)) {   // a request stopped inside the split part: the drafter's experts back first
+                std::printf("ERR giving the draft layer its experts back failed: %s\n", err.c_str());
+                return 1;
             }
             if (!refill(err)) {
                 std::printf("ERR refilling a lent slot failed: %s\n", err.c_str());

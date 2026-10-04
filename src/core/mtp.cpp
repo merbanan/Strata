@@ -141,6 +141,25 @@ const void* MtpDrafter::q8(const char* name) const {
     return nullptr;
 }
 
+bool MtpDrafter::restore_experts(std::string& err) {
+    const OnDevice on_device(device_);
+    FILE* f = std::fopen(experts_path_.c_str(), "rb");
+    if (f == nullptr) { err = "mtp: cannot open " + experts_path_; return false; }
+    std::vector<uint8_t> chunk(64u << 20);
+    bool ok = true;
+    for (uint64_t off = 0; ok && off < experts_bytes_;) {
+        const uint64_t n = std::min<uint64_t>(chunk.size(), experts_bytes_ - off);
+        if (std::fread(chunk.data(), 1, (size_t) n, f) != (size_t) n) { err = "mtp: experts.bin is truncated"; ok = false; break; }
+        if (cudaMemcpy(experts_ + off, chunk.data(), n, cudaMemcpyHostToDevice) != cudaSuccess) {
+            err = "mtp: uploading the experts failed";
+            ok = false;
+        }
+        off += n;
+    }
+    std::fclose(f);
+    return ok;
+}
+
 bool MtpDrafter::load(const std::string& rt_dir, const ModelGeometry& g, SessionState& ss, int max_t, std::string& err,
                       int64_t window) {
     cudaGetDevice(&device_);   // a layer split's last stage on another GPU: the drafter lives there
@@ -191,13 +210,11 @@ bool MtpDrafter::load(const std::string& rt_dir, const ModelGeometry& g, Session
             ~Closer() { if (f != nullptr) std::fclose(f); }
         } closer{f};
         if (cudaMalloc((void**) &experts_, bytes) != cudaSuccess) { err = "mtp: the 512 experts do not fit in VRAM"; return false; }
-        std::vector<uint8_t> chunk(64u << 20);
-        for (uint64_t off = 0; off < bytes;) {
-            const uint64_t n = std::min<uint64_t>(chunk.size(), bytes - off);
-            if (std::fread(chunk.data(), 1, (size_t) n, f) != (size_t) n) { err = "mtp: experts.bin is truncated"; return false; }
-            cudaMemcpy(experts_ + off, chunk.data(), n, cudaMemcpyHostToDevice);
-            off += n;
-        }
+        experts_bytes_ = bytes;
+        experts_path_ = rt_dir + "/experts.bin";
+        std::fclose(f);
+        closer.f = nullptr;
+        if (!restore_experts(err)) return false;
         vram_ += bytes;
     }
     const char* required[] = {"fc_embedding.weight", "fc_hidden.weight", "self_attn.q_proj.weight", "self_attn.k_proj.weight",

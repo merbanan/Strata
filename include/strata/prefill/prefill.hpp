@@ -64,11 +64,15 @@ public:
     /// lent for the prompt and refilled after it); null = allocate normally.
     bool init(const core::WeightTable& wt, const core::ModelGeometry& g, core::SessionState& ss,
               core::ExpertSource* src, const core::ExpertCache* cache, const int32_t* host_res, int64_t chunk,
-              void* stream, std::string& err, void* borrow = nullptr, uint64_t borrow_bytes = 0);
+              void* stream, std::string& err, void* borrow = nullptr, uint64_t borrow_bytes = 0,
+              void* borrow2 = nullptr, uint64_t borrow2_bytes = 0);
 
     /// With borrowed buffers: lay them out again for chunks of `chunk` tokens (at most `init`'s) in `borrow` - a
     /// request lends only the slots its prompt needs.  The stream must be idle (between prompts).
-    bool relayout(int64_t chunk, void* borrow, uint64_t borrow_bytes, std::string& err);
+    /// `borrow2`: a second region, taken buffer by buffer once `borrow` is full (serve's STRATA_MTP_SPLIT lends the
+    /// draft layer's expert buffer this way for the part of a long prompt before the drafter's window).
+    bool relayout(int64_t chunk, void* borrow, uint64_t borrow_bytes, std::string& err, void* borrow2 = nullptr,
+                  uint64_t borrow2_bytes = 0);
     int64_t chunk() const;
 
     /// The share of the streamed experts' bytes DMA-able straight from pinned RAM (1 = all).  Sizes the streamed

@@ -49,6 +49,14 @@ public:
     /// At most this many drafts per round (below max_t - 1): a window longer than the MTP's comes from elsewhere.
     void set_max_drafts(int k) { max_drafts_ = k; }
     uint64_t vram_bytes() const { return vram_; }
+    /// The 512 routed experts' device buffer.  Between rounds it is the drafter's alone; a prompt's cells before
+    /// the attention window never reach it, so the prompt path may borrow it for that part of a long prompt
+    /// (serve's STRATA_MTP_SPLIT) and hand it back with restore_experts() before the drafter runs again.
+    uint8_t* experts_device() const { return experts_; }
+    uint64_t experts_bytes() const { return experts_bytes_; }
+    int64_t window() const { return window_; }
+    /// Reads the routed experts from the runtime's experts.bin into their buffer again (after a borrow).
+    bool restore_experts(std::string& err);
     /// The draft layer's K/V state (read-only: --serve's STRATA_STATE_HASH check hashes it)
     const QsaState& kv_state() const { return st_; }
     /// KV streaming: refill the ring of the drafter's window from its host copy for a sequence that continues at
@@ -143,6 +151,8 @@ private:
     std::vector<Tensor> tensors_;
     uint8_t* dense_ = nullptr;
     uint8_t* experts_ = nullptr;
+    uint64_t experts_bytes_ = 0;
+    std::string experts_path_;   ///< rt_dir/experts.bin, for restore_experts()
     void* state_arena_ = nullptr;
     QsaState st_;
     void* arena_ = nullptr;
