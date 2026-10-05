@@ -3180,11 +3180,18 @@ int main(int argc, char** argv) {
         // #286: with a RAM budget the hottest experts live in it, and the rest are read from the drive unbuffered
         // when the file cache could not keep them beside the budget anyway (a 32 GB PC) - the mapped reads' page
         // faults are small requests on the critical path, and their pages take the RAM the budget was sized for
-        if (o.resident_budget > 0 || std::getenv("STRATA_UNBUFFERED_LOAD") != nullptr) {
+        // #773: without a RAM budget there is no RAM copy and the file cache IS the expert tier (measured on a
+        // 32 GB, 2 x 16 GB rig: forcing unbuffered reads there re-read 163-629 GB from the drive and halved the
+        // speed), so STRATA_UNBUFFERED_LOAD=1 is not honoured in that mode
+        if (o.resident_budget > 0) {
             std::string why;
             const bool ub = src.set_unbuffered(o.resident_budget, why);
             std::fprintf(stderr, "strata generate: the file tier reads %s (%s)\n",
                          ub ? "unbuffered" : "through the file cache", why.c_str());
+        } else if (const char* env = std::getenv("STRATA_UNBUFFERED_LOAD"); env != nullptr && env[0] != '\0' &&
+                   env[0] != '0') {
+            std::fprintf(stderr, "strata generate: the file tier reads through the file cache (STRATA_UNBUFFERED_LOAD=%s "
+                                 "ignored: without --resident-budget-gib the file cache holds the experts)\n", env);
         }
         srcp = &src;
     } else {
@@ -4636,9 +4643,9 @@ int main(int argc, char** argv) {
         }
         // #577: the unbuffered choice above was made before the RAM copy existed, from the budget asked for; now the
         // copy is built, decide again from the RAM it really holds and the expert bytes outside it (on a 96 GB PC
-        // the file cache keeps those, and every refill after a prompt read the drive instead).  Windows only: the
-        // unbuffered reads exist there alone
-#if defined(_WIN32)
+        // the file cache keeps those, and every refill after a prompt read the drive instead).  Windows and Linux: the
+        // unbuffered reads exist there
+#if defined(_WIN32) || defined(__linux__)
         if (o.mmap_experts && o.resident_budget > 0) {
             std::string why;
             const bool was = src.unbuffered();
