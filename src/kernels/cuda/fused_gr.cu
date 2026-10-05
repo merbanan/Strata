@@ -1081,6 +1081,264 @@ int g_gr_fast = -1;
 #endif
 void fused_gr_set_fast(int on) { g_gr_fast = on; }
 
+namespace {
+// 8 bf16 packed in a uint4, unpacked to two float4 (the X read reuses a row's chunk across tokens)
+struct Bf16x8 { float4 a, b; };
+__device__ __forceinline__ Bf16x8 unpack8(const uint4 w) {
+    return {
+        make_float4(__uint_as_float(w.x << 16), __uint_as_float(w.x & 0xffff0000u),
+                    __uint_as_float(w.y << 16), __uint_as_float(w.y & 0xffff0000u)),
+        make_float4(__uint_as_float(w.z << 16), __uint_as_float(w.z & 0xffff0000u),
+                    __uint_as_float(w.w << 16), __uint_as_float(w.w & 0xffff0000u))
+    };
+}
+__device__ __forceinline__ float dot8u(const Bf16x8& w, const float4 x0, const float4 x1) {
+    float acc = 0.0f;
+    acc = fmaf(w.a.x, x0.x, acc);
+    acc = fmaf(w.a.y, x0.y, acc);
+    acc = fmaf(w.a.z, x0.z, acc);
+    acc = fmaf(w.a.w, x0.w, acc);
+    acc = fmaf(w.b.x, x1.x, acc);
+    acc = fmaf(w.b.y, x1.y, acc);
+    acc = fmaf(w.b.z, x1.z, acc);
+    acc = fmaf(w.b.w, x1.w, acc);
+    return acc;
+}
+}  // namespace
+
+namespace {
+// ================================ hc read X (opt-in: STRATA_HC_X=1) - bandwidth-first, three kernels ==============
+// norm: grid (T, 4 streams, 10 slices of 256): R' (the pending write folded in), p = R' * w_norm unscaled, and the
+//       slice's sum of squares, to a per-device scratch.
+// down: grid (11 row groups of 32, 4 streams, 2 column halves) = 88 blocks, one wave on any card with >= 30 SMs: rs
+//       from the ten slice sums, the half-stream slice of p staged in two float4 planes, four rows per warp with the
+//       next row's five 16-byte weight loads per lane in flight while the current one is reduced; rs * dot to a
+//       partial per (token, half, stream, row): rows 0-319 w_down, 320-323 w_inject.
+// up:   80 blocks of 2 x (16 columns x 4 streams), 8 lanes per row, four rows per thread pipelined the same way; the
+//       prologue sums the eight partials into lo (block 0 also writes lo and inject_out).
+// Another summation order than the default read (not bitwise), hence opt-in.
+constexpr int XR = LR + HC;                 // 324 partial rows
+constexpr int XRG = 32;                     // rows per down block (4 per warp)
+constexpr int XNRG = (XR + XRG - 1) / XRG;  // 11
+constexpr int XH = N / 2;                   // 1280 columns per half
+constexpr int XQ = XH / 8 / 32;             // 5 uint4 per lane per row
+constexpr int XSL = 10;                     // norm slices per stream (256 elements each)
+constexpr int XU = 2;                       // up units (16 columns) per block
+// scratch per device: p [8][D], ss [8][HC][XSL], part [8][2][HC][XR]
+float* g_x_scratch[64] = {};
+constexpr size_t XP_OFF = 0, XSS_OFF = (size_t) kFusedGrMaxT * D, XPART_OFF = XSS_OFF + (size_t) kFusedGrMaxT * HC * XSL;
+constexpr size_t X_SCRATCH = XPART_OFF + (size_t) kFusedGrMaxT * 2 * HC * XR;
+
+__global__ void __launch_bounds__(64) gr_norm_x_kernel(GrMulti m, float* __restrict__ xs) {
+    const int k = blockIdx.x, c = blockIdx.y, sl = blockIdx.z, t = threadIdx.x;
+    const FusedGrArgs& a = m.a[k];
+    const int e = sl * 256 + t * 4, i = c * N + e;
+    float4 r = *reinterpret_cast<const float4*>(a.R + i);
+    if (a.apply) {
+        const float gw = 2.0f * sigmoidf_(a.inj_prev[c] / (float) HC);
+        const float4 b = *reinterpret_cast<const float4*>(a.bo_prev + e);
+        r.x = fmaf(b.x, gw, r.x); r.y = fmaf(b.y, gw, r.y); r.z = fmaf(b.z, gw, r.z); r.w = fmaf(b.w, gw, r.w);
+    }
+    const float4 g = *reinterpret_cast<const float4*>(a.w_norm + i);
+    *reinterpret_cast<float4*>(xs + XP_OFF + (size_t) k * D + i) = make_float4(r.x * g.x, r.y * g.y, r.z * g.z, r.w * g.w);
+    float s = warp_sum(r.x * r.x + r.y * r.y + r.z * r.z + r.w * r.w);
+    __shared__ float w2[2];
+    if ((t & 31) == 0) w2[t >> 5] = s;
+    __syncthreads();
+    if (t == 0) xs[XSS_OFF + ((size_t) k * HC + c) * XSL + sl] = w2[0] + w2[1];
+}
+
+// int8 codes (4 per word) -> floats without I2F (quarter rate on Turing): (b ^ 0x80) as the low mantissa byte of
+// 2^23 is 2^23 + 128 + b exactly; one byte_perm and one add per value.
+__device__ __forceinline__ float4 x_i8x4(uint32_t v) {
+    const uint32_t u = v ^ 0x80808080u;
+    constexpr float bias = 8388736.0f;   // 2^23 + 128
+    return make_float4(__uint_as_float(__byte_perm(u, 0x4B000000u, 0x7440)) - bias,
+                       __uint_as_float(__byte_perm(u, 0x4B000000u, 0x7441)) - bias,
+                       __uint_as_float(__byte_perm(u, 0x4B000000u, 0x7442)) - bias,
+                       __uint_as_float(__byte_perm(u, 0x4B000000u, 0x7443)) - bias);
+}
+// a weight chunk as ldw packs it (bf16 words, or int8 codes in .x/.y and the block scale in .z) -> 8 floats; for Q8
+// the codes unscaled and the scale in `s` (applied once per chunk dot)
+__device__ __forceinline__ Bf16x8 x_unpack(const uint4 w, bool q8, float& s) {
+    if (!q8) { s = 1.0f; return unpack8(w); }
+    s = __uint_as_float(w.z);
+    return {x_i8x4(w.x), x_i8x4(w.y)};
+}
+// two rows' dots against the same staged activations: every shared-memory load feeds both rows
+template <int T, int Q>
+__device__ __forceinline__ void x_dot_pair(const uint4 (&wa)[Q], const uint4 (&wb)[Q], bool qa, bool qb,
+                                           const float4* act, int act_tok_stride, int act_plane, int j0, int jstep,
+                                           float (&acc_a)[T], float (&acc_b)[T]) {
+#pragma unroll
+    for (int k = 0; k < T; ++k) acc_a[k] = acc_b[k] = 0.0f;
+#pragma unroll
+    for (int q = 0; q < Q; ++q) {
+        const int j = j0 + jstep * q;
+        float sa, sb;
+        const Bf16x8 a = x_unpack(wa[q], qa, sa);
+        const Bf16x8 b = x_unpack(wb[q], qb, sb);
+#pragma unroll
+        for (int k = 0; k < T; ++k) {
+            const float4 x0 = act[k * act_tok_stride + j], x1 = act[k * act_tok_stride + act_plane + j];
+            const float da = dot8u(a, x0, x1), db = dot8u(b, x0, x1);
+            acc_a[k] = qa ? fmaf(sa, da, acc_a[k]) : acc_a[k] + da;
+            acc_b[k] = qb ? fmaf(sb, db, acc_b[k]) : acc_b[k] + db;
+        }
+    }
+}
+
+template <int T>
+__global__ void __launch_bounds__(THREADS, 3) gr_down_x_kernel(GrMulti m, float* __restrict__ xs) {
+    __shared__ __align__(16) float4 pl[T][2][XH / 8];   // plane 0: floats 0-3 of chunk j, plane 1: floats 4-7
+    __shared__ float s_rs[T];
+    const int t = threadIdx.x, lane = t & 31, warp = t >> 5;
+    const int rg = blockIdx.x, c = blockIdx.y, half = blockIdx.z;
+    const FusedGrArgs& a0 = m.a[0];
+    constexpr int RPW = XRG / WARPS;                     // 4 rows per warp
+    auto row_of = [&](int r) { return rg * XRG + warp + WARPS * r; };
+    auto active = [&](int row) { return row < LR || (row < XR && a0.w_inject != nullptr); };
+    // w_down may be Q8 (STRATA_HC_Q8); the inject rows are always bf16
+    auto q8_row = [&](int row) { return row < LR && a0.s_down != nullptr; };
+    auto load_row = [&](int row, uint4 (&w)[XQ]) {
+        const uint16_t* mat = row < LR ? a0.w_down : a0.w_inject;
+        const float* sq = row < LR ? a0.s_down : nullptr;
+        const size_t e0 = (size_t) (row < LR ? row : row - LR) * D + (size_t) c * N + (size_t) half * XH;
+#pragma unroll
+        for (int q = 0; q < XQ; ++q) w[q] = ldw(mat, sq, e0 + (size_t) (lane + 32 * q) * 8);
+    };
+    // rows in pairs (r, r + 1): the pair's ten 16-byte loads per lane, the next pair's in flight while one is reduced
+    uint4 ca[XQ], cb[XQ];
+    if (active(row_of(0))) load_row(row_of(0), ca);
+    if (active(row_of(1))) load_row(row_of(1), cb);
+    // stage p (this half of stream c) and rs while the first row is in flight
+    for (int i = t; i < T * (XH / 4); i += THREADS) {
+        const int k = i / (XH / 4), f4 = i - k * (XH / 4);
+        pl[k][f4 & 1][f4 >> 1] =
+            *reinterpret_cast<const float4*>(xs + XP_OFF + (size_t) k * D + (size_t) c * N + (size_t) half * XH + f4 * 4);
+    }
+    if (t < T) {
+        float s = 0.0f;
+#pragma unroll
+        for (int sl = 0; sl < XSL; ++sl) s += xs[XSS_OFF + ((size_t) t * HC + c) * XSL + sl];
+        s_rs[t] = rsqrtf(s / (float) N + m.a[t].eps);
+        if (rg == 0 && half == 0) m.a[t].rs[c] = s_rs[t];
+    }
+    __syncthreads();
+    float* part = xs + XPART_OFF;
+    const float4* act = &pl[0][0][0];
+#pragma unroll
+    for (int r = 0; r < RPW; r += 2) {
+        if (r > 0) {
+            if (active(row_of(r))) load_row(row_of(r), ca);
+            if (active(row_of(r + 1))) load_row(row_of(r + 1), cb);
+        }
+        const int row_a = row_of(r), row_b = row_of(r + 1);
+        if (active(row_a)) {                              // warp-uniform; row_b active implies row_a active
+            float aa[T], ab[T];
+            x_dot_pair<T, XQ>(ca, cb, q8_row(row_a), q8_row(row_b), act, XH / 4, XH / 8, lane, 32, aa, ab);
+#pragma unroll
+            for (int k = 0; k < T; ++k) {
+                const float va = warp_sum(aa[k]);
+                const float vb = warp_sum(ab[k]);
+                if (lane == k) part[(((size_t) k * 2 + half) * HC + c) * XR + row_a] = s_rs[k] * va;
+                if (lane == k && active(row_b)) part[(((size_t) k * 2 + half) * HC + c) * XR + row_b] = s_rs[k] * vb;
+            }
+        }
+    }
+}
+
+template <int T>
+__global__ void __launch_bounds__(THREADS, 3) gr_up_x_kernel(GrMulti m, const float* __restrict__ xs) {
+    __shared__ __align__(16) float4 lo[T][2][LR / 8];
+    __shared__ float g[XU][T][HC][UPM_COLS];
+    const int t = threadIdx.x;
+    const int l8 = t & 7, grp = t >> 3;                  // 32 groups of 8 lanes
+    constexpr int RPT = XU * HC * UPM_COLS / 32;         // rows per group: 4
+    const FusedGrArgs& a0 = m.a[0];
+    // row r of this group: unit u = r / 2, row-in-unit grp + 32 * (r % 2) -> stream c, column dd
+    auto load_row = [&](int r, uint4 (&w)[5]) {
+        const int u = r >> 1, rr = grp + 32 * (r & 1), c = rr / UPM_COLS, dd = rr % UPM_COLS;
+        const int d = (blockIdx.x * XU + u) * UPM_COLS + dd;
+#pragma unroll
+        for (int q = 0; q < 5; ++q) w[q] = ldw(a0.w_up, a0.s_up, (size_t) (c * N + d) * LR + (size_t) (l8 + 8 * q) * 8);
+    };
+    const bool q8 = a0.s_up != nullptr;
+    uint4 ca[5], cb[5];
+    load_row(0, ca);
+    load_row(1, cb);
+    const float* part = xs + XPART_OFF;
+    float* lof = reinterpret_cast<float*>(lo);
+    for (int i = t; i < T * XR; i += THREADS) {
+        const int k = i / XR, row = i - k * XR;
+        float s = 0.0f;
+#pragma unroll
+        for (int h = 0; h < 2; ++h)
+#pragma unroll
+            for (int c = 0; c < HC; ++c) s += part[(((size_t) k * 2 + h) * HC + c) * XR + row];
+        if (row < LR) {
+            const float x = s / (float) HC;
+            const float v = x / (1.0f + __expf(-x));
+            lof[(k * 2 + ((row >> 2) & 1)) * (LR / 2) + (row >> 3) * 4 + (row & 3)] = v;
+            if (blockIdx.x == 0) m.a[k].lo[row] = v;
+        } else if (blockIdx.x == 0 && m.a[k].w_inject != nullptr) {
+            m.a[k].inject_out[row - LR] = s;
+        }
+    }
+    __syncthreads();
+    const float4* act = &lo[0][0][0];
+#pragma unroll
+    for (int r = 0; r < RPT; r += 2) {
+        if (r > 0) { load_row(r, ca); load_row(r + 1, cb); }
+        float aa[T], ab[T];
+        x_dot_pair<T, 5>(ca, cb, q8, q8, act, LR / 4, LR / 8, l8, 8, aa, ab);
+#pragma unroll
+        for (int h = 0; h < 2; ++h) {
+            const int u = (r + h) >> 1, rr = grp + 32 * ((r + h) & 1), c = rr / UPM_COLS, dd = rr % UPM_COLS;
+            const int d = (blockIdx.x * XU + u) * UPM_COLS + dd, i = c * N + d;
+            float mine = 0.0f;
+#pragma unroll
+            for (int k = 0; k < T; ++k) {
+                float v = h ? ab[k] : aa[k];
+                v += __shfl_xor_sync(0xffffffffu, v, 4);
+                v += __shfl_xor_sync(0xffffffffu, v, 2);
+                v += __shfl_xor_sync(0xffffffffu, v, 1);
+                if (l8 == k) mine = v;
+            }
+            if (l8 < T) {
+                const FusedGrArgs& a = m.a[l8];
+                float rv = a.R[i];
+                if (a.apply) {
+                    rv = fmaf(a.bo_prev[d], 2.0f * sigmoidf_(a.inj_prev[c] / (float) HC), rv);
+                    a.R_out[i] = rv;
+                }
+                g[u][l8][c][dd] = rv * a.w_norm[i] * a.rs[c] * sigmoidf_(mine);
+            }
+        }
+    }
+    __syncthreads();
+    for (int i = t; i < XU * T * UPM_COLS; i += THREADS) {
+        const int u = i / (T * UPM_COLS), k = (i / UPM_COLS) % T, col = i % UPM_COLS;
+        float s = 0.0f;
+#pragma unroll
+        for (int c = 0; c < HC; ++c) s += g[u][k][c][col];
+        m.a[k].mixed[(blockIdx.x * XU + u) * UPM_COLS + col] = s / (float) HC;
+    }
+}
+template <int T>
+void launch_x(const GrMulti& m, float* xs, cudaStream_t st, unsigned long long* stamp_buf, int stamp_i0) {
+    gr_norm_x_kernel<<<dim3(T, HC, XSL), 64, 0, st>>>(m, xs);
+    if (stamp_buf) gpu_stamp(stamp_buf, stamp_i0, (void*) st);
+    gr_down_x_kernel<T><<<dim3(XNRG, HC, 2), THREADS, 0, st>>>(m, xs);
+    if (stamp_buf) gpu_stamp(stamp_buf, stamp_i0 + 1, (void*) st);
+    gr_up_x_kernel<T><<<N / (UPM_COLS * XU), THREADS, 0, st>>>(m, xs);
+}
+bool hc_x_on() {
+    static const bool on = [] { const char* v = std::getenv("STRATA_HC_X"); return v != nullptr && std::atoi(v) != 0; }();
+    return on;
+}
+}  // namespace
+
 void fused_gr_read_multi(const FusedGrArgs* a, int n_tok, float* xn_scratch, void* stream, unsigned long long* stamp_buf,
                          int stamp_i0) {
     if (n_tok < 1 || n_tok > kFusedGrMaxT || xn_scratch == nullptr) {
@@ -1101,6 +1359,24 @@ void fused_gr_read_multi(const FusedGrArgs* a, int n_tok, float* xn_scratch, voi
     m.xn = xn_scratch;
     m.T = n_tok;
     cudaStream_t st = (cudaStream_t) stream;
+    // STRATA_HC_X=1: the bandwidth-first read (another summation order - opt-in); 1..4 tokens, on a device whose
+    // scratch fused_gr_check allocated, else the reads below
+    int devx = 0;
+    if (hc_x_on() && n_tok <= 4 && cudaGetDevice(&devx) == cudaSuccess && devx >= 0 && devx < 64 && g_x_scratch[devx]) {
+        float* xs = g_x_scratch[devx];
+        switch (n_tok) {
+            case 1: launch_x<1>(m, xs, st, stamp_buf, stamp_i0); break;
+            case 2: launch_x<2>(m, xs, st, stamp_buf, stamp_i0); break;
+            case 3: launch_x<3>(m, xs, st, stamp_buf, stamp_i0); break;
+            default: launch_x<4>(m, xs, st, stamp_buf, stamp_i0); break;
+        }
+        const cudaError_t ex = cudaGetLastError();
+        if (ex != cudaSuccess) {
+            std::fprintf(stderr, "fused_gr_read_multi X: %s\n", cudaGetErrorString(ex));
+            std::exit(1);
+        }
+        return;
+    }
     // STRATA_GR_V3=1: the two-kernel read above (another summation order - opt-in)
     static const bool v3 = [] { const char* v = std::getenv("STRATA_GR_V3"); return v != nullptr && std::atoi(v) != 0; }();
     static int split3[64] = {};   // per device: 0 = not decided yet, 1 / 2 = column halves S, -1 = does not fit
@@ -1364,6 +1640,14 @@ int fused_gr_variant() {
 void fused_gr_check() {
     int dev = 0;
     cudaGetDevice(&dev);
+    if (hc_x_on() && dev >= 0 && dev < 64 && !g_x_scratch[dev]) {
+        if (cudaMalloc(&g_x_scratch[dev], X_SCRATCH * sizeof(float)) != cudaSuccess) {
+            g_x_scratch[dev] = nullptr;
+            cudaGetLastError();
+        } else {
+            std::fprintf(stderr, "strata hc: CUDA%d: STRATA_HC_X=1, the bandwidth-first hyper-connection read (1-4 tokens)\n", dev);
+        }
+    }
     if (dev < 0 || dev >= 64 || g_variant[dev].load() > 0) return;
     const int want = env_variant();
     if (want == kHcPlain) {
