@@ -55,6 +55,12 @@
 #endif
 
 namespace strata::core {
+namespace {
+bool drop_cache() {
+    static const bool on = [] { const char* v = std::getenv("STRATA_LOAD_DROP_CACHE"); return v != nullptr && std::atoi(v) != 0; }();
+    return on;
+}
+}  // namespace
 
 namespace detail {
 
@@ -2663,6 +2669,12 @@ LoadStats load_experts_gguf(const std::string& gguf, uint8_t* dst, const strata:
                     // 64-bit seek: a shard is tens of GB
                     if (STRATA_FSEEK64(f, src + done) != 0) { bad = true; return; }
                     if (std::fread(buf.data(), 1, (size_t) n, f) != (size_t) n) { bad = true; return; }
+#if defined(__linux__)
+                    // STRATA_LOAD_DROP_CACHE=1: the bytes are copied into the arena, so their page-cache copy is
+                    // dropped at once - a 34 GB load into a 34 GB arena otherwise needs 68 GB, and on a 60 GB PC the
+                    // reclaim drove memory pressure past systemd-oomd's limit (it killed the engine mid-load)
+                    if (drop_cache()) (void) posix_fadvise(fileno(f), (off_t) (src + done), (off_t) n, POSIX_FADV_DONTNEED);
+#endif
                     for (uint64_t k = 0; k < n / per[r]; ++k) {
                         const uint64_t e = done / per[r] + k;
                         std::memcpy(dst + lay.blob_offset(l, (int64_t) e) + at[r], buf.data() + k * per[r], (size_t) per[r]);

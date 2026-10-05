@@ -656,6 +656,11 @@ LoadStats load_experts_ranges(const std::string& path, uint8_t* dst, const std::
                           + (std::ferror(f) != 0 ? " (ferror set)" : "");
                     return;
                 }
+#if defined(__linux__)
+                // STRATA_LOAD_DROP_CACHE=1: copied into the arena, so the page-cache copy goes (see expert_source.cpp)
+                static const bool drop = [] { const char* v = std::getenv("STRATA_LOAD_DROP_CACHE"); return v != nullptr && std::atoi(v) != 0; }();
+                if (drop) (void) posix_fadvise(fileno(f), (off_t) (off + pos), (off_t) n, POSIX_FADV_DONTNEED);
+#endif
                 const auto t_copy = std::chrono::steady_clock::now();
                 std::memcpy(dst + off + pos, buf.data(), (size_t) n);
                 h = fnv1a64(buf.data(), n, h);
