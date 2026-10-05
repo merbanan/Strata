@@ -1229,7 +1229,11 @@ double probe_pcie_h2d_gbps(std::string* samples = nullptr) {
 // gave 0.08, 3.9 none), so a reading near either edge moved the share by a quarter of its range.  From 20 GB/s up
 // (an x16 PCIe 4/5 link: ~26-28 GB/s) the share is unchanged.
 double pcie_frac_for_gbps(double gbps, double base) {
-    return gbps <= 0.0 ? base : base * std::min(1.0, gbps / 20.0);
+    // The GPU's SMs read this share over the link, and on a slow link those reads also slow the window's other
+    // kernels - measured on a 6.7 GB/s x8 link (RTX 2060 SUPER, Q2_0, 4K, --pcie-frac sweep): 0.05 37.5, 0.10 38.3,
+    // 0.18 36.3, 0.25 34.4, 0.32 30.9, 0.40 28.7 tok/s.  So the share falls faster than the bandwidth:
+    // base * (bw / 20)^1.5 (0.107 there; unchanged from 20 GB/s up)
+    return gbps <= 0.0 ? base : base * std::pow(std::min(1.0, gbps / 20.0), 1.5);
 }
 
 }  // namespace
