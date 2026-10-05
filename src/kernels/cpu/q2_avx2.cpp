@@ -268,4 +268,12 @@ void act_quant_q8_1_avx2(const float* x, int n, ActQ& a) {
     bitplane_image(a);
 }
 
+// #863's entry point for tests and benches: this build's AVX-2 rows are #706's bit-plane kernel, and a Zen 2 / Intel
+// CPU without AVX-VNNI has no VNNI form - `vnni` is ignored here.
+void q2_0_gguf_rows_multi_avx2_v(bool vnni, const uint8_t* w, size_t row_bytes, int nblocks, const ActQ* const* a,
+                                 int nt, float* const* out, int r0, int r1) {
+    (void) vnni;
+    q2_0_gguf_rows_multi_avx2(w, row_bytes, nblocks, a, nt, out, r0, r1);
+}
+
 }  // namespace strata::kernels::cpu
