@@ -1655,7 +1655,14 @@ int main(int argc, char** argv) {
         o.resident_cpu_experts = o.resident_pin = o.resident_soft = false;
         o.resident_headroom = 8ull << 30;
     }
-    if (o.resident_cpu_experts && (!o.layer_split.empty() || remote_caches)) {
+    // pp-opt (experimental, STRATA_RESIDENT_REMOTE=1): a RAM budget beside the CUDA1-3 helper caches.  The prompt path
+    // runs on CUDA0 alone and streams every expert its cache does not hold from the source (RAM copy or files), so the
+    // budget is what speeds up a long prompt there, while the helpers serve the decode.  The two do not share state:
+    // the helpers are filled before the RAM copy is built, and both read blobs through the source.
+    static const bool resident_remote = [] { const char* v = std::getenv("STRATA_RESIDENT_REMOTE"); return v && v[0] == '1'; }();
+    if (o.resident_cpu_experts && o.layer_split.empty() && remote_caches && resident_remote)
+        std::fprintf(stderr, "strata generate: STRATA_RESIDENT_REMOTE=1: the RAM budget beside the helper caches (experimental)\n");
+    else if (o.resident_cpu_experts && (!o.layer_split.empty() || remote_caches)) {
         std::fprintf(stderr, "strata generate: --resident-cpu-experts does not support layer splits or remote expert caches\n");
         return 2;
     }
@@ -4755,6 +4762,14 @@ int main(int argc, char** argv) {
                          ub ? "unbuffered" : "through the file cache", ub == was ? "" : " (changed)", why.c_str());
         }
 #endif
+    }
+    // pp-opt: with the file tier unbuffered, the mapped view of experts.bin is only a fallback from here on - and while
+    // it exists NTFS serves the unbuffered reads one at a time (drop_mapping).  STRATA_KEEP_MAPPING=1 keeps it (A/B).
+    if (srcp == &src && src.unbuffered() && std::getenv("STRATA_KEEP_MAPPING") == nullptr) {
+        std::string why;
+        const bool dropped = src.drop_mapping(why);
+        std::fprintf(stderr, "strata generate: the mapped view of the experts %s (%s)\n",
+                     dropped ? "is closed" : "stays open", why.c_str());
     }
     if (o.serve) {
         if (o.spec < 2 || o.mtp.empty() || o.prefill_chunk <= 0 ||
