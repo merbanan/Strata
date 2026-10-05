@@ -30,6 +30,9 @@ std::size_t native_q8_1_bytes(int n_in, int ncols = 1);
 // single-column call. Set before
 // graph capture; captured graphs keep the kernels they captured.
 void native_mmvq_set_multi_exact(bool exact);
+// CUDA: 16 or 32 selects the group layout (G lanes per row, every ncols), 0 the exact layout; default from
+// STRATA_MMVQ_GROUP. Not bitwise equal to the exact layout (float summation order).
+void native_mmvq_set_group(int lanes);
 bool native_mmvq_multi_exact();
 
 // One quantization may serve multiple weight matrices sharing the same input.
