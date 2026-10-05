@@ -42,6 +42,7 @@
 #include <unordered_map>
 #include <cstdio>
 #include <vector>
+#include <type_traits>
 
 namespace strata::kernels {
 namespace {
@@ -1354,10 +1355,323 @@ void wave_launch(const void* weights, const void* x_q8_1, float* y, int n_in, in
         default: throw std::invalid_argument("native MMVQ (wave) requires 1 <= ncols <= 8");
     }
 }
+#define STRATA_STAGED_MMVQ(...)
 #define STRATA_WAVE_MMVQ(...) \
     if (!g_wave_off) { wave_launch<__VA_ARGS__>(weights, x_q8_1, y, n_in, n_out, ncols, stream); launch_check(); return; }
 #else
-#define STRATA_WAVE_MMVQ(...)
+// ---- CUDA group layout (opt-in, STRATA_MMVQ_GROUP=16|32): G lanes per row, RPB = 128 / G rows per block, the row's
+// (block, kqs) items strided over the G lanes and a G-lane butterfly instead of the shared-memory join. Every lane
+// stays busy on short rows (n_in = 2560 is 10 Q3_K blocks: the exact layout runs 16 of its 128 threads on the second
+// pass), and the same kernel serves ncols 1..8. Sums differ from the exact layout only in float summation order.
+int g_group = [] {
+    const char* e = std::getenv("STRATA_MMVQ_GROUP");
+    const int g = e ? std::atoi(e) : 0;
+    return g == 16 || g == 32 ? g : 0;
+}();
+template<typename F, int NCOLS, int G>
+__launch_bounds__(128)
+__global__ void native_mmvq_group_kernel(const typename F::Block* __restrict__ w, const Q81Block* __restrict__ x,
+                                         float* __restrict__ y, int n_in, int n_out) {
+    static_assert(G % F::T == 0 && 32 % G == 0, "a row's lanes must tile T and the warp");
+    const int lane = int(threadIdx.x) % G;
+    const int row = int(blockIdx.x) * (128 / G) + int(threadIdx.x) / G;
+    const int rowc = row < n_out ? row : n_out - 1;    // keep every lane in the shuffles; only valid rows store
+    const int blocks_per_row = n_in / F::DIV;
+    const int x_stride = n_in / Q8K;
+    const int kqs = F::kqs(lane);
+    const typename F::Block* wr = w + std::size_t(rowc) * blocks_per_row;
+    float tmp[NCOLS] = {};
+#pragma unroll 2
+    for (int kbx = lane / F::T; kbx < blocks_per_row; kbx += G / F::T) {
+        const typename F::W wv = F::load(wr + kbx, kqs);
+#pragma unroll
+        for (int j = 0; j < NCOLS; ++j) tmp[j] += F::apply(wv, x + std::size_t(j) * x_stride + kbx * F::KBY, kqs);
+    }
+#pragma unroll
+    for (int j = 0; j < NCOLS; ++j) {
+        float v = tmp[j];
+#pragma unroll
+        for (int off = G / 2; off > 0; off >>= 1) v += __shfl_xor_sync(0xffffffff, v, off, G);
+        if (lane == 0 && row < n_out) y[std::size_t(j) * n_out + row] = v;
+    }
+}
+// ---- Staged group kernels (opt-in with the group layout). A block stages its activations once into shared memory,
+// planar and swizzled (int8 values in 16-byte chunks, a float d8 per q8_1 block and, for formats with a min term, the
+// integer sum of every chunk), then walks rows_per_block rows with G lanes per row. A lane item is a format-specific
+// piece of one 256-weight superblock: its weight bytes are fetched with wide loads and decoded once, and every column
+// then costs a few 16-byte shared loads plus the dp4a chain. P supplies Block, ITEMS (items per superblock), SUM
+// (stage chunk sums), swz (chunk -> shared slot, chosen so a quarter-warp's 16-byte loads hit distinct bank groups)
+// and item<NCOLS>(). Sums differ from the exact layout only in float summation order.
+__device__ __forceinline__ uint4 load16_b2(const uint8_t* p) {
+    const uintptr_t a = reinterpret_cast<uintptr_t>(p);
+    const uint32_t* w = reinterpret_cast<const uint32_t*>(a & ~uintptr_t(3));
+    const uint32_t w0 = __ldg(w), w1 = __ldg(w + 1), w2 = __ldg(w + 2), w3 = __ldg(w + 3);
+    if ((a & 3) == 0) return make_uint4(w0, w1, w2, w3);
+    const uint32_t w4 = __ldg(w + 4);
+    const int sh = int(a & 3) * 8;
+    return make_uint4(__funnelshift_r(w0, w1, sh), __funnelshift_r(w1, w2, sh), __funnelshift_r(w2, w3, sh),
+                      __funnelshift_r(w3, w4, sh));
+}
+
+// Q3_K: an item is 64 weights, half n (128 weights) x 16 byte positions (lh), all four 2-bit planes j: 16 bytes of
+// qs and of hmask (aligned 32-bit loads + funnel shift: the 110-byte stride leaves odd blocks 2-byte aligned), four
+// 6-bit scales and d, decoded to signed int8 once; per column four 16-byte activation chunks and one float4 of d8.
+struct Q3KGroup {
+    using Block = Q3KBlock;
+    static constexpr int ITEMS = 4;
+    static constexpr bool SUM = false;
+    // a quarter-warp reads chunks 2j + lh of q8 blocks 8 kbx + 4 n (128 bytes apart): xor bits 1-2 with (2 kbx + n)
+    __device__ static int swz(int c) { return c ^ (((c >> 3) & 3) << 1); }
+    template<int NCOLS>
+    __device__ static void item(const Block* __restrict__ bw, int it, int kbx, const int4* xs, const float* d8s,
+                                const int*, int cchunks, int nb8, float (&acc)[NCOLS]) {
+        const int n = (it >> 1) & 1, lh = it & 1;
+        const uint4 ql = load16_b2(bw->qs + 32 * n + 16 * lh);
+        const uint4 qh = load16_b2(bw->hmask + 16 * lh);
+        const uint16_t* sc16 = reinterpret_cast<const uint16_t*>(bw->scales);
+        const uint32_t slo = uint32_t(sc16[0]) | uint32_t(sc16[1]) << 16;
+        const uint32_t slo2 = uint32_t(sc16[2]) | uint32_t(sc16[3]) << 16;
+        const uint32_t shi = uint32_t(sc16[4]) | uint32_t(sc16[5]) << 16;
+        const float d = __half2float(bw->d);
+        int vi[4][4];
+        int sc[4];
+        const uint32_t vl[4] = {ql.x, ql.y, ql.z, ql.w}, vh[4] = {qh.x, qh.y, qh.z, qh.w};
+#pragma unroll
+        for (int j = 0; j < 4; ++j) {
+            const int isc = 8 * n + 2 * j + lh;
+            const int bl = isc % 8;
+            const uint32_t lo_word = bl < 4 ? slo : slo2;
+            const int lo = (lo_word >> (8 * (bl % 4) + 4 * (isc / 8))) & 0xf;
+            const int hi = ((shi >> (8 * (isc % 4) + 2 * (isc / 4))) & 3) << 4;
+            sc[j] = (lo | hi) - 32;
+#pragma unroll
+            for (int k = 0; k < 4; ++k) {
+                const int vil = (vl[k] >> (2 * j)) & 0x03030303;
+                const int vih = ((~vh[k] >> (4 * n + j)) & 0x01010101) << 2;
+                vi[j][k] = __vsubss4(vil, vih);
+            }
+        }
+        const int xb = kbx * 8 + 4 * n;
+#pragma unroll
+        for (int c = 0; c < NCOLS; ++c) {
+            const float4 d4 = *reinterpret_cast<const float4*>(d8s + c * nb8 + xb);
+            const float dd[4] = {d4.x, d4.y, d4.z, d4.w};
+            float s = 0.0f;
+#pragma unroll
+            for (int j = 0; j < 4; ++j) {
+                const int4 u = xs[swz(c * cchunks + (xb + j) * 2 + lh)];
+                int dot = STRATA_DP4A(vi[j][0], u.x, 0);
+                dot = STRATA_DP4A(vi[j][1], u.y, dot);
+                dot = STRATA_DP4A(vi[j][2], u.z, dot);
+                dot = STRATA_DP4A(vi[j][3], u.w, dot);
+                s += dd[j] * float(dot * sc[j]);
+            }
+            acc[c] += d * s;
+        }
+    }
+};
+
+// IQ4_XS: an item is one 32-weight subblock ib: 16 bytes of qs (two 8-byte loads: the 136-byte stride keeps blocks
+// 8-byte aligned), its 6-bit scale and d; codebook lookup once; per column two activation chunks, one d8, 8 dp4a.
+struct IQ4XSGroup {
+    using Block = IQ4XSBlock;
+    static constexpr int ITEMS = 8;
+    static constexpr bool SUM = false;
+    // a quarter-warp reads chunk 2 ib (+1) of eight consecutive q8 blocks: flip bit 0 for the upper four
+    __device__ static int swz(int c) { return c ^ ((c >> 3) & 1); }
+    template<int NCOLS>
+    __device__ static void item(const Block* __restrict__ bw, int ib, int kbx, const int4* xs, const float* d8s,
+                                const int*, int cchunks, int nb8, float (&acc)[NCOLS]) {
+        const uint2* q2 = reinterpret_cast<const uint2*>(bw->qs + 16 * ib);
+        const uint2 a = __ldg(q2), b = __ldg(q2 + 1);
+        const int2 v0 = iq4_table_lookup(int(a.x)), v1 = iq4_table_lookup(int(a.y));
+        const int2 v2 = iq4_table_lookup(int(b.x)), v3 = iq4_table_lookup(int(b.y));
+        const int ls = ((bw->scales_l[ib / 2] >> (4 * (ib & 1))) & 0x0f) | (((bw->scales_h >> (2 * ib)) & 0x03) << 4);
+        const float dl = __half2float(bw->d) * float(ls - 32);
+        const int xb = kbx * 8 + ib;
+#pragma unroll
+        for (int c = 0; c < NCOLS; ++c) {
+            const int4 u0 = xs[swz(c * cchunks + xb * 2)];
+            const int4 u1 = xs[swz(c * cchunks + xb * 2 + 1)];
+            int dot = STRATA_DP4A(v0.x, u0.x, 0);
+            dot = STRATA_DP4A(v1.x, u0.y, dot);
+            dot = STRATA_DP4A(v2.x, u0.z, dot);
+            dot = STRATA_DP4A(v3.x, u0.w, dot);
+            dot = STRATA_DP4A(v0.y, u1.x, dot);
+            dot = STRATA_DP4A(v1.y, u1.y, dot);
+            dot = STRATA_DP4A(v2.y, u1.z, dot);
+            dot = STRATA_DP4A(v3.y, u1.w, dot);
+            acc[c] += dl * d8s[c * nb8 + xb] * float(dot);
+        }
+    }
+};
+
+// Q4_K / Q5_K: an item is subblocks 2j and 2j+1 (the low and high nibbles of the same 32 qs bytes) at 16 byte
+// positions lh: 16 bytes of qs (+ 16 of qh for Q5_K) and the 16-byte dm + scales head, all 16-byte aligned loads
+// (144- and 176-byte strides); per column two activation chunks, two d8, two staged chunk sums for the min term.
+template<bool Q5>
+struct QKGroup {
+    using Block = std::conditional_t<Q5, Q5KBlock, Q4KBlock>;
+    static constexpr int ITEMS = 8;
+    static constexpr bool SUM = true;
+    // a quarter-warp reads chunks 4 j + lh (+2) of one superblock: flip bit 1 for the upper half (j >= 2)
+    __device__ static int swz(int c) { return c ^ (((c >> 3) & 1) << 1); }
+    template<int NCOLS>
+    __device__ static void item(const Block* __restrict__ bw, int it, int kbx, const int4* xs, const float* d8s,
+                                const int* us, int cchunks, int nb8, float (&acc)[NCOLS]) {
+        const int j = it >> 1, lh = it & 1;
+        const uint4 head = __ldg(reinterpret_cast<const uint4*>(bw));            // dm, scales[12]
+        const uint4 ql = __ldg(reinterpret_cast<const uint4*>(bw->qs + 32 * j + 16 * lh));
+        const uint32_t sw[3] = {head.y, head.z, head.w};
+        const uint8_t* scb = reinterpret_cast<const uint8_t*>(sw);
+        int sc[2], mn[2];
+#pragma unroll
+        for (int t = 0; t < 2; ++t) {
+            const int s = 2 * j + t;
+            if (s < 4) {
+                sc[t] = scb[s] & 63;
+                mn[t] = scb[s + 4] & 63;
+            } else {
+                sc[t] = (scb[s + 4] & 0xf) | ((scb[s - 4] >> 6) << 4);
+                mn[t] = (scb[s + 4] >> 4) | ((scb[s] >> 6) << 4);
+            }
+        }
+        const float2 dm = __half22float2(*reinterpret_cast<const half2*>(&head.x));
+        const uint32_t vl[4] = {ql.x, ql.y, ql.z, ql.w};
+        int v[2][4];
+        uint4 qh = make_uint4(0, 0, 0, 0);
+        if constexpr (Q5) qh = __ldg(reinterpret_cast<const uint4*>(bw->qh + 16 * lh));
+        const uint32_t vh[4] = {qh.x, qh.y, qh.z, qh.w};
+#pragma unroll
+        for (int k = 0; k < 4; ++k) {
+            v[0][k] = vl[k] & 0x0f0f0f0f;
+            v[1][k] = (vl[k] >> 4) & 0x0f0f0f0f;
+            if constexpr (Q5) {
+                v[0][k] |= ((vh[k] >> (2 * j)) & 0x01010101) << 4;
+                v[1][k] |= ((vh[k] >> (2 * j + 1)) & 0x01010101) << 4;
+            }
+        }
+        const int xb = kbx * 8 + 2 * j;
+#pragma unroll
+        for (int c = 0; c < NCOLS; ++c) {
+            const float2 d8 = *reinterpret_cast<const float2*>(d8s + c * nb8 + xb);
+            float s = 0.0f;
+#pragma unroll
+            for (int t = 0; t < 2; ++t) {
+                const int ci = c * cchunks + (xb + t) * 2 + lh;
+                const int4 u = xs[swz(ci)];
+                int dot = STRATA_DP4A(v[t][0], u.x, 0);
+                dot = STRATA_DP4A(v[t][1], u.y, dot);
+                dot = STRATA_DP4A(v[t][2], u.z, dot);
+                dot = STRATA_DP4A(v[t][3], u.w, dot);
+                s += (t ? d8.y : d8.x) * (dm.x * float(dot * sc[t]) - dm.y * float(us[ci] * mn[t]));
+            }
+            acc[c] += s;
+        }
+    }
+};
+
+template<typename P, int NCOLS, int G>
+__launch_bounds__(128)
+__global__ void staged_group_kernel(const typename P::Block* __restrict__ w, const Q81Block* __restrict__ x,
+                                    float* __restrict__ y, int n_in, int n_out, int rows_per_block) {
+    extern __shared__ int4 smem[];
+    const int cchunks = n_in / 16;                                      // 16-byte chunks per column
+    const int nb8 = n_in / Q8K;
+    int4* xs = smem;                                                    // [NCOLS * cchunks], swizzled
+    float* d8s = reinterpret_cast<float*>(xs + NCOLS * cchunks);       // [NCOLS * nb8]
+    int* us = reinterpret_cast<int*>(d8s + NCOLS * nb8);                // [NCOLS * cchunks] if P::SUM
+    for (int ci = int(threadIdx.x); ci < NCOLS * cchunks; ci += 128) {
+        const Q81Block& b = x[ci >> 1];                                 // columns are contiguous q8_1 blocks
+        const int* q = reinterpret_cast<const int*>(b.qs) + 4 * (ci & 1);
+        const int4 u = make_int4(q[0], q[1], q[2], q[3]);
+        xs[P::swz(ci)] = u;
+        if constexpr (P::SUM)
+            us[ci] = STRATA_DP4A(0x01010101, u.x, STRATA_DP4A(0x01010101, u.y,
+                     STRATA_DP4A(0x01010101, u.z, STRATA_DP4A(0x01010101, u.w, 0))));
+        if ((ci & 1) == 0) d8s[ci >> 1] = __low2float(b.ds);
+    }
+    __syncthreads();
+    const int lane = int(threadIdx.x) % G;
+    const int blocks_per_row = n_in / QK;
+    const int items = blocks_per_row * P::ITEMS;
+    const int row_end = min(n_out, (int(blockIdx.x) + 1) * rows_per_block);
+    for (int row0 = int(blockIdx.x) * rows_per_block; row0 < row_end; row0 += 128 / G) {
+        const int row = row0 + int(threadIdx.x) / G;
+        const typename P::Block* wr = w + std::size_t(row < row_end ? row : row_end - 1) * blocks_per_row;
+        float acc[NCOLS] = {};
+#pragma unroll 2
+        for (int it = lane; it < items; it += G) {
+            const int kbx = it / P::ITEMS;
+            P::template item<NCOLS>(wr + kbx, it % P::ITEMS, kbx, xs, d8s, us, cchunks, nb8, acc);
+        }
+#pragma unroll
+        for (int c = 0; c < NCOLS; ++c) {
+            float v = acc[c];
+#pragma unroll
+            for (int off = G / 2; off > 0; off >>= 1) v += __shfl_xor_sync(0xffffffff, v, off, G);
+            if (lane == 0 && row < row_end) y[std::size_t(c) * n_out + row] = v;
+        }
+    }
+}
+template<typename P, int NCOLS>
+bool staged_group_launch(const void* weights, const void* x_q8_1, float* y, int n_in, int n_out, cudaStream_t s) {
+    const std::size_t shmem = std::size_t(NCOLS) * n_in * (P::SUM ? 11 : 9) / 8;
+    if (shmem > 48 * 1024 || n_in % QK) return false;
+    constexpr int G = 8;
+    // enough blocks to fill the card (>= ~4 per SM on 34-46 SM parts), as many rows per block as that allows
+    int rpb = 64;
+    while (rpb > 128 / G && (n_out + rpb - 1) / rpb < 160) rpb /= 2;
+    staged_group_kernel<P, NCOLS, G><<<unsigned((n_out + rpb - 1) / rpb), 128, shmem, s>>>(
+        static_cast<const typename P::Block*>(weights), static_cast<const Q81Block*>(x_q8_1), y, n_in, n_out, rpb);
+    return true;
+}
+template<typename P>
+bool staged_group(const void* weights, const void* x_q8_1, float* y, int n_in, int n_out, int ncols, void* stream) {
+    const auto s = static_cast<cudaStream_t>(stream);
+    switch (ncols) {
+        case 1: return staged_group_launch<P, 1>(weights, x_q8_1, y, n_in, n_out, s);
+        case 2: return staged_group_launch<P, 2>(weights, x_q8_1, y, n_in, n_out, s);
+        case 3: return staged_group_launch<P, 3>(weights, x_q8_1, y, n_in, n_out, s);
+        case 4: return staged_group_launch<P, 4>(weights, x_q8_1, y, n_in, n_out, s);
+        case 5: return staged_group_launch<P, 5>(weights, x_q8_1, y, n_in, n_out, s);
+        case 6: return staged_group_launch<P, 6>(weights, x_q8_1, y, n_in, n_out, s);
+        case 7: return staged_group_launch<P, 7>(weights, x_q8_1, y, n_in, n_out, s);
+        case 8: return staged_group_launch<P, 8>(weights, x_q8_1, y, n_in, n_out, s);
+        default: return false;
+    }
+}
+#define STRATA_STAGED_MMVQ(P) \
+    if (g_group && staged_group<P>(weights, x_q8_1, y, n_in, n_out, ncols, stream)) { launch_check(); return; }
+template<typename F, int NCOLS>
+void group_launch_n(const void* weights, const void* x_q8_1, float* y, int n_in, int n_out, cudaStream_t s) {
+    const auto* w = static_cast<const typename F::Block*>(weights);
+    const auto* x = static_cast<const Q81Block*>(x_q8_1);
+    if constexpr (F::T <= 16) {
+        if (g_group == 16) {
+            native_mmvq_group_kernel<F, NCOLS, 16><<<unsigned((n_out + 7) / 8), 128, 0, s>>>(w, x, y, n_in, n_out);
+            return;
+        }
+    }
+    native_mmvq_group_kernel<F, NCOLS, 32><<<unsigned((n_out + 3) / 4), 128, 0, s>>>(w, x, y, n_in, n_out);
+}
+template<typename F>
+void group_launch(const void* weights, const void* x_q8_1, float* y, int n_in, int n_out, int ncols, void* stream) {
+    const auto s = static_cast<cudaStream_t>(stream);
+    switch (ncols) {
+        case 1: group_launch_n<F, 1>(weights, x_q8_1, y, n_in, n_out, s); break;
+        case 2: group_launch_n<F, 2>(weights, x_q8_1, y, n_in, n_out, s); break;
+        case 3: group_launch_n<F, 3>(weights, x_q8_1, y, n_in, n_out, s); break;
+        case 4: group_launch_n<F, 4>(weights, x_q8_1, y, n_in, n_out, s); break;
+        case 5: group_launch_n<F, 5>(weights, x_q8_1, y, n_in, n_out, s); break;
+        case 6: group_launch_n<F, 6>(weights, x_q8_1, y, n_in, n_out, s); break;
+        case 7: group_launch_n<F, 7>(weights, x_q8_1, y, n_in, n_out, s); break;
+        case 8: group_launch_n<F, 8>(weights, x_q8_1, y, n_in, n_out, s); break;
+        default: throw std::invalid_argument("native MMVQ (group) requires 1 <= ncols <= 8");
+    }
+}
+#define STRATA_WAVE_MMVQ(...) \
+    if (g_group) { group_launch<__VA_ARGS__>(weights, x_q8_1, y, n_in, n_out, ncols, stream); launch_check(); return; }
 #endif
 
 template<typename Weight, int Qi>
@@ -1826,6 +2140,9 @@ void native_q6_k_unpack(const void* weights) {
 }
 
 void native_mmvq_set_multi_exact(bool exact) { g_multi_exact = exact; }
+#if !defined(STRATA_HIP_GFX906)
+void native_mmvq_set_group(int lanes) { g_group = lanes == 16 || lanes == 32 ? lanes : 0; }
+#endif
 bool native_mmvq_multi_exact() { return g_multi_exact; }
 
 std::size_t native_q8_1_bytes(int n_in, int ncols) {
@@ -1870,6 +2187,7 @@ void native_q5_k_mmvq(const void* weights, const void* x_q8_1, float* y,
     validate_pointer(x_q8_1);
     validate_pointer(y);
     validate_stream(stream);
+    STRATA_STAGED_MMVQ(QKGroup<true>)
     STRATA_WAVE_MMVQ(Q5KTraits)
     if (ncols > 1) {
         launch_multi<Q5KTraits>(weights, x_q8_1, y, n_in, n_out, ncols, stream);
@@ -1951,6 +2269,7 @@ void native_q3_k_mmvq(const void* weights, const void* x_q8_1, float* y,
     validate_pointer(x_q8_1);
     validate_pointer(y);
     validate_stream(stream);
+    STRATA_STAGED_MMVQ(Q3KGroup)
     STRATA_WAVE_MMVQ(Q3KTraits)
     if (ncols > 1) {
         launch_multi<Q3KTraits>(weights, x_q8_1, y, n_in, n_out, ncols, stream);
@@ -1991,6 +2310,7 @@ void native_iq4_xs_mmvq(const void* weights, const void* x_q8_1, float* y,
     validate_pointer(x_q8_1);
     validate_pointer(y);
     validate_stream(stream);
+    STRATA_STAGED_MMVQ(IQ4XSGroup)
     STRATA_WAVE_MMVQ(IQ4XSTraits)
     if (ncols > 1) {
         launch_multi<IQ4XSTraits>(weights, x_q8_1, y, n_in, n_out, ncols, stream);
@@ -2031,6 +2351,7 @@ void native_q4_k_mmvq(const void* weights, const void* x_q8_1, float* y,
     validate_pointer(x_q8_1);
     validate_pointer(y);
     validate_stream(stream);
+    STRATA_STAGED_MMVQ(QKGroup<false>)
     STRATA_WAVE_MMVQ(Q4KTraits)
     if (ncols > 1) {
         launch_multi<Q4KTraits>(weights, x_q8_1, y, n_in, n_out, ncols, stream);
