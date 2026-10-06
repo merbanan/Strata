@@ -25,7 +25,11 @@ struct Api {
 template <class F> bool resolve(const char* name, F& f) {
     cudaDriverEntryPointQueryResult q{};
     void* p = nullptr;
+#if CUDART_VERSION >= 12050
     if (cudaGetDriverEntryPointByVersion(name, &p, 12000, cudaEnableDefault, &q) != cudaSuccess ||
+#else   // CUDA 12.0 - 12.4: the by-version query does not exist yet; this one resolves the same entry points
+    if (cudaGetDriverEntryPoint(name, &p, cudaEnableDefault, &q) != cudaSuccess ||
+#endif
         q != cudaDriverEntryPointSuccess || p == nullptr)
         return false;
     f = (F) p;
