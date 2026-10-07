@@ -87,6 +87,8 @@
 // The RAW tail is fp32 for the same reason and because it is only `idx_block - 1` rows.
 #pragma once
 
+#include <cstdlib>
+
 #include <cstdint>
 
 namespace strata::kernels {
@@ -117,6 +119,14 @@ inline QsaShapes qsa_real_shapes() {
 }
 
 /// The one legal RMSNorm epsilon for this artifact (`attention.layer_norm_rms_epsilon`).
+/// STRATA_IDX_F16=1 (experiment): the indexer's pooled block keys are stored as FP16 instead of FP32 (half the
+/// ~200 MB a 128K context keeps resident); scoring still multiplies and sums in FP32.  Read once per process; every
+/// writer, reader and allocation of `pooled` asks this.  The single `dead` spare row stays FP32.
+inline bool qsa_idx_f16() {
+    static const bool v = [] { const char* e = std::getenv("STRATA_IDX_F16"); return e != nullptr && std::atoi(e) != 0; }();
+    return v;
+}
+inline size_t qsa_idx_key_bytes() { return qsa_idx_f16() ? 2 : 4; }
 inline float qsa_rms_eps() { return 1e-6f; }
 /// `rope.freq_base`, the DEFAULT frequency base.  The artifact ships no `rope.scaling` keys, so the
 /// process's rope scaling starts at none - the runtime configuration lives in `rope_scaling.hpp`
