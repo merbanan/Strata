@@ -337,6 +337,18 @@ inline bool hcd_exact() {
     return v;
 }
 inline bool hc_pad() { return pf_hcdown() || hcd_exact(); }
+// Opt-in STRATA_PF_HC_FAST=1 (on chunks of STRATA_PF_SWITCH_MIN_T+ tokens): the hyper-connection read's down / up
+// projections as FP16 tensor-core GEMMs (Gemm::f16, fp32 accumulate) instead of the BF16 ones, which below sm_80 run
+// as cuBLAS's SIMT fp32 fallback.  The writers of xn16 (the norms) and lo16 (silu) emit FP16 (saturated at +-65504)
+// instead of BF16; each weight (BF16, or STRATA_HC_REQ8's int8 + scale) is expanded once per use into a reused FP16
+// scratch (LR x D = 6.5 MB per device); the 4-row inject projection is a dedicated kernel (FP16 in, FP32 accumulate).
+// Rounding-level: activations carry 11 mantissa bits instead of 8, the GEMMs sum in another order.  Not taken with
+// STRATA_PREFILL_BF16X2 on the HC, STRATA_GR_UNFUSED, STRATA_PF_HCDOWN / STRATA_HCD_EXACT, STRATA_HC_UPMIX or the
+// HIP FP16 prompt path (those keep their own path).
+inline bool pf_hc_fast() {
+    static const bool v = [] { const char* e = std::getenv("STRATA_PF_HC_FAST"); return e && e[0] == '1'; }();
+    return v;
+}
 inline bool cvec_fuse() {
     static const bool v = [] { const char* e = std::getenv("STRATA_CVEC_FUSE"); return e && e[0] == '1'; }();
     return v;
@@ -1889,6 +1901,28 @@ bool bf16_proj(Gemm& gm, const core::WeightRef* w, const uint16_t* X, float* Y, 
     return true;
 }
 
+// STRATA_PF_HC_FAST: the FP16 weight scratch of the current device (grown to `elems`, never freed)
+uint16_t* hc_f16_scratch(int64_t elems, std::string& err) {
+    static uint16_t* buf[64] = {};
+    static int64_t cap[64] = {};
+    int dev = 0;
+    if (cudaGetDevice(&dev) != cudaSuccess || dev < 0 || dev >= 64) { err = "prefill: STRATA_PF_HC_FAST: no device"; return nullptr; }
+    if (cap[dev] < elems) {
+        if (buf[dev]) cudaFree(buf[dev]);
+        buf[dev] = nullptr; cap[dev] = 0;
+        if (cudaMalloc((void**) &buf[dev], (size_t) elems * 2) != cudaSuccess) {
+            cudaGetLastError();
+            err = "prefill: the STRATA_PF_HC_FAST scratch (cudaMalloc)";
+            return nullptr;
+        }
+        cap[dev] = elems;
+    }
+    return buf[dev];
+}
+bool hc_bf16_like(const core::WeightRef* w, int64_t ne0, int64_t ne1) {
+    return w->kind == core::WeightKind::Bf16InF32 && w->data && w->ne0 == ne0 && w->ne1 == ne1;
+}
+
 }  // namespace
 
 namespace {
@@ -2394,6 +2428,9 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
         }
         host_setup_ms += ms_since(tsetup);
         bool normed = false;   // F-2: the previous half's write already normed R for this half (grs, xn16)
+        // STRATA_PF_HC_FAST: decided once per chunk, since the previous half's fused write already emits xn16
+        const bool hcf = pf_hc_fast() && !m.f16_io && !gr_unfused() && !hc_pad() && !hc_upmix() && !m.xn16_lo &&
+                         !m.lo16_lo && T >= pf_switch_min_t();
         // #579 #613 (opt-in diagnosis, STRATA_PF_STEP_SYNC=1): the compute and copy streams are waited for after each
         // step named below, a step that took over 250 ms is logged, and a stall's report names the step it is in.
         // Slower (a sync per step); the bytes are the same.
@@ -2482,8 +2519,25 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                 const int64_t ldx = hc_pad() && T >= std::max<int64_t>(pf_switch_min_t(), 64) && !gr_unfused() &&
                                             !m.xn16_lo ? D + XN_PAD : D;
                 if (gr_unfused()) gr_norm(m.R, (const float*) wn->data, EPS, m.xn, m.xn16, T, m.cs, m.xn16_lo);
-                else if (!normed) gr_norm_rs(m.R, (const float*) wn->data, EPS, m.grs, m.xn16, T, m.cs, m.xn16_lo, ldx);
+                else if (!normed) gr_norm_rs(m.R, (const float*) wn->data, EPS, m.grs, m.xn16, T, m.cs, m.xn16_lo, ldx, hcf);
                 normed = false;
+                if (hcf) {
+                    if (!hc_bf16_like(wd, D, LR) || !hc_bf16_like(wu, LR, D) || !hc_bf16_like(wi, D, HC)) {
+                        err = "prefill: STRATA_PF_HC_FAST: the hyper-connection weights are not BF16 / int8 of the expected shapes";
+                        return false;
+                    }
+                    uint16_t* wf = hc_f16_scratch(LR * D, err);
+                    if (!wf) return false;
+                    hc_w_to_f16(wd->data, wd->q8_scale, wf, LR * D, m.cs);
+                    m.gemm.f16(m.xn16, wf, m.lo, T, LR, D);
+                    gr_silu(m.lo, m.lo16, T, m.cs, nullptr, true);
+                    hc_w_to_f16(wu->data, wu->q8_scale, wf, D * LR, m.cs);
+                    m.gemm.f16(m.lo16, wf, m.gated, T, D, LR);
+                    hc_w_to_f16(wi->data, wi->q8_scale, wf, HC * D, m.cs);
+                    hc_inject_f16(m.xn16, ldx, wf, m.inj, T, m.cs);
+                    gr_mix_r(m.R, m.grs, (const float*) wn->data, m.gated, m.mixed, m.mixed_bf, T, m.cs, m.mixed_h,
+                             m.mixed_bf_lo);
+                } else {
                 bool hcd = false;
                 bool hdown = false;
                 if (wd->q8_scale == nullptr && ldx != D && !pf_hcdown()) {   // not with STRATA_HC_REQ8's int8 rows   // STRATA_HCD_EXACT: the exact-order down kernel when hipBLASLt would take 1176 / 1177
@@ -2537,6 +2591,7 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                     gr_mix_r(m.R, m.grs, (const float*) wn->data, m.gated, m.mixed, m.mixed_bf, T, m.cs, m.mixed_h,
                              m.mixed_bf_lo);
                 }
+                }   // !hcf
 
                 if (half == 0 && !core::is_qsa_layer(g, l)) {
                     // ======================= GDN =======================
@@ -3864,10 +3919,10 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                         cudaMemcpyAsync(Rc, m.R, (size_t) T * D * 4, cudaMemcpyDeviceToDevice, m.cs);
                         gr_write(Rc, m.bo, m.inj, HC, T, m.cs);
                         strata::kernels::cvec_apply(Rc, l, T, D, nullptr, 0, nullptr, 0, false, m.cs);
-                        gr_norm_rs(Rc, (const float*) wnn->data, EPS, rc, xc, T, m.cs, nullptr, D);
+                        gr_norm_rs(Rc, (const float*) wnn->data, EPS, rc, xc, T, m.cs, nullptr, D, hcf);
                         gr_write_cvec_norm_rs(m.R, m.bo, m.inj, HC, cv_dir + l * N, cv_s + l, cv_on,
                                               strata::kernels::cvec().mode, (const float*) wnn->data, EPS, m.grs,
-                                              m.xn16, T, m.cs, m.xn16_lo, ldx);
+                                              m.xn16, T, m.cs, m.xn16_lo, ldx, hcf);
                         std::vector<float> a((size_t) T * D), b((size_t) T * D), ra((size_t) T * HC), rb((size_t) T * HC);
                         std::vector<uint16_t> xa((size_t) T * D), xb((size_t) T * D);
                         cudaMemcpyAsync(a.data(), m.R, a.size() * 4, cudaMemcpyDeviceToHost, m.cs);
@@ -3886,11 +3941,11 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                     } else
                     gr_write_cvec_norm_rs(m.R, m.bo, m.inj, HC, cv_dir + l * N, cv_s + l, cv_on,
                                           strata::kernels::cvec().mode, (const float*) wnn->data, EPS, m.grs, m.xn16,
-                                          T, m.cs, m.xn16_lo, ldx);
+                                          T, m.cs, m.xn16_lo, ldx, hcf);
                     normed = true;
                 } else if (wnn) {
                     gr_write_norm_rs(m.R, m.bo, m.inj, HC, (const float*) wnn->data, EPS, m.grs, m.xn16, T, m.cs,
-                                     m.xn16_lo, ldx);
+                                     m.xn16_lo, ldx, hcf);
                     normed = true;
                 } else {
                     gr_write(m.R, m.bo, m.inj, HC, T, m.cs);

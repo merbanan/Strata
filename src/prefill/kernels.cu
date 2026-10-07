@@ -96,7 +96,7 @@ __global__ void gr_norm_kernel(const float* __restrict__ R, const float* __restr
 // so the FP32 copy of the normalized rows (T x 10240 floats) is neither written nor read
 __global__ void gr_norm_rs_kernel(const float* __restrict__ R, const float* __restrict__ w, float eps,
                                   float* __restrict__ rs_out, uint16_t* __restrict__ xn16,
-                                  uint16_t* __restrict__ xn16_lo, int64_t ldx) {
+                                  uint16_t* __restrict__ xn16_lo, int64_t ldx, int f16) {
     __shared__ float sh[32];
     const int64_t row = blockIdx.x;                 // t * 4 + c
     const int c = (int) (row % HC);
@@ -108,7 +108,7 @@ __global__ void gr_norm_rs_kernel(const float* __restrict__ R, const float* __re
     if (threadIdx.x == 0) rs_out[row] = rs;
     for (int d = threadIdx.x; d < N; d += blockDim.x) {
         const float v = r[d] * rs * w[c * N + d];
-        const uint16_t h = act16(v);
+        const uint16_t h = f16 ? hf_sat(v) : act16(v);
         xn16[xo + d] = h;
         if (xn16_lo) xn16_lo[xo + d] = bf_lo(v, h);
     }
@@ -143,7 +143,7 @@ __global__ void __launch_bounds__(256) gr_write_norm_rs_kernel(float* __restrict
                                                                const float* __restrict__ inj, int64_t inj_ld,
                                                                const float* __restrict__ w, float eps,
                                                                float* __restrict__ rs_out, uint16_t* __restrict__ xn16,
-                                                               uint16_t* __restrict__ xn16_lo, int64_t ldx) {
+                                                               uint16_t* __restrict__ xn16_lo, int64_t ldx, int f16) {
     __shared__ float sh[32];
     const int64_t row = blockIdx.x;                 // t * 4 + c
     const int64_t t = row / HC;
@@ -167,7 +167,7 @@ __global__ void __launch_bounds__(256) gr_write_norm_rs_kernel(float* __restrict
 #pragma unroll
     for (int d = threadIdx.x; d < N; d += 256, ++k) {
         const float x = v[k] * rs * w[c * N + d];
-        const uint16_t h = act16(x);
+        const uint16_t h = f16 ? hf_sat(x) : act16(x);
         xn16[xo + d] = h;
         if (xn16_lo) xn16_lo[xo + d] = bf_lo(x, h);
     }
@@ -180,7 +180,7 @@ __global__ void __launch_bounds__(256) gr_write_cvec_norm_rs_kernel(
     float* __restrict__ R, const float* __restrict__ bo, const float* __restrict__ inj, int64_t inj_ld,
     const float* __restrict__ v_l, const float* __restrict__ s_l, const int* __restrict__ on, int mode,
     const float* __restrict__ w, float eps, float* __restrict__ rs_out, uint16_t* __restrict__ xn16,
-    uint16_t* __restrict__ xn16_lo, int64_t ldx) {
+    uint16_t* __restrict__ xn16_lo, int64_t ldx, int f16) {
     __shared__ float sh[32];
     __shared__ float part[8];
     const int64_t row = blockIdx.x;                 // t * 4 + c
@@ -229,18 +229,18 @@ __global__ void __launch_bounds__(256) gr_write_cvec_norm_rs_kernel(
 #pragma unroll
     for (int d = threadIdx.x; d < N; d += 256, ++k) {
         const float y = x[k] * rs * w[c * N + d];
-        const uint16_t h = act16(y);
+        const uint16_t h = f16 ? hf_sat(y) : act16(y);
         xn16[t * ldx + (int64_t) c * N + d] = h;
         if (xn16_lo) xn16_lo[t * ldx + (int64_t) c * N + d] = bf_lo(y, h);
     }
 }
 __global__ void gr_silu_kernel(const float* __restrict__ lo, uint16_t* __restrict__ lo16, uint16_t* __restrict__ lo16_lo,
-                               int64_t n) {
+                               int64_t n, int f16) {
     const int64_t i = (int64_t) blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
     const float x = lo[i] / (float) HC;
     const float v = x / (1.0f + __expf(-x));
-    const uint16_t h = act16(v);
+    const uint16_t h = f16 ? hf_sat(v) : act16(v);
     lo16[i] = h;
     if (lo16_lo) lo16_lo[i] = bf_lo(v, h);
 }
@@ -1838,9 +1838,9 @@ void gr_norm(const float* R, const float* w_norm, float eps, float* xn, uint16_t
     check("gr_norm");
 }
 void gr_norm_rs(const float* R, const float* w_norm, float eps, float* rs, uint16_t* xn16, int64_t T, void* stream,
-                uint16_t* xn16_lo, int64_t ldx) {
+                uint16_t* xn16_lo, int64_t ldx, bool f16) {
     gr_norm_rs_kernel<<<(unsigned) (T * HC), 256, 0, (cudaStream_t) stream>>>(R, w_norm, eps, rs, xn16, xn16_lo,
-                                                                                ldx > 0 ? ldx : D);
+                                                                                ldx > 0 ? ldx : D, f16 ? 1 : 0);
     check("gr_norm_rs");
 }
 void gr_mix_r(const float* R, const float* rs, const float* w_norm, const float* gated, float* mixed, uint16_t* mixed16,
@@ -1870,22 +1870,93 @@ bool gr_upmix(const uint16_t* lo16, const uint16_t* w_up, const float* R, const 
 #endif
 }
 void gr_write_norm_rs(float* R, const float* bo, const float* inj, int64_t inj_ld, const float* w_norm_next, float eps,
-                      float* rs, uint16_t* xn16, int64_t T, void* stream, uint16_t* xn16_lo, int64_t ldx) {
+                      float* rs, uint16_t* xn16, int64_t T, void* stream, uint16_t* xn16_lo, int64_t ldx, bool f16) {
     gr_write_norm_rs_kernel<<<(unsigned) (T * HC), 256, 0, (cudaStream_t) stream>>>(R, bo, inj, inj_ld, w_norm_next, eps,
                                                                                       rs, xn16, xn16_lo,
-                                                                                      ldx > 0 ? ldx : D);
+                                                                                      ldx > 0 ? ldx : D, f16 ? 1 : 0);
     check("gr_write_norm_rs");
 }
 void gr_write_cvec_norm_rs(float* R, const float* bo, const float* inj, int64_t inj_ld, const float* v_l,
                            const float* s_l, const int* on, int mode, const float* w_norm_next, float eps, float* rs,
-                           uint16_t* xn16, int64_t T, void* stream, uint16_t* xn16_lo, int64_t ldx) {
+                           uint16_t* xn16, int64_t T, void* stream, uint16_t* xn16_lo, int64_t ldx, bool f16) {
     gr_write_cvec_norm_rs_kernel<<<(unsigned) (T * HC), 256, 0, (cudaStream_t) stream>>>(
-        R, bo, inj, inj_ld, v_l, s_l, on, mode, w_norm_next, eps, rs, xn16, xn16_lo, ldx > 0 ? ldx : D);
+        R, bo, inj, inj_ld, v_l, s_l, on, mode, w_norm_next, eps, rs, xn16, xn16_lo, ldx > 0 ? ldx : D, f16 ? 1 : 0);
     check("gr_write_cvec_norm_rs");
 }
-void gr_silu(const float* lo, uint16_t* lo16, int64_t T, void* stream, uint16_t* lo16_lo) {
-    gr_silu_kernel<<<blocks_for(T * LR), 256, 0, (cudaStream_t) stream>>>(lo, lo16, lo16_lo, T * LR);
+void gr_silu(const float* lo, uint16_t* lo16, int64_t T, void* stream, uint16_t* lo16_lo, bool f16) {
+    gr_silu_kernel<<<blocks_for(T * LR), 256, 0, (cudaStream_t) stream>>>(lo, lo16, lo16_lo, T * LR, f16 ? 1 : 0);
     check("gr_silu");
+}
+// ---- STRATA_PF_HC_FAST=1: the hyper-connection read's weights as FP16 and its inject projection
+namespace {
+__global__ void hc_w_to_f16_kernel(const void* __restrict__ w, const float* __restrict__ q8_scale,
+                                   uint16_t* __restrict__ out, int64_t n) {
+    for (int64_t i = (int64_t) blockIdx.x * blockDim.x + threadIdx.x; i < n; i += (int64_t) gridDim.x * blockDim.x) {
+        float v;
+        if (q8_scale) v = q8_scale[i >> 5] * (float) ((const int8_t*) w)[i];   // STRATA_HC_REQ8: code * scale per 32
+        else v = __uint_as_float((uint32_t) ((const uint16_t*) w)[i] << 16);   // BF16 (exact in FP16's normal range)
+        out[i] = hf_sat(v);
+    }
+}
+// inj[t, j] = sum_k xn16[t, k] * w[j, k] for the 4 rows of w (FP16 in, FP32 accumulate).  A block takes HCI_TOK tokens:
+// each thread holds its slice of w's 4 rows in registers per step and walks the tokens, so w is read from L2 once
+// per HCI_TOK tokens; xn16 is read once (coalesced half2).
+constexpr int HCI_TOK = 8;
+__global__ void __launch_bounds__(256) hc_inject_f16_kernel(const uint16_t* __restrict__ x, int64_t ldx,
+                                                            const uint16_t* __restrict__ w, float* __restrict__ inj,
+                                                            int64_t T) {
+    __shared__ float part[8][HCI_TOK * HC];
+    const int64_t t0 = (int64_t) blockIdx.x * HCI_TOK;
+    float acc[HCI_TOK][HC];
+#pragma unroll
+    for (int i = 0; i < HCI_TOK; ++i)
+#pragma unroll
+        for (int j = 0; j < HC; ++j) acc[i][j] = 0.0f;
+    const __half2* w2 = reinterpret_cast<const __half2*>(w);
+    for (int p = threadIdx.x; p < D / 2; p += 256) {
+        float2 wf[HC];
+#pragma unroll
+        for (int j = 0; j < HC; ++j) wf[j] = __half22float2(w2[(int64_t) j * (D / 2) + p]);
+#pragma unroll
+        for (int i = 0; i < HCI_TOK; ++i) {
+            if (t0 + i < T) {
+                const float2 xf = __half22float2(reinterpret_cast<const __half2*>(x + (t0 + i) * ldx)[p]);
+#pragma unroll
+                for (int j = 0; j < HC; ++j) acc[i][j] = fmaf(xf.y, wf[j].y, fmaf(xf.x, wf[j].x, acc[i][j]));
+            }
+        }
+    }
+    const int lane = threadIdx.x & 31, wp = threadIdx.x >> 5;
+#pragma unroll
+    for (int i = 0; i < HCI_TOK; ++i)
+#pragma unroll
+        for (int j = 0; j < HC; ++j) {
+            float v = acc[i][j];
+#pragma unroll
+            for (int o = 16; o > 0; o >>= 1) v += __shfl_xor_sync(0xffffffffu, v, o);
+            if (lane == 0) part[wp][i * HC + j] = v;
+        }
+    __syncthreads();
+    if (threadIdx.x < HCI_TOK * HC) {
+        float v = 0.0f;
+#pragma unroll
+        for (int k = 0; k < 8; ++k) v += part[k][threadIdx.x];
+        const int64_t t = t0 + threadIdx.x / HC;
+        if (t < T) inj[t * HC + threadIdx.x % HC] = v;
+    }
+}
+}  // namespace
+void hc_w_to_f16(const void* w, const float* q8_scale, uint16_t* out, int64_t n, void* stream) {
+    if (n <= 0) return;
+    const int64_t b = std::min<int64_t>((n + 255) / 256, 4096);
+    hc_w_to_f16_kernel<<<(unsigned) b, 256, 0, (cudaStream_t) stream>>>(w, q8_scale, out, n);
+    check("hc_w_to_f16");
+}
+void hc_inject_f16(const uint16_t* xn16, int64_t ldx, const uint16_t* w_f16, float* inj, int64_t T, void* stream) {
+    if (T <= 0) return;
+    hc_inject_f16_kernel<<<(unsigned) ((T + HCI_TOK - 1) / HCI_TOK), 256, 0, (cudaStream_t) stream>>>(
+        xn16, ldx > 0 ? ldx : D, w_f16, inj, T);
+    check("hc_inject_f16");
 }
 void gr_mix(const float* xn, const float* gated, float* mixed, uint16_t* mixed16, int64_t T, void* stream,
             uint16_t* mixed_h, uint16_t* mixed16_lo) {
