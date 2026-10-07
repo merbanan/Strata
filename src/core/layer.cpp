@@ -678,7 +678,7 @@ uint64_t qsa_state_bytes(const ModelGeometry& g, int64_t max_cells, bool with_ro
     if (p.mode == 1) n += strata::kernels::kv_stream_map_bytes(p.slots) + 6 * 16;   // the residency map
     n += (uint64_t) (s.idx_block - 1) * s.idx_dim * 4;                         // tail
     n += (uint64_t) s.idx_dim * 4;                                             // dead
-    n += (uint64_t) p.pooled_rows * s.idx_dim * 4;                             // pooled
+    n += (uint64_t) p.pooled_rows * s.idx_dim * strata::kernels::qsa_idx_key_bytes();   // pooled (FP32 or FP16)
     n += 16;                                                                   // block_pos
     if (with_rope) n += (uint64_t) max_cells * (s.n_rot / 2) * 4 * 2;          // cos + sin tables
     n += strata::kernels::qsa_step_bytes() + 16;                               // counts and aligned attention status
@@ -776,7 +776,7 @@ uint64_t qsa_state_init(const ModelGeometry& g, int64_t max_cells, void* base, Q
     st.idx_tail = c.take<float>((uint64_t) (s.idx_block - 1) * s.idx_dim);
     st.idx_dead = c.take<float>((uint64_t) s.idx_dim);
     st.idx_pooled_rows = p.pooled_rows;
-    st.idx_pooled = c.take<float>((uint64_t) p.pooled_rows * s.idx_dim);
+    st.idx_pooled = (float*) c.take_bytes((uint64_t) p.pooled_rows * s.idx_dim * strata::kernels::qsa_idx_key_bytes());
     st.idx_block_pos = c.take<int32_t>(1);
     if (share_rope != nullptr) {
         st.cos_tab = share_rope->cos_tab;
@@ -888,7 +888,7 @@ void qsa_state_zero(const QsaState& st, const ModelGeometry& g, void* stream) {
     if (st.kv_mode == 1) strata::kernels::kv_stream_reset(st.map, stream);
     cudaMemsetAsync(st.idx_tail, 0, (size_t) (s.idx_block - 1) * s.idx_dim * 4, cs);
     cudaMemsetAsync(st.idx_dead, 0, (size_t) s.idx_dim * 4, cs);
-    cudaMemsetAsync(st.idx_pooled, 0, (size_t) st.idx_pooled_rows * s.idx_dim * 4, cs);
+    cudaMemsetAsync(st.idx_pooled, 0, (size_t) st.idx_pooled_rows * s.idx_dim * strata::kernels::qsa_idx_key_bytes(), cs);
 }
 
 strata::kernels::QsaAttnPools qsa_attn_pools(const QsaState& st) {

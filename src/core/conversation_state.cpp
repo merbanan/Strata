@@ -1,3 +1,7 @@
+#include "strata/kernels/f16_bits.hpp"
+#include "strata/kernels/qsa.hpp"
+#include <cstring>
+#include <vector>
 #include "strata/core/conversation_snapshot.hpp"
 #include "conversation_checked.hpp"
 
@@ -64,7 +68,7 @@ bool checkpoint_targets(const SessionState& ss, const ModelGeometry& g, size_t t
         if (!st.idx_tail || !st.idx_dead || !st.idx_block_pos || !st.idx_pooled ||
             st.max_cells < 0 || tokens > (uint64_t) st.max_cells ||
             (tokens && tokens / (uint64_t) block >= (uint64_t) std::max<int64_t>(0, st.idx_pooled_rows)) ||
-            !product(pooled_bytes, {tokens / (uint64_t) block + 1, (uint64_t) g.idx_key_dim, sizeof(float)}))
+            !product(pooled_bytes, {tokens / (uint64_t) block + 1, (uint64_t) g.idx_key_dim, (uint64_t) strata::kernels::qsa_idx_key_bytes()}))
             return fail(error, "invalid indexer running-state target");
     }
     return true;
@@ -183,7 +187,16 @@ bool conversation_checkpoint_restore(const ConversationCheckpoint& c, SessionSta
             !copy(st.idx_block_pos, c.block_pos.data() + j * z.block_pos, z.block_pos, error)) return false;
         if (!c.ids.empty()) {
             const size_t row = c.ids.size() / strata::kernels::qsa_real_shapes().idx_block;
-            if (!copy(st.idx_pooled + row * g.idx_key_dim, c.dead.data() + j * z.dead, z.dead, error)) return false;
+            if (strata::kernels::qsa_idx_f16()) {   // STRATA_IDX_F16: the spare row is the dead key rounded as the kernels do
+                std::vector<uint16_t> h((size_t) g.idx_key_dim);
+                const uint8_t* d = c.dead.data() + j * z.dead;
+                for (size_t k = 0; k < h.size(); ++k) {
+                    float v;
+                    std::memcpy(&v, d + k * sizeof(float), sizeof v);
+                    h[k] = strata::kernels::f16_from_f32(v);
+                }
+                if (!copy((uint8_t*) st.idx_pooled + row * g.idx_key_dim * 2, h.data(), h.size() * 2, error)) return false;
+            } else if (!copy(st.idx_pooled + row * g.idx_key_dim, c.dead.data() + j * z.dead, z.dead, error)) return false;
         }
     }
     const size_t tokens = c.ids.size();
