@@ -20,6 +20,7 @@
 
 #include "strata/kernels/native_qsa_indexer.hpp"
 #include "strata/kernels/mrope.hpp"
+#include "strata/kernels/qsa.hpp"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <atomic>
@@ -28,6 +29,7 @@
 #include <cstdint>
 #include <limits>
 #include <stdexcept>
+#include <type_traits>
 
 namespace strata::kernels {
 namespace {
@@ -39,10 +41,17 @@ __device__ float warp_sum(float x) {
         x += __shfl_xor_sync(0xffffffffu, x, offset);
     return x;
 }
+// STRATA_IDX_F16: one pooled key element into FP32 or FP16 storage.  A template parameter, so the default (F16 =
+// false) kernels compile to the same code as before.
+template <bool F16>
+__device__ __forceinline__ void st_key(float* pooled, std::size_t i, float v) {
+    if constexpr (F16) reinterpret_cast<__half*>(pooled)[i] = __float2half_rn(v);
+    else pooled[i] = v;
+}
 // TAB (#280, STRATA_ROPE_TABLE=1): the angles from the session's float64 table.  The host launches <false> whenever
 // no table applies - the default - so the default kernel is 0.1.31's code exactly (the table read is not in it;
 // with it merely skipped at run time, the compiled default path changed its results).
-template <bool TAB>
+template <bool TAB, bool F16>
 __global__ void append(const float* __restrict__ raw, const int32_t* __restrict__ pos_dev,
                         int pos_stride, int n_steps,
                         int pos_base, const float* __restrict__ gamma, float epsilon,
@@ -103,9 +112,9 @@ __global__ void append(const float* __restrict__ raw, const int32_t* __restrict_
                         const float a = values[pair], z = values[pair + ROT / 2];
                         y = d < ROT / 2 ? a * c - z * s : a * s + z * c;
                     }
-                    pooled[std::size_t(b) * D + d] = y;
+                    st_key<F16>(pooled, std::size_t(b) * D + d, y);
                     if (pos == 0) dead[d] = y;
-                    else pooled[std::size_t(b + 1) * D + d] = dead[d];
+                    else st_key<F16>(pooled, std::size_t(b + 1) * D + d, dead[d]);
                     if (d == 0 && pos != 0) *block_pos = rope_pos;
                 }
             }
@@ -150,7 +159,7 @@ __device__ __forceinline__ float norm_scale(float mean, float* partials, int d) 
     return square_sum;
 }
 // cell 0 of a sequence: the spare (every gather index names cell 0), written to pooled[0] and dead
-template <bool TAB>
+template <bool TAB, bool F16>
 __global__ void append_first(const float* __restrict__ raw, const float* __restrict__ gamma, float epsilon,
                              float* __restrict__ dead, float* __restrict__ pooled, float theta_scale,
                              float freq_scale, float corr_low, float corr_high, float ext_factor, float mscale,
@@ -173,10 +182,10 @@ __global__ void append_first(const float* __restrict__ raw, const float* __restr
     if (d >= D) return;
     const float y = pooled_value<TAB>(values, d, 0, theta_scale, freq_scale, corr_low, corr_high, ext_factor, mscale,
                                  mtab, true, rt);
-    pooled[d] = y;
+    st_key<F16>(pooled, d, y);
     dead[d] = y;
 }
-template <bool TAB>
+template <bool TAB, bool F16>
 __global__ void append_blocks(const float* __restrict__ raw, int64_t n, int64_t p0, int pos_base,
                               const float* __restrict__ gamma, float epsilon, const float* __restrict__ tail,
                               const float* __restrict__ dead, float* __restrict__ pooled, int32_t* __restrict__ block_pos,
@@ -204,10 +213,10 @@ __global__ void append_blocks(const float* __restrict__ raw, int64_t n, int64_t 
     __syncthreads();
     if (d >= D) return;
     const int rope_pos = pos_base + R * (int) b;
-    pooled[std::size_t(b) * D + d] = pooled_value<TAB>(values, d, rope_pos, theta_scale, freq_scale, corr_low, corr_high,
-                                                  ext_factor, mscale, mtab, false, rt);
+    st_key<F16>(pooled, std::size_t(b) * D + d, pooled_value<TAB>(values, d, rope_pos, theta_scale, freq_scale,
+                                                  corr_low, corr_high, ext_factor, mscale, mtab, false, rt));
     if (b == last_block) {
-        pooled[std::size_t(b + 1) * D + d] = dead[d];
+        st_key<F16>(pooled, std::size_t(b + 1) * D + d, dead[d]);
         if (d == 0) *block_pos = rope_pos;
     }
 }
@@ -246,21 +255,24 @@ void native_qsa_indexer_append_steps(const float* raw, const int32_t* relative_p
         throw std::invalid_argument("native QSA indexer requires fixed geometry, aligned position base, positive capacity/epsilon, valid frequency/scaling and explicit stream");
     const std::size_t pos_span = (n_steps == 1 || pos_stride <= 0) ? 4 : (std::size_t(n_steps - 1) * pos_stride + 1) * 4;
     const Span spans[] = {{raw,std::size_t(n_steps)*D*4},{relative_pos_device,pos_span},{gamma,D*4},{b.tail,(R-1)*D*4},
-        {b.dead,D*4},{b.pooled,std::size_t(max_cells/R+1)*D*4},{b.block_pos,4}};
+        {b.dead,D*4},{b.pooled,std::size_t(max_cells/R+1)*D*qsa_idx_key_bytes()},{b.block_pos,4}};
     for (const auto& span : spans) validate(span);
     for (int i = 0; i < 7; ++i) for (int j = i + 1; j < 7; ++j)
         if (overlaps(spans[i], spans[j])) throw std::invalid_argument("native QSA indexer buffers overlap");
     const float theta_scale = powf((float) scaling.freq_base, -2.0f / ROT);
     const RopeKernelArgs k = scaling.kernel_args(ROT);   // none: the identity constants
     const RopeTab rt = rope_table_for(scaling);
-    if (rt.cos != nullptr)
-        append<true><<<1,THREADS,0,static_cast<cudaStream_t>(stream)>>>(raw,relative_pos_device,pos_stride,n_steps,pos_base,gamma,epsilon,
+    const auto launch = [&](auto tab, auto f16) {
+        append<decltype(tab)::value, decltype(f16)::value><<<1,THREADS,0,static_cast<cudaStream_t>(stream)>>>(raw,relative_pos_device,pos_stride,n_steps,pos_base,gamma,epsilon,
             b.tail,b.dead,b.pooled,b.block_pos,int(max_cells),theta_scale,k.freq_scale,
             k.corr_low,k.corr_high,k.ext_factor,k.attn_factor,mrope_table(),rt);
-    else
-        append<false><<<1,THREADS,0,static_cast<cudaStream_t>(stream)>>>(raw,relative_pos_device,pos_stride,n_steps,pos_base,gamma,epsilon,
-            b.tail,b.dead,b.pooled,b.block_pos,int(max_cells),theta_scale,k.freq_scale,
-            k.corr_low,k.corr_high,k.ext_factor,k.attn_factor,mrope_table(),rt);
+    };
+    const bool f16 = qsa_idx_f16();
+    if (rt.cos != nullptr) {
+        if (f16) launch(std::true_type{}, std::true_type{}); else launch(std::true_type{}, std::false_type{});
+    } else {
+        if (f16) launch(std::false_type{}, std::true_type{}); else launch(std::false_type{}, std::false_type{});
+    }
     const auto error = cudaGetLastError();
     if (error != cudaSuccess) throw std::runtime_error(cudaGetErrorString(error));
 }
@@ -284,23 +296,24 @@ void native_qsa_indexer_append_batch(const float* raw, int64_t n, int64_t p0, in
     const cudaStream_t st = static_cast<cudaStream_t>(stream);
     const int32_t* mtab = mrope_table();
     const RopeTab rt = rope_table_for(scaling);
-    if (p0 == 0) {
-        if (rt.cos != nullptr)
-            append_first<true><<<1, THREADS, 0, st>>>(raw, gamma, epsilon, b.dead, b.pooled, theta_scale,
+    const auto launch = [&](auto tab, auto f16) {
+        constexpr bool T = decltype(tab)::value, F = decltype(f16)::value;
+        if (p0 == 0)
+            append_first<T, F><<<1, THREADS, 0, st>>>(raw, gamma, epsilon, b.dead, b.pooled, theta_scale,
                                                       fsf, cl, ch, ef, ms, mtab, rt);
-        else
-            append_first<false><<<1, THREADS, 0, st>>>(raw, gamma, epsilon, b.dead, b.pooled, theta_scale,
-                                                       fsf, cl, ch, ef, ms, mtab, rt);
+        // completed blocks: those whose last cell (4b+3) lies in [p0, p0 + n)
+        const int64_t first = p0 <= R - 1 ? 0 : (p0 - (R - 1) + R - 1) / R;       // the smallest b with 4b+3 >= p0
+        const int64_t hi = p0 + n - 1 >= R - 1 ? (p0 + n - 1 - (R - 1)) / R : -1;   // the largest b with 4b+3 <= p0+n-1
+        if (hi >= first)
+            append_blocks<T, F><<<(unsigned) (hi - first + 1), THREADS, 0, st>>>(raw, n, p0, pos_base, gamma, epsilon,
+                b.tail, b.dead, b.pooled, b.block_pos, first, hi, theta_scale, fsf, cl, ch, ef, ms, mtab, rt);
+    };
+    const bool f16 = qsa_idx_f16();   // STRATA_IDX_F16: FP16 pooled-key stores
+    if (rt.cos != nullptr) {
+        if (f16) launch(std::true_type{}, std::true_type{}); else launch(std::true_type{}, std::false_type{});
+    } else {
+        if (f16) launch(std::false_type{}, std::true_type{}); else launch(std::false_type{}, std::false_type{});
     }
-    // completed blocks: those whose last cell (4b+3) lies in [p0, p0 + n)
-    const int64_t first = p0 <= R - 1 ? 0 : (p0 - (R - 1) + R - 1) / R;       // the smallest b with 4b+3 >= p0
-    const int64_t hi = p0 + n - 1 >= R - 1 ? (p0 + n - 1 - (R - 1)) / R : -1;   // the largest b with 4b+3 <= p0+n-1
-    if (hi >= first && rt.cos != nullptr)
-        append_blocks<true><<<(unsigned) (hi - first + 1), THREADS, 0, st>>>(raw, n, p0, pos_base, gamma, epsilon,
-            b.tail, b.dead, b.pooled, b.block_pos, first, hi, theta_scale, fsf, cl, ch, ef, ms, mtab, rt);
-    else if (hi >= first)
-        append_blocks<false><<<(unsigned) (hi - first + 1), THREADS, 0, st>>>(raw, n, p0, pos_base, gamma, epsilon,
-            b.tail, b.dead, b.pooled, b.block_pos, first, hi, theta_scale, fsf, cl, ch, ef, ms, mtab, rt);
     append_tail<<<R - 1, D, 0, st>>>(raw, n, p0, b.tail);
     const auto error = cudaGetLastError();
     if (error != cudaSuccess) throw std::runtime_error(cudaGetErrorString(error));
