@@ -131,6 +131,9 @@ public:
     /// immediately and nothing is retained.  A CACHING source must return pointers into the cache, not into a
     /// reused staging buffer - otherwise the pool would read the next expert's bytes while computing this one.
     virtual const uint8_t* blob(int64_t layer, int64_t expert) = 0;
+    /// A blob pointer that stays valid (not recycled) for as long as the source is open: for a reader that uses it
+    /// after the call returns (the prompt path's CPU-share thread).  Defaults to `blob`.
+    virtual const uint8_t* blob_stable(int64_t layer, int64_t expert) { return blob(layer, expert); }
 
     /// Blobs touched, for the driver to report.  A source that does not count returns 0.
     virtual int64_t reads() const { return 0; }
