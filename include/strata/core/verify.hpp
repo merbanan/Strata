@@ -401,6 +401,7 @@ private:
     FlagSet flag_sets_[2 * 64 * 2] = {};                          // host-function arguments, one per (layer, group)
     static void fetch_dma(void* ctx, const uint8_t* const* src, int n, size_t bytes);
     static void raise_flag(uint32_t* flag, uint32_t value);
+    void raise_flag_b(uint32_t want);   // flag B, behind this window's pending DMA copies (see verify.cpp)
     int32_t* h_plan_ = nullptr;  int32_t* m_plan_ = nullptr;     // counts | start | dst | tok | ptr (as int32 pairs)
     int64_t plan_i32_ = 0;                                        // int32 words in the plan block
     GpuPlanSink sink_;

@@ -1801,7 +1801,7 @@ bool Verifier::run(int T, const int32_t* tokens, int64_t pos0, PoolMultiFn pool,
             sink_.start2[0] = 0;
             std::atomic_thread_fence(std::memory_order_seq_cst);
             *(volatile uint32_t*) h_flagA_ = want;
-            raise_flag(h_flagB_, want);
+            raise_flag_b(want);
         }
         // Layer 1's pre(1, 0) copies h_ple_ -> ple_ after Layer 0's wait_flag_ge(m_flag_, 1).
         // By collecting PLE here at k == 0 (after publishing flagA/flagB for Layer 0 so the GPU can run
@@ -1923,7 +1923,7 @@ void Verifier::raise_flag(uint32_t* flag, uint32_t value) {
 void Verifier::fetch_dma(void* ctx, const uint8_t* const* src, int n, size_t bytes) {
     Verifier* v = (Verifier*) ctx;
     const uint32_t want = v->cur_layer_ + 1;
-    if (n <= 0) { raise_flag(v->h_flagB_, want); return; }
+    if (n <= 0) { v->raise_flag_b(want); return; }
     v->copy_used_ = true;
     uint8_t* stage = (uint8_t*) v->sink_.staging;                  // this group's half in a split window
     // STRATA_DMA_BATCH (midhatn's #807, F12): the group's independent uploads as one cudaMemcpyBatchAsync.  Mode 0 is
@@ -1946,6 +1946,20 @@ void Verifier::fetch_dma(void* ctx, const uint8_t* const* src, int n, size_t byt
     fs.flag = v->h_flagB_;
     fs.value = want;
     cudaLaunchHostFunc(v->copy_, [](void* p) { FlagSet* s = (FlagSet*) p; raise_flag(s->flag, s->value); }, &fs);
+}
+
+// Flag B is one rising counter for the whole window, and the graph's PCIe groups wait for flag B >= their own ring
+// index.  A group with no PCIe share (or an empty plan) used to raise it directly, at once - but in a split window
+// the host serves (l, B) while the GPU still waits in post(l, A), so a direct raise to (l, B)'s index released
+// post(l, A) before A's copies (still queued on copy_) had landed in its staging half: A's PCIe experts ran on stale
+// staging (garbage output with --pcie-mode dma --spec-split).  Once this window has queued a copy, the raise goes on
+// the copy stream too, after every earlier group's copies and their own flag-B host functions.
+void Verifier::raise_flag_b(uint32_t want) {
+    if (!copy_used_) { raise_flag(h_flagB_, want); return; }   // nothing in flight: no earlier group can be overtaken
+    FlagSet& fs = flag_sets_[cur_layer_ % (sizeof flag_sets_ / sizeof flag_sets_[0])];
+    fs.flag = h_flagB_;
+    fs.value = want;
+    cudaLaunchHostFunc(copy_, [](void* p) { FlagSet* s = (FlagSet*) p; raise_flag(s->flag, s->value); }, &fs);
 }
 
 void Verifier::publish_plan(void* ctx) {
@@ -2418,7 +2432,7 @@ bool Verifier::run_slot_rows(const int* rows, int S, const int32_t* tokens, cons
             sink_.start2[0] = 0;
             std::atomic_thread_fence(std::memory_order_seq_cst);
             *(volatile uint32_t*) h_flagA_ = want;
-            raise_flag(h_flagB_, want);
+            raise_flag_b(want);
         }
         *flag = want;
         ms_wait += std::chrono::duration<double, std::milli>(b - a).count();
@@ -2569,7 +2583,7 @@ int Verifier::batch_poll(PoolMultiFn pool, void* user, std::string& err) {
             sink_.start2[0] = 0;
             std::atomic_thread_fence(std::memory_order_seq_cst);
             *(volatile uint32_t*) h_flagA_ = want;
-            raise_flag(h_flagB_, want);
+            raise_flag_b(want);
         }
         *(volatile uint32_t*) h_flag_ = want;
         ms_pool += ms_since(b);
@@ -2788,7 +2802,7 @@ int Verifier::service(PoolMultiFn pool, void* user, std::string& err) {
             sink_.start2[0] = 0;
             std::atomic_thread_fence(std::memory_order_seq_cst);
             *(volatile uint32_t*) h_flagA_ = want;
-            raise_flag(h_flagB_, want);
+            raise_flag_b(want);
         }
         if (fl_k_ == 0 && !gather_ple()) return -1;
         *(volatile uint32_t*) h_flag_ = want;
