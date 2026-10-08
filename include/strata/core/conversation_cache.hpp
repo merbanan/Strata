@@ -29,6 +29,9 @@ struct ConversationCheckpoint {
     // from, so retention never evicts it (conv_cache.hpp) and a parked conversation holding it stays parked.  A run-time
     // mark only: it is not in the session file, a request that pins the same prefix again sets it.
     bool pinned = false;
+    // O06 (STRATA_PREFIX_SNAPSHOTS): the prompt token that followed the checkpoint when it was saved (the drafter's
+    // cell L-1 was computed with it); -1 = not recorded, mounted as before
+    int32_t next = -1;
     // Ordinary layer-split checkpoints retain each device's running state.
     // Whole-session parking is currently single-GPU and rejects these parts.
     std::vector<ConversationCheckpoint> stage_parts;

@@ -21,6 +21,7 @@
 #include "strata/core/remote_expert_opt.hpp"
 #include "strata/core/expert_cache.hpp"
 #include "strata/core/conversation_snapshot.hpp"
+#include "strata/program/prefix_snapshots.hpp"
 #include "strata/core/conversation_file.hpp"
 #include "strata/core/conversation_memory.hpp"
 #include "strata/core/coupled_draft.hpp"
@@ -1358,6 +1359,31 @@ private:
 // just the checkpoints that are prefixes of the tokens the session holds now.
 using ImgKey = strata::core::ConversationImageKey;
 using ConvCheckpoint = strata::core::ConversationCheckpoint;
+
+// O06 (opt-in, STRATA_PREFIX_SNAPSHOTS=1; include/strata/program/prefix_snapshots.hpp): checkpoints at the start of
+// the last message and just before its closing <|im_end|>, the request's own checkpoints protected from the
+// retention rule, and a checkpoint with a recorded next token mounted only by a prompt with that token there.
+// STRATA_PREFIX_SNAPSHOTS_MIN (default 512): fresh tokens a checkpoint must keep; STRATA_PREFIX_SNAPSHOTS_MARGIN
+// (default 4): tokens before the <|im_end|>; STRATA_PREFIX_END_TOKEN (default 248046, <|im_end|>).
+struct PrefixSnapshotCfg {
+    bool on = false;
+    int64_t min_fresh = 512, margin = 4, end_token = 248046;
+};
+const PrefixSnapshotCfg& prefix_snapshot_cfg() {
+    static const PrefixSnapshotCfg c = [] {
+        PrefixSnapshotCfg r;
+        const char* v = std::getenv("STRATA_PREFIX_SNAPSHOTS");
+        r.on = v != nullptr && std::atoi(v) != 0;
+        if (const char* m = std::getenv("STRATA_PREFIX_SNAPSHOTS_MIN")) r.min_fresh = std::max(1LL, std::atoll(m));
+        if (const char* m = std::getenv("STRATA_PREFIX_SNAPSHOTS_MARGIN")) r.margin = std::max(0LL, std::atoll(m));
+        if (const char* m = std::getenv("STRATA_PREFIX_END_TOKEN")) r.end_token = std::atoll(m);
+        if (r.on)
+            std::fprintf(stderr, "strata serve: prefix snapshots on (min %lld fresh tokens, margin %lld, end token %lld)\n",
+                         (long long) r.min_fresh, (long long) r.margin, (long long) r.end_token);
+        return r;
+    }();
+    return c;
+}
 
 uint64_t fnv1a(const void* data, size_t n, uint64_t h = 1469598103934665603ull) {
     const uint8_t* p = (const uint8_t*) data;
@@ -6990,6 +7016,7 @@ int main(int argc, char** argv) {
         bool live_ok = false;
         std::vector<ConvCheckpoint> checks;
         uint64_t check_clock = 0;   // the checkpoints' LRU clock; creation and every use advance it
+        uint64_t check_protect = UINT64_MAX;   // O06: stamps above this are the running request's (protected)
         int64_t tail_ckpt_len = -1;   // --prompt-cache-tail: the length of the one tail checkpoint alive (-1 = none)
         bool cvec_cached = true;   // the control vector's state the live session and the checkpoints were read with
         // without --mtp the conversation cache stays on: a parked image carries the draft layer's K/V only when there is one
@@ -7253,7 +7280,8 @@ int main(int argc, char** argv) {
                        ") - a GPU hang; on Windows the driver is then reset";
             return false;
         };
-        auto checkpoint_at = [&](int64_t L, std::vector<ConvCheckpoint>* parts = nullptr, bool as_tail = false) -> bool {
+        auto checkpoint_at = [&](int64_t L, std::vector<ConvCheckpoint>* parts = nullptr, bool as_tail = false,
+                                 int32_t next = -1) -> bool {
             ckpt_why.clear();
             if (o.prompt_cache <= 0 || L < 1) return true;
             for (ConvCheckpoint& c : checks)
@@ -7284,6 +7312,7 @@ int main(int argc, char** argv) {
                 }
             }
             c.used = ++check_clock;
+            c.next = next;
             if (as_tail) {   // only one tail checkpoint stays alive: the previous request's goes
                 const int64_t old_tail = tail_ckpt_len;
                 checks.erase(std::remove_if(checks.begin(), checks.end(), [&](const ConvCheckpoint& k) {
@@ -7313,8 +7342,12 @@ int main(int argc, char** argv) {
                         for (size_t i = 0; i < checks.size(); ++i) pin_flags[i] = checks[i].pinned;
                         break;
                     }
-                const size_t victim = strata::program::conv_cache::eviction_victim(
-                    stamps.data(), stamps.size(), o.prompt_cache, tail_flags.get(), pin_flags.get());
+                // O06: the prefix snapshots' policy unless a pin=N prefix is held (that one never leaves)
+                const size_t victim = prefix_snapshot_cfg().on && !pin_flags
+                    ? strata::program::prefix_snapshots::eviction_victim(stamps.data(), stamps.size(), o.prompt_cache,
+                                                                         tail_flags.get(), check_protect)
+                    : strata::program::conv_cache::eviction_victim(
+                          stamps.data(), stamps.size(), o.prompt_cache, tail_flags.get(), pin_flags.get());
                 checks.erase(checks.begin() + (std::ptrdiff_t) victim);
             }
             return true;
@@ -9156,7 +9189,9 @@ int main(int argc, char** argv) {
             if (o.prompt_cache > 0 && want_cvec == cvec_cached) {
                 if (live_ok && starts_with(live, live_imgs)) { resume = (int64_t) live.size(); from_live = true; }
                 for (const ConvCheckpoint& c : checks)
-                    if ((int64_t) c.ids.size() > resume && starts_with(c.ids, c.imgs)) {
+                    if ((int64_t) c.ids.size() > resume && starts_with(c.ids, c.imgs) &&
+                        // O06: the drafter's cell L-1 holds the token that followed; mount only with that token
+                        (c.next < 0 || ids[c.ids.size()] == c.next)) {
                         resume = (int64_t) c.ids.size();
                         from_live = false;
                     }
@@ -9875,7 +9910,7 @@ int main(int argc, char** argv) {
                 return e != nullptr && std::atoi(e) != 0;
             }();
             // Only add a snapshot; the existing token and image checks still decide reuse.
-            const int64_t message_at = message_checkpoint && !multi_gpu && o.prompt_cache > 0
+            int64_t message_at = message_checkpoint && !multi_gpu && o.prompt_cache > 0
                 ? strata::program::message_checkpoint_boundary(ids, resume, turn_at, o.turn_token) : -1;
             // pin=N (opt-in): one more place the prompt is read to and checkpointed.  One pinned prefix at a time: a
             // new pin replaces the old; it needs room for the root, the pin and a rotating checkpoint
@@ -9900,7 +9935,25 @@ int main(int argc, char** argv) {
                     std::fprintf(stderr, "strata serve: pin=%lld: the cache has no checkpoint there to pin (it resumed from "
                                  "%lld)\n", (long long) req_pin, (long long) read_from);
             }
-            std::vector<int64_t> cuts = {reread_to, root_at, message_at, turn_at, n - 1};
+            // O06 (opt-in): the start of the last message (an edit of it) and just before its closing <|im_end|> (the
+            // same message sent again, extended) - one GPU, text only, a request that keeps checkpoints
+            const PrefixSnapshotCfg& pfx = prefix_snapshot_cfg();
+            const bool pfx_on = pfx.on && !multi_gpu && o.prompt_cache > 0 && req_ckpt && req_imgs.empty() &&
+                                reread_to <= 0 && turn_at > read_from;
+            int64_t content_at = -1;
+            if (pfx.on) check_protect = check_clock;   // what this request saves from here on is protected
+            if (pfx_on) {
+                const int64_t m = strata::program::prefix_snapshots::message_start(ids, read_from, turn_at, o.turn_token,
+                                                                                   pfx.min_fresh);
+                if (m > root_at) message_at = m;   // replaces STRATA_CACHE_MESSAGE_BOUNDARY's choice
+                content_at = strata::program::prefix_snapshots::content_end(ids, read_from, turn_at, o.turn_token,
+                                                                             pfx.end_token, pfx.margin, pfx.min_fresh);
+                if (content_at <= std::max(root_at, message_at)) content_at = -1;
+                std::fprintf(stderr, "strata serve: prefix snapshots: from %lld root %lld message %lld content %lld turn %lld "
+                                     "of %lld\n", (long long) read_from, (long long) root_at, (long long) message_at,
+                             (long long) content_at, (long long) turn_at, (long long) n);
+            }
+            std::vector<int64_t> cuts = {reread_to, root_at, message_at, content_at, turn_at, n - 1};
             if (pin_at >= 0) {
                 cuts.push_back(pin_at);
                 std::sort(cuts.begin(), cuts.end());   // the skipped -1s first, n - 1 still last
@@ -9943,8 +9996,11 @@ int main(int argc, char** argv) {
                     break;
                 }
                 at = to;
-                if ((to == turn_at || to == root_at || to == message_at || to == pin_at) &&
-                    !checkpoint_at(to, nullptr, to == message_at && to != turn_at && to != root_at && to != pin_at)) {   // the tail kind leaves first
+                if ((to == turn_at || to == root_at || to == message_at || to == content_at || to == pin_at) &&
+                    !checkpoint_at(to, nullptr,
+                                   !pfx_on && to == message_at && to != turn_at && to != root_at && to != pin_at,   // the tail kind leaves first
+                                   // O06: the next token is recorded where it is not a turn boundary's <|im_start|>
+                                   pfx_on && to == content_at ? (int32_t) ids[(size_t) to] : -1)) {
                     std::printf("ERR saving a conversation checkpoint failed%s\n", ckpt_why.c_str());
                     return 1;
                 }
