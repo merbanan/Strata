@@ -9,13 +9,16 @@
 //   * the last message is EXTENDED (the same user turn sent again with more text): the turn checkpoint holds the
 //     message's closing <|im_end|>, so nothing of the message matches -> `content`: a few tokens (`margin`) before
 //     the closing <|im_end|>, so a re-tokenized join still matches.
-// Both are only taken when they keep at least `min_fresh` tokens a later request would otherwise read again.
+// Both are only taken when the last message is a long user message (`long_user_message`: not a tool result or an
+// assistant turn, which agent loops append and never revisit) and they keep at least `min_fresh` tokens a later
+// request would otherwise read again; any other request gets no extra checkpoint and no extra prompt part.
 //
 // The drafter (MTP) cell at L-1 was computed with token L of the prompt that saved the checkpoint (MTP drafts
 // from h_{L-1} and the NEXT token), so a checkpoint at an arbitrary position is only mounted when the new prompt
 // has that same token at L (`next`); at a turn boundary that token is always <|im_start|>.
 #pragma once
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <vector>
@@ -50,6 +53,26 @@ inline int64_t content_end(const std::vector<int64_t>& ids, int64_t from, int64_
         if (ids[(size_t) i] == turn_token) { open = i; break; }
     const int64_t L = close - margin;
     return L - open >= min_fresh ? L : -1;
+}
+
+/// Whether the last message before the new assistant header at `turn_at` is a long USER message - the only kind a
+/// client edits or sends again extended; agent loops append tool results and assistant turns and never revisit them,
+/// so checkpoints inside those cost a sync + host copy and a prompt split for nothing.  The message opens with
+/// <|im_start|> `user_token` (searched back over the whole prompt, the cached part included), is not a tool result
+/// (the template renders those as a user turn whose content starts with `tool_response_token`, within the 3 tokens
+/// after the role), and spans at least `msg_min` tokens from its <|im_start|> to `turn_at`.
+inline bool long_user_message(const std::vector<int64_t>& ids, int64_t turn_at, int64_t turn_token, int64_t user_token,
+                              int64_t tool_response_token, int64_t msg_min) {
+    if (turn_token < 0 || user_token < 0 || turn_at < 1 || turn_at >= (int64_t) ids.size() ||
+        ids[(size_t) turn_at] != turn_token) return false;
+    int64_t open = -1;
+    for (int64_t i = turn_at - 1; i >= 0; --i)
+        if (ids[(size_t) i] == turn_token) { open = i; break; }
+    if (open < 0 || turn_at - open < std::max<int64_t>(msg_min, 1) || ids[(size_t) open + 1] != user_token) return false;
+    if (tool_response_token >= 0)
+        for (int64_t i = open + 2; i < turn_at && i <= open + 4; ++i)
+            if (ids[(size_t) i] == tool_response_token) return false;
+    return true;
 }
 
 /// The retention rule with the request's own checkpoints protected: a checkpoint stamped after `protect_after`
