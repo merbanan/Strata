@@ -1363,11 +1363,17 @@ using ConvCheckpoint = strata::core::ConversationCheckpoint;
 // O06 (opt-in, STRATA_PREFIX_SNAPSHOTS=1; include/strata/program/prefix_snapshots.hpp): checkpoints at the start of
 // the last message and just before its closing <|im_end|>, the request's own checkpoints protected from the
 // retention rule, and a checkpoint with a recorded next token mounted only by a prompt with that token there.
+// Only for a long user message (not a tool result / assistant turn, which agent loops append and never revisit):
+// any other request gets no extra checkpoint and no extra prompt part, so it runs as with the switch off.
 // STRATA_PREFIX_SNAPSHOTS_MIN (default 512): fresh tokens a checkpoint must keep; STRATA_PREFIX_SNAPSHOTS_MARGIN
-// (default 4): tokens before the <|im_end|>; STRATA_PREFIX_END_TOKEN (default 248046, <|im_end|>).
+// (default 4): tokens before the <|im_end|>; STRATA_PREFIX_SNAPSHOTS_MSG_MIN (default 2048): the last message's own
+// length (from its <|im_start|>) below which it gets none; STRATA_PREFIX_END_TOKEN (default 248046, <|im_end|>),
+// STRATA_PREFIX_USER_TOKEN (default 846, "user"), STRATA_PREFIX_TOOL_RESPONSE_TOKEN (default 248066,
+// <tool_response>, -1 = no tool-result check).
 struct PrefixSnapshotCfg {
     bool on = false;
-    int64_t min_fresh = 512, margin = 4, end_token = 248046;
+    int64_t min_fresh = 512, margin = 4, msg_min = 2048, end_token = 248046, user_token = 846,
+            tool_response_token = 248066;
 };
 const PrefixSnapshotCfg& prefix_snapshot_cfg() {
     static const PrefixSnapshotCfg c = [] {
@@ -1376,10 +1382,15 @@ const PrefixSnapshotCfg& prefix_snapshot_cfg() {
         r.on = v != nullptr && std::atoi(v) != 0;
         if (const char* m = std::getenv("STRATA_PREFIX_SNAPSHOTS_MIN")) r.min_fresh = std::max(1LL, std::atoll(m));
         if (const char* m = std::getenv("STRATA_PREFIX_SNAPSHOTS_MARGIN")) r.margin = std::max(0LL, std::atoll(m));
+        if (const char* m = std::getenv("STRATA_PREFIX_SNAPSHOTS_MSG_MIN")) r.msg_min = std::max(1LL, std::atoll(m));
         if (const char* m = std::getenv("STRATA_PREFIX_END_TOKEN")) r.end_token = std::atoll(m);
+        if (const char* m = std::getenv("STRATA_PREFIX_USER_TOKEN")) r.user_token = std::atoll(m);
+        if (const char* m = std::getenv("STRATA_PREFIX_TOOL_RESPONSE_TOKEN")) r.tool_response_token = std::atoll(m);
         if (r.on)
-            std::fprintf(stderr, "strata serve: prefix snapshots on (min %lld fresh tokens, margin %lld, end token %lld)\n",
-                         (long long) r.min_fresh, (long long) r.margin, (long long) r.end_token);
+            std::fprintf(stderr, "strata serve: prefix snapshots on (user messages of %lld+ tokens; min %lld fresh tokens, "
+                                 "margin %lld, end token %lld, user token %lld, tool response token %lld)\n",
+                         (long long) r.msg_min, (long long) r.min_fresh, (long long) r.margin, (long long) r.end_token,
+                         (long long) r.user_token, (long long) r.tool_response_token);
         return r;
     }();
     return c;
@@ -9938,20 +9949,26 @@ int main(int argc, char** argv) {
             // O06 (opt-in): the start of the last message (an edit of it) and just before its closing <|im_end|> (the
             // same message sent again, extended) - one GPU, text only, a request that keeps checkpoints
             const PrefixSnapshotCfg& pfx = prefix_snapshot_cfg();
+            // ... and only when the last message is a long user message (not a tool result or an assistant turn):
+            // any other request (an agent round) gets no extra part and no extra save, exactly as with the switch off
             const bool pfx_on = pfx.on && !multi_gpu && o.prompt_cache > 0 && req_ckpt && req_imgs.empty() &&
-                                reread_to <= 0 && turn_at > read_from;
+                                reread_to <= 0 && turn_at > read_from &&
+                                strata::program::prefix_snapshots::long_user_message(
+                                    ids, turn_at, o.turn_token, pfx.user_token, pfx.tool_response_token, pfx.msg_min);
             int64_t content_at = -1;
+            bool pfx_message = false;   // message_at is O06's (else STRATA_CACHE_MESSAGE_BOUNDARY's, if any)
             if (pfx.on) check_protect = check_clock;   // what this request saves from here on is protected
             if (pfx_on) {
                 const int64_t m = strata::program::prefix_snapshots::message_start(ids, read_from, turn_at, o.turn_token,
                                                                                    pfx.min_fresh);
-                if (m > root_at) message_at = m;   // replaces STRATA_CACHE_MESSAGE_BOUNDARY's choice
+                if (m > root_at) { message_at = m; pfx_message = true; }   // replaces STRATA_CACHE_MESSAGE_BOUNDARY's choice
                 content_at = strata::program::prefix_snapshots::content_end(ids, read_from, turn_at, o.turn_token,
                                                                              pfx.end_token, pfx.margin, pfx.min_fresh);
                 if (content_at <= std::max(root_at, message_at)) content_at = -1;
                 std::fprintf(stderr, "strata serve: prefix snapshots: from %lld root %lld message %lld content %lld turn %lld "
-                                     "of %lld\n", (long long) read_from, (long long) root_at, (long long) message_at,
-                             (long long) content_at, (long long) turn_at, (long long) n);
+                                     "of %lld\n", (long long) read_from, (long long) root_at,
+                             (long long) (pfx_message ? message_at : -1), (long long) content_at, (long long) turn_at,
+                             (long long) n);
             }
             std::vector<int64_t> cuts = {reread_to, root_at, message_at, content_at, turn_at, n - 1};
             if (pin_at >= 0) {
@@ -9998,9 +10015,9 @@ int main(int argc, char** argv) {
                 at = to;
                 if ((to == turn_at || to == root_at || to == message_at || to == content_at || to == pin_at) &&
                     !checkpoint_at(to, nullptr,
-                                   !pfx_on && to == message_at && to != turn_at && to != root_at && to != pin_at,   // the tail kind leaves first
+                                   !pfx_message && to == message_at && to != turn_at && to != root_at && to != pin_at,   // the tail kind leaves first
                                    // O06: the next token is recorded where it is not a turn boundary's <|im_start|>
-                                   pfx_on && to == content_at ? (int32_t) ids[(size_t) to] : -1)) {
+                                   to == content_at ? (int32_t) ids[(size_t) to] : -1)) {
                     std::printf("ERR saving a conversation checkpoint failed%s\n", ckpt_why.c_str());
                     return 1;
                 }

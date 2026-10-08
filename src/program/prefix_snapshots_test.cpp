@@ -56,6 +56,28 @@ int main() {
               "message start: an invalid turn position");
     }
     {
+        // the role check: chat() puts token 1000 + k after each <S>; make the last message a user / tool / assistant turn
+        constexpr int64_t U = 846, TR = 248066, A = 74455;
+        int64_t tu = 0;
+        auto ids = chat(3000, {2500}, tu);
+        const size_t open = 3000 + 3;
+        ids[open + 1] = U;
+        check(ps::long_user_message(ids, tu, S, U, TR, 2048), "long user message: a 2.5K user turn qualifies");
+        check(!ps::long_user_message(ids, tu, S, U, TR, 3000), "long user message: shorter than msg_min");
+        ids[open + 2] = NL;
+        ids[open + 3] = TR;
+        check(!ps::long_user_message(ids, tu, S, U, TR, 2048), "long user message: a tool result (<tool_response>)");
+        check(ps::long_user_message(ids, tu, S, U, -1, 2048), "long user message: tool check off");
+        ids[open + 3] = 5;
+        ids[open + 1] = A;
+        check(!ps::long_user_message(ids, tu, S, U, TR, 2048), "long user message: an assistant turn");
+        ids[open + 1] = U;
+        check(!ps::long_user_message(ids, 0, S, U, TR, 1) && !ps::long_user_message(ids, 5, S, U, TR, 1),
+              "long user message: an invalid turn position");
+        // the message's own length counts, also when most of it was read before (resumed inside it)
+        check(ps::long_user_message(ids, tu, S, U, TR, 2400), "long user message: own length, not fresh tokens");
+    }
+    {
         // root, two older leaves, then this request's message + content checkpoints (stamps 5, 6) and its turn (7)
         const std::vector<uint64_t> st = {1, 2, 3, 5, 6, 7};
         check(ps::eviction_victim(st.data(), st.size(), 5, nullptr, 4) == 1, "protected: an older leaf goes first");
