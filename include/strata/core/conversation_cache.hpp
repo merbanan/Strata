@@ -25,6 +25,9 @@ struct ConversationCheckpoint {
     std::vector<ConversationImageKey> imgs;
     std::vector<uint8_t> gdn, ple, tails, dead, block_pos;
     uint64_t used = 0; // upstream root-pinned/LRU checkpoint retention
+    // O06 (STRATA_PREFIX_SNAPSHOTS): the prompt token that followed the checkpoint when it was saved (the drafter's
+    // cell L-1 was computed with it); -1 = not recorded, mounted as before
+    int32_t next = -1;
     // Ordinary layer-split checkpoints retain each device's running state.
     // Whole-session parking is currently single-GPU and rejects these parts.
     std::vector<ConversationCheckpoint> stage_parts;
