@@ -3077,7 +3077,10 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                         // eligible layers alternate, without first, until CPU_MIN_RATIOS ratios are in; then the
                         // cheaper arm, and every CPU_PROBE-th layer the other one (a prime: the probes move across
                         // the layers from one chunk to the next), so both stay measured.
-                        if (cpu_maybe && cpu_share_env() < 0.0) {
+                        // STRATA_PREFILL_CPU_GATE=0: auto keeps its measured g / (c + g) share on every eligible layer
+                        // (the share before the gate) - an A/B for CPUs where the gate's probes cost more than it saves
+                        static const bool cpu_gate_off = [] { const char* e = std::getenv("STRATA_PREFILL_CPU_GATE"); return e && e[0] == '0'; }();
+                        if (cpu_maybe && cpu_share_env() < 0.0 && !cpu_gate_off) {
                             constexpr int64_t CPU_PROBE = 29;
                             constexpr int CPU_MIN_RATIOS = 3;
                             const int64_t i = m.cpu_layers++;
