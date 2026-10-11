@@ -31,8 +31,11 @@ inline constexpr int kTq3BlockBytes = 2 + 12;   // fp16 scale + 32 x 3 bits
 inline constexpr int kTq6BlockBytes = 2 + 24;   // fp16 scale + 32 x 6 bits
 
 /// The K/V code formats of a q4-family pool (kv_q4_set_tq, QsaAttnPools::tq): 0 q4_0, then K / V bits
-enum KvTq : int { kTqNone = 0, kTqK4V4 = 1, kTqK4V3 = 2, kTqK6V4 = 3, kTqK6V3 = 4 };
-STRATA_TQ_HD inline bool tq_k6(int tq) { return tq == kTqK6V4 || tq == kTqK6V3; }
+// kTqK6Q4 (--kv tq6q4): K TQ6, V k8v4's own q4_0 (linear codes) - 704 B per cell
+enum KvTq : int { kTqNone = 0, kTqK4V4 = 1, kTqK4V3 = 2, kTqK6V4 = 3, kTqK6V3 = 4, kTqK6Q4 = 5 };
+STRATA_TQ_HD inline bool tq_k6(int tq) { return tq == kTqK6V4 || tq == kTqK6V3 || tq == kTqK6Q4; }
+/// Whether a 4-bit block of K (is_v false) or V reads through the TQ4 levels (else q4_0's q - 8).
+STRATA_TQ_HD inline bool tq_4lv(int tq, bool is_v) { return tq != kTqNone && !(is_v && tq == kTqK6Q4); }
 STRATA_TQ_HD inline bool tq_v3(int tq) { return tq == kTqK4V3 || tq == kTqK6V3; }
 
 /// Bytes of one head's K row (head_dim values) in the pool: q4_0 / TQ4 144 (head_dim 256), TQ6 208.

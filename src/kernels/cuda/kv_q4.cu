@@ -111,7 +111,7 @@ __device__ __forceinline__ TqGroup tq_quant(float x, int lane, int tq, bool is_v
     g.packed = 0;
     if (g.bits == 3) g.d = f16_from_f32(tq3_group(x, lane, g.packed));
     else if (g.bits == 6) g.d = f16_from_f32(tq6_group(x, lane, g.packed));
-    else if (tq != kTqNone) g.d = f16_from_f32(tq4_group(x, g.byte));
+    else if (tq_4lv(tq, is_v)) g.d = f16_from_f32(tq4_group(x, g.byte));
     else g.d = q4_group(x, lane, g.byte);
     return g;
 }
@@ -194,7 +194,7 @@ __global__ void kv_gather_q4_kernel(const uint8_t* __restrict__ k_q4, const uint
     const long long row = (page * kv_heads + h) * page_size + (cell % page_size);
 
     const int j = t < 16 ? t : (t - 16);
-    const bool t4 = tq != kTqNone;
+    const bool t4 = tq_4lv(tq, false), v4 = tq_4lv(tq, true);
     float kv_;
     if (tq_k6(tq)) {   // TQ6 K (kv_tq.cuh)
         const uint8_t* kb = k_q4 + row * (long long) (blocks_per_head * kTq6BlockBytes) + b * kTq6BlockBytes;
@@ -211,7 +211,7 @@ __global__ void kv_gather_q4_kernel(const uint8_t* __restrict__ k_q4, const uint
     } else {
         const block_q4_0* v_blk = reinterpret_cast<const block_q4_0*>(v_q4 + row * bytes_per_head) + b;
         const uint8_t v_byte = v_blk->qs[j];
-        vv = tq4_val(t < 16 ? (v_byte & 0x0Fu) : (unsigned) (v_byte >> 4), t4) * f32_from_f16(v_blk->d);
+        vv = tq4_val(t < 16 ? (v_byte & 0x0Fu) : (unsigned) (v_byte >> 4), v4) * f32_from_f16(v_blk->d);
     }
     const long long dst_offset = ((id * kv_heads + h) * head_dim) + (b * QK4_0 + t);
     k_scratch[dst_offset] = f16_from_f32(kv_);

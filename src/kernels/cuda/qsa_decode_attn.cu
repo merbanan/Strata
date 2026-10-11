@@ -68,7 +68,7 @@ __device__ __forceinline__ void load8_q4(const QsaAttnPools& p, bool value, long
         tq6_load8(blk, rem, __half2float(__ushort_as_half(tq3_scale_bits(blk))), out);
         return;
     }
-    const bool tq = p.tq != kTqNone;
+    const bool tq = tq_4lv(p.tq, value);
     const block_q4_0* blk = reinterpret_cast<const block_q4_0*>((value ? p.v_q4 : p.k_q4) + row * bytes_per_head) + b;
     const float d = __half2float(__ushort_as_half(blk->d));
     // rem 0 / 16: bytes 0..7, rem 8 / 24: bytes 8..15 (low nibbles below 16, high ones from 16)
@@ -95,7 +95,7 @@ __device__ __forceinline__ float load_v1_q4(const QsaAttnPools& p, long long row
     const float dd = __half2float(__ushort_as_half(blk->d));
     const int j = rem < 16 ? rem : (rem - 16);
     const uint8_t byte = blk->qs[j];
-    return tq4_val(rem < 16 ? (byte & 0x0Fu) : (unsigned) (byte >> 4), p.tq != kTqNone) * dd;
+    return tq4_val(rem < 16 ? (byte & 0x0Fu) : (unsigned) (byte >> 4), tq_4lv(p.tq, true)) * dd;
 }
 template <int KV_MODE>
 __device__ __forceinline__ void load8(const QsaAttnPools& p, bool value, long long row, int d0, float* out) {

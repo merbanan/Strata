@@ -2211,17 +2211,18 @@ int main(int argc, char** argv) {
     }
     if (o.kv == "q4") o.kv = "q4_0";
     if (o.kv != "fp16" && o.kv != "int8" && o.kv != "q4_0" && o.kv != "k8v4" && o.kv != "tq4" && o.kv != "tq4v3" &&
-        o.kv != "tq6v4" && o.kv != "tq6v3") {
-        std::fprintf(stderr, "strata generate: --kv must be fp16, int8, q4_0, k8v4, tq4, tq4v3, tq6v4 or tq6v3\n");
+        o.kv != "tq6v4" && o.kv != "tq6v3" && o.kv != "tq6q4") {
+        std::fprintf(stderr, "strata generate: --kv must be fp16, int8, q4_0, k8v4, tq4, tq4v3, tq6v4, tq6v3 or tq6q4\n");
         return 2;
     }
     strata::core::qsa_set_kv_int8(o.kv == "int8");
     // PR #21: 4-bit codes after a Hadamard rotation (kv_q4.hpp).  tq4 / tq4v3 (kv_tq.cuh, from project-maya): the same
     // rotated pools with Lloyd-Max levels and least-squares scales - tq4v3's V in 3 bits (512 B/cell vs k8v4's 816)
-    const bool tqkv = o.kv == "tq4" || o.kv == "tq4v3" || o.kv == "tq6v4" || o.kv == "tq6v3";
+    const bool tqkv = o.kv == "tq4" || o.kv == "tq4v3" || o.kv == "tq6v4" || o.kv == "tq6v3" || o.kv == "tq6q4";
     strata::core::qsa_set_kv_q4(o.kv == "q4_0" || tqkv);
     strata::kernels::kv_q4_set_tq(o.kv == "tq4" ? strata::kernels::kTqK4V4 : o.kv == "tq4v3" ? strata::kernels::kTqK4V3
                                   : o.kv == "tq6v4" ? strata::kernels::kTqK6V4 : o.kv == "tq6v3" ? strata::kernels::kTqK6V3
+                                  : o.kv == "tq6q4" ? strata::kernels::kTqK6Q4
                                   : strata::kernels::kTqNone);
     if (tqkv)
         std::fprintf(stderr, "strata generate: --kv %s: rotated K/V in Lloyd-Max codes (TurboQuant, no QJL)\n", o.kv.c_str());
