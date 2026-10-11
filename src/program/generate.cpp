@@ -53,6 +53,7 @@
 #include "strata/kernels/native_rope.hpp"
 #include "strata/kernels/mrope.hpp"
 #include "strata/kernels/kv_q4.hpp"
+#include "strata/kernels/kv_tq.cuh"
 #include "strata/kernels/qsa.hpp"
 #include "strata/core/native_head.hpp"
 #include "strata/core/verify.hpp"
@@ -2209,12 +2210,18 @@ int main(int argc, char** argv) {
         return 2;
     }
     if (o.kv == "q4") o.kv = "q4_0";
-    if (o.kv != "fp16" && o.kv != "int8" && o.kv != "q4_0" && o.kv != "k8v4") {
-        std::fprintf(stderr, "strata generate: --kv must be fp16, int8, q4_0 or k8v4\n");
+    if (o.kv != "fp16" && o.kv != "int8" && o.kv != "q4_0" && o.kv != "k8v4" && o.kv != "tq4" && o.kv != "tq4v3") {
+        std::fprintf(stderr, "strata generate: --kv must be fp16, int8, q4_0, k8v4, tq4 or tq4v3\n");
         return 2;
     }
     strata::core::qsa_set_kv_int8(o.kv == "int8");
-    strata::core::qsa_set_kv_q4(o.kv == "q4_0");   // PR #21: 4-bit codes after a Hadamard rotation (kv_q4.hpp)
+    // PR #21: 4-bit codes after a Hadamard rotation (kv_q4.hpp).  tq4 / tq4v3 (kv_tq.cuh, from project-maya): the same
+    // rotated pools with Lloyd-Max levels and least-squares scales - tq4v3's V in 3 bits (512 B/cell vs k8v4's 816)
+    strata::core::qsa_set_kv_q4(o.kv == "q4_0" || o.kv == "tq4" || o.kv == "tq4v3");
+    strata::kernels::kv_q4_set_tq(o.kv == "tq4" ? strata::kernels::kTqK4V4
+                                  : o.kv == "tq4v3" ? strata::kernels::kTqK4V3 : strata::kernels::kTqNone);
+    if (o.kv == "tq4" || o.kv == "tq4v3")
+        std::fprintf(stderr, "strata generate: --kv %s: rotated K/V in Lloyd-Max codes (TurboQuant, no QJL)\n", o.kv.c_str());
     // STRATA_KV_ROT=1: INT8 K/V through the Hadamard rotation --kv q4_0 already uses. Opt-in: first-token KL to
     // fp16 K/V improved on an NVFP4 pack (0.0066 -> 0.0051) but not on IQ2_XS (0.0022 -> 0.0054)
     const char* kv_rot = std::getenv("STRATA_KV_ROT");

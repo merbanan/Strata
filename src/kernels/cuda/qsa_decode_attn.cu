@@ -2,6 +2,7 @@
 #include "strata/kernels/qsa_decode_attn.hpp"
 #include "strata/kernels/kv_q8.hpp"
 #include "strata/kernels/kv_q4.hpp"
+#include "strata/kernels/kv_tq.cuh"
 
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
@@ -57,17 +58,39 @@ __device__ __forceinline__ void load8_q4(const QsaAttnPools& p, bool value, long
     constexpr int bytes_per_head = (HD / QK4_0) * sizeof(block_q4_0);
     const int b = d0 / QK4_0;
     const int rem = d0 % QK4_0;
+    if (value && p.tq == kTqK4V3) {   // TQ3 V (kv_tq.cuh): 14-byte blocks
+        const uint8_t* blk = p.v_q4 + row * (HD / QK4_0) * kTq3BlockBytes + b * kTq3BlockBytes;
+        tq3_load8(blk, rem, __half2float(__ushort_as_half(tq3_scale_bits(blk))), out);
+        return;
+    }
+    const bool tq = p.tq != kTqNone;
     const block_q4_0* blk = reinterpret_cast<const block_q4_0*>((value ? p.v_q4 : p.k_q4) + row * bytes_per_head) + b;
     const float d = __half2float(__ushort_as_half(blk->d));
+    // rem 0 / 16: bytes 0..7, rem 8 / 24: bytes 8..15 (low nibbles below 16, high ones from 16)
     const int j = (rem == 0 || rem == 16) ? 0 : 8;
     const uint8_t* bytes = blk->qs + j;
     if (rem < 16) {
 #pragma unroll
-        for (int k = 0; k < 8; ++k) out[k] = (float) ((int)(bytes[k] & 0x0F) - 8) * d;
+        for (int k = 0; k < 8; ++k) out[k] = tq4_val(bytes[k] & 0x0Fu, tq) * d;
     } else {
 #pragma unroll
-        for (int k = 0; k < 8; ++k) out[k] = (float) ((int)(bytes[k] >> 4) - 8) * d;
+        for (int k = 0; k < 8; ++k) out[k] = tq4_val(bytes[k] >> 4, tq) * d;
     }
+}
+// One element d of a rotated q4-family V row (modes 2 and 3; kv_tq.cuh's formats by p.tq).
+__device__ __forceinline__ float load_v1_q4(const QsaAttnPools& p, long long row, int d) {
+    const int b = d / QK4_0;
+    const int rem = d % QK4_0;
+    if (p.tq == kTqK4V3) {
+        const uint8_t* blk = p.v_q4 + row * (HD / QK4_0) * kTq3BlockBytes + b * kTq3BlockBytes;
+        return c_tq3[tq3_code(blk, rem)] * __half2float(__ushort_as_half(tq3_scale_bits(blk)));
+    }
+    constexpr int bytes_per_head = (HD / QK4_0) * sizeof(block_q4_0);
+    const block_q4_0* blk = reinterpret_cast<const block_q4_0*>(p.v_q4 + row * bytes_per_head) + b;
+    const float dd = __half2float(__ushort_as_half(blk->d));
+    const int j = rem < 16 ? rem : (rem - 16);
+    const uint8_t byte = blk->qs[j];
+    return tq4_val(rem < 16 ? (byte & 0x0Fu) : (unsigned) (byte >> 4), p.tq != kTqNone) * dd;
 }
 template <int KV_MODE>
 __device__ __forceinline__ void load8(const QsaAttnPools& p, bool value, long long row, int d0, float* out) {
@@ -199,16 +222,8 @@ __global__ void __launch_bounds__(THREADS) attn_chunk_kernel(const float* __rest
         } else if constexpr (KV_MODE == 1) {
             const float sc = __half2float(__ushort_as_half(p.v_scale[srow[c] * (HD / KV_Q8_GROUP) + t / KV_Q8_GROUP]));
             v = (float) p.v_q[srow[c] * HD + t] * sc;
-        } else {   // modes 2 and 3: V is rotated Q4_0 (kv_q4.hpp); the caller rotates the output back
-            constexpr int bytes_per_head = (HD / QK4_0) * sizeof(block_q4_0);
-            const int b = t / QK4_0;
-            const int rem = t % QK4_0;
-            const block_q4_0* blk = reinterpret_cast<const block_q4_0*>(p.v_q4 + srow[c] * bytes_per_head) + b;
-            const float d = __half2float(__ushort_as_half(blk->d));
-            const int j = rem < 16 ? rem : (rem - 16);
-            const uint8_t byte = blk->qs[j];
-            const int nibble = (rem < 16) ? ((byte & 0x0F) - 8) : ((byte >> 4) - 8);
-            v = (float) nibble * d;
+        } else {   // modes 2 and 3: V is rotated Q4_0 / TQ (kv_q4.hpp, kv_tq.cuh); the caller rotates the output back
+            v = load_v1_q4(p, srow[c], t);
         }
 #pragma unroll
         for (int h = 0; h < G; ++h) acc[h] = fmaf(sp[h][c], v, acc[h]);
@@ -289,16 +304,8 @@ __device__ __forceinline__ float load_v1(const QsaAttnPools& p, long long row, i
     } else if constexpr (KV_MODE == 1) {
         const float sc = __half2float(__ushort_as_half(p.v_scale[row * (HD / KV_Q8_GROUP) + d / KV_Q8_GROUP]));
         return (float) p.v_q[row * HD + d] * sc;
-    } else {   // modes 2 and 3: V is rotated Q4_0 (kv_q4.hpp); the caller rotates the output back
-        constexpr int bytes_per_head = (HD / QK4_0) * sizeof(block_q4_0);
-        const int b = d / QK4_0;
-        const int rem = d % QK4_0;
-        const block_q4_0* blk = reinterpret_cast<const block_q4_0*>(p.v_q4 + row * bytes_per_head) + b;
-        const float dd = __half2float(__ushort_as_half(blk->d));
-        const int j = rem < 16 ? rem : (rem - 16);
-        const uint8_t byte = blk->qs[j];
-        const int nibble = (rem < 16) ? ((byte & 0x0F) - 8) : ((byte >> 4) - 8);
-        return (float) nibble * dd;
+    } else {   // modes 2 and 3: V is rotated Q4_0 / TQ (kv_q4.hpp, kv_tq.cuh); the caller rotates the output back
+        return load_v1_q4(p, row, d);
     }
 }
 
@@ -525,8 +532,10 @@ bool pre75_attn() {
 
 }  // namespace
 
-void qsa_decode_attn_batch(const float* q, const QsaAttnPools& pools, const int32_t* ids, const int32_t* steps,
+void qsa_decode_attn_batch(const float* q, const QsaAttnPools& pools_in, const int32_t* ids, const int32_t* steps,
                            int64_t cap, const QsaShapes& s, float* scratch, float* attn, int64_t n_q, void* stream) {
+    QsaAttnPools pools = pools_in;
+    pools.tq = kv_q4_tq();   // kv_tq.cuh: the q4-family code format
     if (n_q <= 0) return;
     if (s.head_dim != HD || s.n_head != (int64_t) G * s.n_head_kv || cap <= 0 || !scratch || !ids || !steps ||
         !pools.page_table || n_q > 65535) {
@@ -580,8 +589,10 @@ uint64_t qsa_decode_attn_scratch_floats(int64_t cap, const QsaShapes& s) {
     return (uint64_t) chunks * (uint64_t) s.n_head * (HD + 2) + 64;
 }
 
-void qsa_decode_attn_step(const float* q, const QsaAttnPools& pools, const int32_t* ids, const int32_t* step,
+void qsa_decode_attn_step(const float* q, const QsaAttnPools& pools_in, const int32_t* ids, const int32_t* step,
                           int64_t cap, const QsaShapes& s, float* scratch, float* attn, void* stream) {
+    QsaAttnPools pools = pools_in;
+    pools.tq = kv_q4_tq();   // kv_tq.cuh: the q4-family code format
     if (s.head_dim != HD || s.n_head != (int64_t) G * s.n_head_kv || cap <= 0 || !scratch || !ids || !step ||
         !pools.page_table) {
         std::fprintf(stderr, "qsa_decode_attn: unsupported geometry or missing buffers\n");

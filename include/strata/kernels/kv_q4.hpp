@@ -37,6 +37,11 @@ inline uint64_t kv_q4_bytes_per_cell(const QsaShapes& s) {
     return (uint64_t) s.n_head_kv * kv_q4_bytes_per_head((int) s.head_dim) * 2;
 }
 
+/// kv_tq.cuh: the code format of every q4-family pool in the process (0 q4_0, 1 TQ4, 2 TQ4 K + TQ3 V) - `--kv tq4` /
+/// `tq4v3`, set before the session is sized.  Read by the append, gather and attention kernels' launchers.
+void kv_q4_set_tq(int tq);
+int kv_q4_tq();
+
 /// Orthonormal Fast Walsh-Hadamard Transform of rows of 256 floats (scale 1/16): its own inverse.
 void fwht256_cuda(const float* src, float* dst, int64_t n_rows, void* stream);
 inline void fwht256_inplace_cuda(float* data, int64_t n_rows, void* stream) { fwht256_cuda(data, data, n_rows, stream); }

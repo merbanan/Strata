@@ -1,6 +1,7 @@
 #include "strata/kernels/qsa.hpp"
 #include "strata/core/conversation_snapshot.hpp"
 #include "strata/kernels/kv_q4.hpp"
+#include "strata/kernels/kv_tq.cuh"
 #include "conversation_checked.hpp"
 #include <cuda_runtime.h>
 
@@ -50,7 +51,9 @@ bool layout(const QsaState& st, const ModelGeometry& g, int64_t upto, bool index
     // snapshot or prompt checkpoint taken with the rotation never restores into one without it, nor the reverse.
     // (Q4_0 is always rotated: nothing to tell apart; without the rotation the format is the one it always was.)
     const int rotated = st.kv_rot && !st.kv_q4 && !st.kv_hybrid ? 16 : 0;
-    l = {(st.kv_hybrid ? 3 : qsa_kv_format(st)) + rotated, cells, pooled, s.page_size, 0, 0, 0, 0, 0};
+    // kv_tq.cuh: TQ4 / TQ3 codes read through other levels than q4_0's - their own formats (+32 per tq)
+    const int tq = st.kv_q4 ? 32 * strata::kernels::kv_q4_tq() : 0;
+    l = {(st.kv_hybrid ? 3 : qsa_kv_format(st)) + rotated + tq, cells, pooled, s.page_size, 0, 0, 0, 0, 0};
     using conversation_detail::product;
     if (!product(l.data, {(uint64_t) cells, (uint64_t) g.n_head_kv, per}) ||
         !product(l.scales, {(uint64_t) cells, (uint64_t) g.n_head_kv,
@@ -68,6 +71,12 @@ bool layout(const QsaState& st, const ModelGeometry& g, int64_t upto, bool index
             return false;
         }
         l.value_scales = 0;
+    } else if (st.kv_q4 && strata::kernels::kv_q4_tq() == strata::kernels::kTqK4V3) {   // TQ3 V: 112 B rows
+        if (!product(l.value_data, {(uint64_t) cells, (uint64_t) g.n_head_kv,
+                                   strata::kernels::kv_tq_v_bytes_per_head((int) g.head_dim, strata::kernels::kTqK4V3)})) {
+            error = "conversation snapshot: TQ3 V byte count overflow";
+            return false;
+        }
     }
     return true;
 }
