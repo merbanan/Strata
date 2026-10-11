@@ -42,7 +42,7 @@ Runs runs_of(const QsaAttnPools& slots, const KvHostPools& host, int fmt, const 
         r.src[2] = (const uint8_t*) host.v_q4;    r.dst[2] = (uint8_t*) slots.v_q4;    r.len[2] = v;
         r.n = 3;
     } else if (fmt == kKvQ4) {
-        const int bytes = rows * (int) kv_q4_bytes_per_head((int) s.head_dim);
+        const int bytes = rows * (int) kv_tq_k_bytes_per_head((int) s.head_dim, kv_q4_tq());   // TQ6 K: 208 B rows
         const int vbytes = rows * (int) kv_tq_v_bytes_per_head((int) s.head_dim, kv_q4_tq());   // TQ3 V: 112 B rows
         r.src[0] = (const uint8_t*) host.k_q4; r.dst[0] = (uint8_t*) slots.k_q4; r.len[0] = bytes;
         r.src[1] = (const uint8_t*) host.v_q4; r.dst[1] = (uint8_t*) slots.v_q4; r.len[1] = vbytes;
@@ -204,7 +204,7 @@ uint64_t kv_block_bytes(const QsaShapes& s, int fmt) {
         return rows * (uint64_t) s.head_dim + rows * (uint64_t) (s.head_dim / KV_Q8_GROUP) * 2 +
                rows * kv_q4_bytes_per_head((int) s.head_dim);
     if (fmt == kKvQ4)
-        return rows * (kv_q4_bytes_per_head((int) s.head_dim) + kv_tq_v_bytes_per_head((int) s.head_dim, kv_q4_tq()));
+        return rows * (kv_tq_k_bytes_per_head((int) s.head_dim, kv_q4_tq()) + kv_tq_v_bytes_per_head((int) s.head_dim, kv_q4_tq()));
     return fmt == kKvInt8 ? rows * (uint64_t) s.head_dim * 2 + rows * (uint64_t) (s.head_dim / KV_Q8_GROUP) * 2 * 2
                 : rows * (uint64_t) s.head_dim * 2 * 2;
 }

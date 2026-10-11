@@ -2210,17 +2210,20 @@ int main(int argc, char** argv) {
         return 2;
     }
     if (o.kv == "q4") o.kv = "q4_0";
-    if (o.kv != "fp16" && o.kv != "int8" && o.kv != "q4_0" && o.kv != "k8v4" && o.kv != "tq4" && o.kv != "tq4v3") {
-        std::fprintf(stderr, "strata generate: --kv must be fp16, int8, q4_0, k8v4, tq4 or tq4v3\n");
+    if (o.kv != "fp16" && o.kv != "int8" && o.kv != "q4_0" && o.kv != "k8v4" && o.kv != "tq4" && o.kv != "tq4v3" &&
+        o.kv != "tq6v4" && o.kv != "tq6v3") {
+        std::fprintf(stderr, "strata generate: --kv must be fp16, int8, q4_0, k8v4, tq4, tq4v3, tq6v4 or tq6v3\n");
         return 2;
     }
     strata::core::qsa_set_kv_int8(o.kv == "int8");
     // PR #21: 4-bit codes after a Hadamard rotation (kv_q4.hpp).  tq4 / tq4v3 (kv_tq.cuh, from project-maya): the same
     // rotated pools with Lloyd-Max levels and least-squares scales - tq4v3's V in 3 bits (512 B/cell vs k8v4's 816)
-    strata::core::qsa_set_kv_q4(o.kv == "q4_0" || o.kv == "tq4" || o.kv == "tq4v3");
-    strata::kernels::kv_q4_set_tq(o.kv == "tq4" ? strata::kernels::kTqK4V4
-                                  : o.kv == "tq4v3" ? strata::kernels::kTqK4V3 : strata::kernels::kTqNone);
-    if (o.kv == "tq4" || o.kv == "tq4v3")
+    const bool tqkv = o.kv == "tq4" || o.kv == "tq4v3" || o.kv == "tq6v4" || o.kv == "tq6v3";
+    strata::core::qsa_set_kv_q4(o.kv == "q4_0" || tqkv);
+    strata::kernels::kv_q4_set_tq(o.kv == "tq4" ? strata::kernels::kTqK4V4 : o.kv == "tq4v3" ? strata::kernels::kTqK4V3
+                                  : o.kv == "tq6v4" ? strata::kernels::kTqK6V4 : o.kv == "tq6v3" ? strata::kernels::kTqK6V3
+                                  : strata::kernels::kTqNone);
+    if (tqkv)
         std::fprintf(stderr, "strata generate: --kv %s: rotated K/V in Lloyd-Max codes (TurboQuant, no QJL)\n", o.kv.c_str());
     // STRATA_KV_ROT=1: INT8 K/V through the Hadamard rotation --kv q4_0 already uses. Opt-in: first-token KL to
     // fp16 K/V improved on an NVFP4 pack (0.0066 -> 0.0051) but not on IQ2_XS (0.0022 -> 0.0054)
@@ -10976,9 +10979,10 @@ int main(int argc, char** argv) {
                 auto kv_arrays = [&](const strata::core::QsaState& st) {
                     const bool h = st.kv_mode != 0;
                     std::vector<std::pair<const void*, int64_t>> a;
-                    if (st.kv_q4) {
-                        const int64_t q4b = (int64_t) strata::kernels::kv_q4_bytes_per_head((int) qs.head_dim);
-                        a = {{h ? st.host.k_q4 : st.k_q4, q4b}, {h ? st.host.v_q4 : st.v_q4, q4b}};
+                    if (st.kv_q4) {   // TQ rows (kv_tq.cuh) differ from q4_0's
+                        const int tq = strata::kernels::kv_q4_tq();
+                        a = {{h ? st.host.k_q4 : st.k_q4, (int64_t) strata::kernels::kv_tq_k_bytes_per_head((int) qs.head_dim, tq)},
+                             {h ? st.host.v_q4 : st.v_q4, (int64_t) strata::kernels::kv_tq_v_bytes_per_head((int) qs.head_dim, tq)}};
                     } else if (st.kv_hybrid) {
                         const int64_t q4b = (int64_t) strata::kernels::kv_q4_bytes_per_head((int) qs.head_dim);
                         a = {{h ? st.host.k_q : st.k_q, kvb}, {h ? st.host.v_q4 : st.v_q4, q4b},

@@ -849,7 +849,8 @@ void take_stage(Alloc& o_borrowed, const core::SessionState& ss, const strata::k
         st.k_scale = o.take<uint16_t>(rows * (s.head_dim / 64), ok);
         st.v_q4 = o.take<uint8_t>(rows * strata::kernels::kv_q4_bytes_per_head((int) s.head_dim), ok);
     } else if (q0.kv_q4) {
-        st.k_q4 = o.take<uint8_t>(rows * strata::kernels::kv_q4_bytes_per_head((int) s.head_dim), ok);
+        st.k_q4 = o.take<uint8_t>(rows * strata::kernels::kv_tq_k_bytes_per_head((int) s.head_dim,
+                                                                                  strata::kernels::kv_q4_tq()), ok);
         st.v_q4 = o.take<uint8_t>(rows * strata::kernels::kv_tq_v_bytes_per_head((int) s.head_dim,
                                                                                   strata::kernels::kv_q4_tq()), ok);
     } else if (q0.kv_int8) {

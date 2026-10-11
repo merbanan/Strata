@@ -101,25 +101,27 @@ __device__ __forceinline__ void q4_store(uint8_t* pool, long long row, int b, in
 struct TqGroup {
     uint16_t d;
     uint8_t byte;      // q4_0 / TQ4: lane t < 16's packed byte
-    unsigned packed;   // TQ3: the group of eight's 24 bits (lanes with (t & 7) == 0)
-    bool t3;
+    unsigned packed;   // TQ3: the group of eight's 24 bits (lanes with (t & 7) == 0); TQ6: of four ((t & 3) == 0)
+    int bits;          // 4 (q4_0 / TQ4), 3, 6
 };
 __device__ __forceinline__ TqGroup tq_quant(float x, int lane, int tq, bool is_v) {
     TqGroup g;
-    g.t3 = is_v && tq == kTqK4V3;
+    g.bits = is_v ? (tq_v3(tq) ? 3 : 4) : (tq_k6(tq) ? 6 : 4);
     g.byte = 0;
     g.packed = 0;
-    if (g.t3) g.d = f16_from_f32(tq3_group(x, lane, g.packed));
+    if (g.bits == 3) g.d = f16_from_f32(tq3_group(x, lane, g.packed));
+    else if (g.bits == 6) g.d = f16_from_f32(tq6_group(x, lane, g.packed));
     else if (tq != kTqNone) g.d = f16_from_f32(tq4_group(x, g.byte));
     else g.d = q4_group(x, lane, g.byte);
     return g;
 }
 __device__ __forceinline__ void tq_store(uint8_t* pool, long long row, int b, int lane, const TqGroup& g) {
-    if (!g.t3) { q4_store(pool, row, b, lane, g.d, g.byte); return; }
-    uint8_t* blk = pool + row * (long long) (8 * kTq3BlockBytes) + b * kTq3BlockBytes;
+    if (g.bits == 4) { q4_store(pool, row, b, lane, g.d, g.byte); return; }
+    const int bb = g.bits == 3 ? kTq3BlockBytes : kTq6BlockBytes, per = g.bits == 3 ? 8 : 4;
+    uint8_t* blk = pool + row * (long long) (8 * bb) + b * bb;
     if (lane == 0) { blk[0] = (uint8_t) g.d; blk[1] = (uint8_t) (g.d >> 8); }
-    if ((lane & 7) == 0) {
-        uint8_t* q = blk + 2 + 3 * (lane >> 3);
+    if ((lane & (per - 1)) == 0) {
+        uint8_t* q = blk + 2 + 3 * (lane / per);
         q[0] = (uint8_t) g.packed;
         q[1] = (uint8_t) (g.packed >> 8);
         q[2] = (uint8_t) (g.packed >> 16);
@@ -191,14 +193,19 @@ __global__ void kv_gather_q4_kernel(const uint8_t* __restrict__ k_q4, const uint
     const long long page = (long long) table[cell / page_size];
     const long long row = (page * kv_heads + h) * page_size + (cell % page_size);
 
-    const block_q4_0* k_blk = reinterpret_cast<const block_q4_0*>(k_q4 + row * bytes_per_head) + b;
-    const float kd = f32_from_f16(k_blk->d);
     const int j = t < 16 ? t : (t - 16);
-    const uint8_t k_byte = k_blk->qs[j];
     const bool t4 = tq != kTqNone;
-    const float kq = tq4_val(t < 16 ? (k_byte & 0x0Fu) : (unsigned) (k_byte >> 4), t4);
+    float kv_;
+    if (tq_k6(tq)) {   // TQ6 K (kv_tq.cuh)
+        const uint8_t* kb = k_q4 + row * (long long) (blocks_per_head * kTq6BlockBytes) + b * kTq6BlockBytes;
+        kv_ = c_tq6[tq6_code(kb, t)] * f32_from_f16(tq3_scale_bits(kb));
+    } else {
+        const block_q4_0* k_blk = reinterpret_cast<const block_q4_0*>(k_q4 + row * bytes_per_head) + b;
+        const uint8_t k_byte = k_blk->qs[j];
+        kv_ = tq4_val(t < 16 ? (k_byte & 0x0Fu) : (unsigned) (k_byte >> 4), t4) * f32_from_f16(k_blk->d);
+    }
     float vv;
-    if (tq == kTqK4V3) {   // TQ3 V (kv_tq.cuh)
+    if (tq_v3(tq)) {   // TQ3 V (kv_tq.cuh)
         const uint8_t* vb = v_q4 + row * (long long) (blocks_per_head * kTq3BlockBytes) + b * kTq3BlockBytes;
         vv = c_tq3[tq3_code(vb, t)] * f32_from_f16(tq3_scale_bits(vb));
     } else {
@@ -207,7 +214,7 @@ __global__ void kv_gather_q4_kernel(const uint8_t* __restrict__ k_q4, const uint
         vv = tq4_val(t < 16 ? (v_byte & 0x0Fu) : (unsigned) (v_byte >> 4), t4) * f32_from_f16(v_blk->d);
     }
     const long long dst_offset = ((id * kv_heads + h) * head_dim) + (b * QK4_0 + t);
-    k_scratch[dst_offset] = f16_from_f32(kq * kd);
+    k_scratch[dst_offset] = f16_from_f32(kv_);
     v_scratch[dst_offset] = f16_from_f32(vv);
 }
 

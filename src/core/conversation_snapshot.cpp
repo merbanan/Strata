@@ -41,7 +41,7 @@ bool layout(const QsaState& st, const ModelGeometry& g, int64_t upto, bool index
         return false;
     }
     const int64_t cells = ((upto + s.page_size - 1) / s.page_size) * s.page_size;
-    const size_t per = st.kv_q4 ? (size_t) strata::kernels::kv_q4_bytes_per_head((int) g.head_dim)
+    const size_t per = st.kv_q4 ? (size_t) strata::kernels::kv_tq_k_bytes_per_head((int) g.head_dim, strata::kernels::kv_q4_tq())
                               : (size_t) g.head_dim * (int8_keys ? 1 : 2);
     // Include the moving spare row, not only completed blocks. The checkpoint
     // restore reconstructs that row when rewinding to an earlier prefix.
@@ -71,9 +71,9 @@ bool layout(const QsaState& st, const ModelGeometry& g, int64_t upto, bool index
             return false;
         }
         l.value_scales = 0;
-    } else if (st.kv_q4 && strata::kernels::kv_q4_tq() == strata::kernels::kTqK4V3) {   // TQ3 V: 112 B rows
+    } else if (st.kv_q4 && strata::kernels::tq_v3(strata::kernels::kv_q4_tq())) {   // TQ3 V: 112 B rows
         if (!product(l.value_data, {(uint64_t) cells, (uint64_t) g.n_head_kv,
-                                   strata::kernels::kv_tq_v_bytes_per_head((int) g.head_dim, strata::kernels::kTqK4V3)})) {
+                                   strata::kernels::kv_tq_v_bytes_per_head((int) g.head_dim, strata::kernels::kv_q4_tq())})) {
             error = "conversation snapshot: TQ3 V byte count overflow";
             return false;
         }

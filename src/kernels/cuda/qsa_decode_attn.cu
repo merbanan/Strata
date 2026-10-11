@@ -58,9 +58,14 @@ __device__ __forceinline__ void load8_q4(const QsaAttnPools& p, bool value, long
     constexpr int bytes_per_head = (HD / QK4_0) * sizeof(block_q4_0);
     const int b = d0 / QK4_0;
     const int rem = d0 % QK4_0;
-    if (value && p.tq == kTqK4V3) {   // TQ3 V (kv_tq.cuh): 14-byte blocks
+    if (value && tq_v3(p.tq)) {   // TQ3 V (kv_tq.cuh): 14-byte blocks
         const uint8_t* blk = p.v_q4 + row * (HD / QK4_0) * kTq3BlockBytes + b * kTq3BlockBytes;
         tq3_load8(blk, rem, __half2float(__ushort_as_half(tq3_scale_bits(blk))), out);
+        return;
+    }
+    if (!value && tq_k6(p.tq)) {   // TQ6 K: 26-byte blocks
+        const uint8_t* blk = p.k_q4 + row * (HD / QK4_0) * kTq6BlockBytes + b * kTq6BlockBytes;
+        tq6_load8(blk, rem, __half2float(__ushort_as_half(tq3_scale_bits(blk))), out);
         return;
     }
     const bool tq = p.tq != kTqNone;
@@ -81,7 +86,7 @@ __device__ __forceinline__ void load8_q4(const QsaAttnPools& p, bool value, long
 __device__ __forceinline__ float load_v1_q4(const QsaAttnPools& p, long long row, int d) {
     const int b = d / QK4_0;
     const int rem = d % QK4_0;
-    if (p.tq == kTqK4V3) {
+    if (tq_v3(p.tq)) {
         const uint8_t* blk = p.v_q4 + row * (HD / QK4_0) * kTq3BlockBytes + b * kTq3BlockBytes;
         return c_tq3[tq3_code(blk, rem)] * __half2float(__ushort_as_half(tq3_scale_bits(blk)));
     }
