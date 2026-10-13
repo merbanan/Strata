@@ -9358,14 +9358,48 @@ int main(int argc, char** argv) {
                     note = " (the cache keeps its smallest size: the prompt path's buffers)";
                 }
                 if (comp) {
+                    // the adaptive tier swaps experts RAM does not hold into the tail too: each one in the slots given
+                    // up moves (a device copy) into a kept slot whose expert RAM also holds (that one becomes a miss
+                    // the RAM copy serves), so no expert ends up in neither tier
                     const int64_t seg = std::max<int64_t>(xcache.segment_bytes(), 1);
                     const int64_t after = xcache.slots_within((keep + seg - 1) / seg * seg);
+                    auto has_ram = [&](size_t i) { return src.has_resident((int64_t) i / g.n_expert, (int64_t) i % g.n_expert); };
+                    auto slot_size = [&](int64_t sl) { return (int64_t) (xcache.slot_offset(sl + 1) - xcache.slot_offset(sl)); };
+                    std::vector<std::pair<int32_t, size_t>> dups;   // (kept slot, its expert) with a RAM copy, coldest last
                     for (size_t i = 0; i < host_res.size(); ++i)
-                        if (host_res[i] >= after && !src.has_resident((int64_t) i / g.n_expert, (int64_t) i % g.n_expert)) {
-                            e = "VRAM: a slot given up holds an expert the resident RAM copy does not (past the prompt "
-                                "path's lend region)";
+                        if (host_res[i] >= 0 && host_res[i] < after && has_ram(i)) dups.emplace_back(host_res[i], i);
+                    std::sort(dups.begin(), dups.end(), [&](const auto& a, const auto& b) {
+                        const float ua = drive.d.usage.empty() ? 0.0f : drive.d.usage[a.second];
+                        const float ub = drive.d.usage.empty() ? 0.0f : drive.d.usage[b.second];
+                        return ua > ub;
+                    });
+                    int64_t moved = 0;
+                    for (size_t i = 0; i < host_res.size(); ++i) {
+                        if (host_res[i] < after || has_ram(i)) continue;
+                        const int64_t need = (int64_t) strata::kernels::cpu::expert_layout().blob_bytes((int64_t) i / g.n_expert);
+                        int64_t pick = -1;
+                        for (int64_t q = (int64_t) dups.size() - 1; q >= 0; --q)
+                            if (slot_size(dups[(size_t) q].first) >= need) { pick = q; break; }
+                        if (pick < 0) {
+                            e = "VRAM: no kept slot can take an expert the resident RAM copy does not hold";
                             return false;
                         }
+                        const auto [to, victim] = dups[(size_t) pick];
+                        dups.erase(dups.begin() + pick);
+                        if (cudaMemcpy(xcache.device_slot(to), xcache.device_slot(host_res[i]), (size_t) need,
+                                       cudaMemcpyDeviceToDevice) != cudaSuccess) {
+                            e = std::string("VRAM: moving an expert: ") + cudaGetErrorString(cudaGetLastError());
+                            return false;
+                        }
+                        host_res[victim] = strata::core::kNotResident;
+                        host_res[i] = to;
+                        ++moved;
+                    }
+                    if (moved > 0) {
+                        res_upload();
+                        std::fprintf(stderr, "strata serve: VRAM: %lld experts only the GPU held moved below slot %lld\n",
+                                     (long long) moved, (long long) after);
+                    }
                 }
                 if (!xcache.shrink(keep, e)) return false;
                 const int64_t live = xcache.slots();
