@@ -147,6 +147,12 @@ std::size_t native_q8_1_il_bytes(int n_in, int ncols);
 void native_q8_1_interleave(const void* x_q8_1, void* x_il, int n_in, int ncols, void* stream);
 // True when native_mmvq_il runs its own kernel for this call (IQ4_XS, Q4_K, Q5_K, Q6_K, 2-4 columns, the exact layout).
 bool native_mmvq_il_supported(int ggml_type, int ncols, int n_out);
+// STRATA_MMVQ_TC=1 (opt-in, sm_75+): Q4_K / Q5_K with 2-8 columns (STRATA_MMVQ_TC_MIN: the fewest) on int8 tensor
+// cores (mmvq_tc.cu): the weights are read once for every column.  Not bitwise equal to native_mmvq (fp32 order).
+// Returns false (nothing enqueued) when it does not take the call; `force` ignores the switch (tests, benchmarks).
+bool native_mmvq_tc_supported(int ggml_type, int ncols, int n_in);
+bool native_mmvq_tc(int ggml_type, const void* weights, const void* x_q8_1, float* y, int n_in, int n_out, int ncols,
+                    void* stream, bool force = false);
 // native_mmvq for 2..4 columns whose copy native_q8_1_interleave wrote, bitwise native_mmvq's output: kernels in which a
 // warp takes 1, 2 or 4 rows and reads the columns from the interleaved copy; native_mmvq (x_q8_1) when not supported.
 void native_mmvq_il(int ggml_type, const void* weights, const void* x_q8_1, const void* x_il, float* y, int n_in,

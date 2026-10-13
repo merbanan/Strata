@@ -2818,6 +2818,7 @@ std::size_t native_mmvq_weight_bytes(int ggml_type, int n_in, int n_out) {
 
 void native_mmvq(int ggml_type, const void* weights, const void* x_q8_1, float* y,
                  int n_in, int n_out, int ncols, void* stream) {
+    if (native_mmvq_tc(ggml_type, weights, x_q8_1, y, n_in, n_out, ncols, stream)) return;   // STRATA_MMVQ_TC=1
     switch (ggml_type) {
     case 2: native_q4_0_mmvq(weights, x_q8_1, y, n_in, n_out, ncols, stream); break;
     case 6: native_q5_0_mmvq(weights, x_q8_1, y, n_in, n_out, ncols, stream); break;
@@ -3045,6 +3046,7 @@ bool native_mmvq_il_supported(int ggml_type, int ncols, int n_out) {
 
 void native_mmvq_il(int ggml_type, const void* weights, const void* x_q8_1, const void* x_il, float* y, int n_in,
                     int n_out, int ncols, void* stream) {
+    if (native_mmvq_tc(ggml_type, weights, x_q8_1, y, n_in, n_out, ncols, stream)) return;   // STRATA_MMVQ_TC=1
     if (!native_mmvq_il_supported(ggml_type, ncols, n_out)) {
         native_mmvq(ggml_type, weights, x_q8_1, y, n_in, n_out, ncols, stream);
         return;

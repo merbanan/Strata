@@ -351,6 +351,7 @@ if(STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP)
                           src/kernels/cuda/elementwise.cu
                           src/kernels/cuda/bf16_gemv.cu
                           src/kernels/cuda/native_mmvq.cu
+                          src/kernels/cuda/mmvq_tc.cu
                           src/kernels/cuda/native_bf16.cu
                           src/kernels/cuda/native_gr_norm.cu
                           src/kernels/cuda/native_moe.cu
@@ -802,6 +803,9 @@ if(STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP)
   endif()
   if(STRATA_ENABLE_CUDA)
     # fork F4: the 2-4 column dense projections from the interleaved q8_1 copy, bitwise vs native_mmvq (GPU, synthetic)
+    add_executable(mmvq_tc_bench src/kernels/mmvq_tc_bench.cpp)
+    target_include_directories(mmvq_tc_bench PRIVATE ${_strata_gpu_include_directories})
+    target_link_libraries(mmvq_tc_bench PRIVATE strata_kernels ${_strata_gpu_runtime_target})
     add_executable(mmvq_il_parity src/kernels/mmvq_il_parity.cpp)
     target_include_directories(mmvq_il_parity PRIVATE ${_strata_gpu_include_directories})
     target_link_libraries(mmvq_il_parity PRIVATE strata_kernels ${_strata_gpu_runtime_target})
