@@ -9506,13 +9506,22 @@ int main(int argc, char** argv) {
             const int64_t before = xcache.mapped_bytes();
             bool none = true;
             for (const auto& v : bslot_vmm) if (v->mapped_count() > 0) none = false;
-            if (none) free_home = (int64_t) fb;
-            // the shrink keeps whole segments (it rounds what stays UP): ask for the shortfall in whole segments
+            if (none && free_home < 0) free_home = (int64_t) fb;   // once per busy spell (a failed try keeps it)
+            // the shrink keeps whole segments counted from the arena's start (it rounds what stays UP), so it can free a
+            // segment less than asked: ask again, one segment more each time, until the mapping fits
             const int64_t seg = std::max<int64_t>(xcache.segment_bytes(), 1);
-            const int64_t shortfall = (need_mib + 16) * (1ll << 20) - (int64_t) fb;
-            if (shortfall > 0 &&
-                !vram_command("VRAM " + std::to_string((long long) ((((int64_t) fb + (shortfall + seg - 1) / seg * seg) >> 20) + 2)), e, false))
-                return false;
+            for (int tries = 0; tries < 64; ++tries) {
+                cudaMemGetInfo(&fb, &tb);
+                const int64_t shortfall = (need_mib + 16) * (1ll << 20) - (int64_t) fb;
+                if (shortfall <= 0) break;
+                const int64_t was = xcache.mapped_bytes();
+                const int64_t ask = (((int64_t) fb + (shortfall + seg - 1) / seg * seg) >> 20) + 2 + tries * (seg >> 20);
+                if (!vram_command("VRAM " + std::to_string((long long) ask), e, false)) return false;
+                if (xcache.mapped_bytes() == was && tries > 0) {
+                    e = "batch slot " + std::to_string(b) + ": the expert cache cannot give up more VRAM";
+                    return false;
+                }
+            }
             slot_took[(size_t) b] = before - xcache.mapped_bytes();
             if (!r.map_range(0, r.chunks(), [] { return (strata::core::VmmChunk) 0; })) {
                 for (int64_t c = 0; c < r.chunks(); ++c) strata::core::vmm_chunk_free(r.unmap(c));
@@ -9557,6 +9566,7 @@ int main(int argc, char** argv) {
             std::string e;
             if (!vram_command("VRAM " + std::to_string((long long) (keep_free >> 20)), e, false))
                 std::fprintf(stderr, "strata batch: the expert cache could not take the slots' VRAM back: %s\n", e.c_str());
+            if (none) free_home = -1;
         };
         // timing of the batch windows since the slots were last all idle (one stderr line then)
         double bt_run = 0, bt_commit = 0, bt_emit = 0;
