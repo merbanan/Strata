@@ -37,6 +37,7 @@
 #include "strata/core/layer.hpp"
 #include "strata/core/layout.hpp"
 #include "strata/core/session.hpp"
+#include "strata/core/vmm.hpp"
 #include "strata/core/weights.hpp"
 #include "strata/kernels/gfx_arch.hpp"
 #include "strata/kernels/cpu/expert.hpp"
@@ -4455,6 +4456,12 @@ int main(int argc, char** argv) {
         }
     }
     std::vector<std::vector<std::unique_ptr<strata::core::SessionState>>> bslot_ss;
+    // STRATA_BATCH_ELASTIC=1 (opt-in, with --vram-elastic, one GPU, KV streaming): each slot session lives in its own
+    // reserved address range that is mapped only while the slot runs a request.  The expert cache gives the VRAM up
+    // when a slot is admitted (the VRAM command's shrink) and takes it back when the slot goes idle, so --batch costs
+    // a request alone nothing; the slot's addresses never move, so the captured batch windows stay valid.
+    std::vector<std::unique_ptr<strata::core::VmmRange>> bslot_vmm;
+    bool elastic_slots = false;
     if (o.batch != 0) {
         const int cap = strata::kernels::kVerifyMaxT;
         const char* off = !o.serve ? "it needs --serve" : o.batch < 2 ? "it needs 2 or more slots"
@@ -4502,11 +4509,43 @@ int main(int argc, char** argv) {
             const int64_t lo = k == 0 ? 0 : stages[k - 1]->lb;
             const int64_t hi = k == 0 ? (multi_gpu ? split_at[0] : -1) : stages[k - 1]->le;
             const strata::core::OnDevice on_k(dev);
-            const uint64_t bytes = strata::core::session_bytes(g, o.max_context, K, lo, hi);
+            if (k == 0) {
+                const char* ee = std::getenv("STRATA_BATCH_ELASTIC");
+                const bool asked = ee != nullptr && ee[0] == '1';
+                const char* why = !asked ? nullptr : !o.vram_elastic ? "it needs --vram-elastic"
+                                : !stages.empty() || multi_gpu ? "one GPU only" : batch_mtp ? "not with --batch-mtp"
+                                : o.kv_resident <= 0 ? "it needs KV streaming (--kv-resident)"
+                                : !strata::core::vmm_available() ? "the GPU has no virtual memory management" : nullptr;
+                if (asked && why != nullptr)
+                    std::fprintf(stderr, "strata generate: STRATA_BATCH_ELASTIC is off: %s\n", why);
+                elastic_slots = asked && why == nullptr;
+            }
+            const bool el = elastic_slots && k == 0;
+            const uint64_t bytes = strata::core::session_bytes(g, o.max_context, K, lo, hi, el);
             if (k == 0) bytes0 = bytes;
             for (int b = 0; b < fit; ++b) {
                 auto u = std::make_unique<strata::core::SessionState>();
                 void* buf = nullptr;
+                if (el) {
+                    // carved and zeroed once while mapped (the streamed K/V's map is written at init), then unmapped:
+                    // `slot_map` maps it again and zeroes it before the slot's first request
+                    auto r = std::make_unique<strata::core::VmmRange>();
+                    if (!r->reserve(bytes) || !r->map_range(0, r->chunks(), [] { return (strata::core::VmmChunk) 0; }) ||
+                        strata::core::session_init(g, o.max_context, K, r->base(), *u, lo, hi,
+                                                   &ss.qsa_states[ss.qsa_ord0]) == 0) {
+                        cudaGetLastError();
+                        std::fprintf(stderr, "strata generate: WARNING: --batch %d: slot %d's elastic session failed; "
+                                             "%d slot%s\n", o.batch, b, b, b == 1 ? "" : "s");
+                        fit = b;
+                        break;
+                    }
+                    strata::core::session_zero(*u, g, nullptr, nullptr);
+                    cudaDeviceSynchronize();
+                    for (int64_t c = 0; c < r->chunks(); ++c) strata::core::vmm_chunk_free(r->unmap(c));
+                    bslot_ss[k].push_back(std::move(u));
+                    bslot_vmm.push_back(std::move(r));
+                    continue;
+                }
                 if (cudaMalloc(&buf, bytes) != cudaSuccess || strata::core::session_init(g, o.max_context, K, buf, *u, lo, hi) == 0) {
                     cudaGetLastError();
                     if (buf != nullptr) cudaFree(buf);
@@ -4528,7 +4567,10 @@ int main(int argc, char** argv) {
                          (int) bslot_ss[k].size(), dev, (double) bytes / 1073741824.0, (double) fb / 1073741824.0);
         }
         for (auto& v : bslot_ss) if ((int) v.size() > fit) v.resize((size_t) fit);   // the same count on every stage
+        if ((int) bslot_vmm.size() > fit) bslot_vmm.resize((size_t) fit);
         if (fit < 2) {
+            bslot_vmm.clear();
+            elastic_slots = false;
             std::fprintf(stderr, "strata generate: WARNING: --batch is off: not two slot sessions fit (a smaller "
                                  "--max-context or KV streaming, --kv-resident, makes them smaller)\n");
             bslot_ss.clear();
@@ -4538,6 +4580,11 @@ int main(int argc, char** argv) {
             resolve_groups_auto();   // (the slots that fit may not be the ones asked for)
             if (o.batch_groups > 1 && o.batch % o.batch_groups != 0) o.batch_groups = 1;
             // the sessions' VRAM is the expert cache's: say what it costs (docs/BATCHING.md has the measured trade)
+            if (elastic_slots)
+                std::fprintf(stderr, "strata generate: --batch %d: elastic slot sessions (STRATA_BATCH_ELASTIC): %.2f GiB "
+                                     "each, taken from the expert cache only while a slot runs a request\n", o.batch,
+                             (double) bytes0 / 1073741824.0);
+            else
             std::fprintf(stderr, "strata generate: --batch %d: the slot sessions take %.2f GiB of VRAM on CUDA0 that the "
                                  "expert cache would otherwise hold\n", o.batch,
                          (double) bytes0 * o.batch / 1073741824.0);
@@ -9271,7 +9318,7 @@ int main(int argc, char** argv) {
             p.first = (int32_t) std::max<int64_t>(0, live - part_slots(p, c));
             p.first_now = -1;   // laid out again at the next loan
         };
-        auto vram_command = [&](const std::string& cmd, std::string& e) -> bool {
+        auto vram_command = [&](const std::string& cmd, std::string& e, bool reply = true) -> bool {
             // `VRAM` alone: the reserve the engine started with (--vram-reserve-mib)
             char* end = nullptr;
             const bool bare = cmd.find_first_not_of(' ', 4) == std::string::npos;
@@ -9360,7 +9407,7 @@ int main(int argc, char** argv) {
                          (double) xcache.mapped_bytes() / 1073741824.0, (double) xcache.full_bytes() / 1073741824.0,
                          (long long) (free_b >> 20), (long long) o.prefill_chunk,
                          std::chrono::duration<double, std::milli>(Clock::now() - t0).count(), note.c_str());
-            std::printf("VRAM reserve_mib=%lld expert_slots=%lld expert_slots_full=%lld expert_cache_mib=%lld "
+            if (reply) std::printf("VRAM reserve_mib=%lld expert_slots=%lld expert_slots_full=%lld expert_cache_mib=%lld "
                         "expert_cache_full_mib=%lld vram_free_mib=%lld prompt_chunk=%lld\n", reserve,
                         (long long) xcache.slots(), (long long) xcache.full_slots(),
                         (long long) (xcache.mapped_bytes() >> 20), (long long) (xcache.full_bytes() >> 20),
@@ -9395,6 +9442,51 @@ int main(int argc, char** argv) {
             bool tainted = false;
         };
         std::vector<BSlot> bs((size_t) std::max(o.batch, 0));
+        // STRATA_BATCH_ELASTIC: slot b's session is backed by VRAM only while mapped (see bslot_vmm)
+        auto slot_mapped = [&](int b) -> bool {
+            return !elastic_slots || (b >= 0 && b < (int) bslot_vmm.size() && bslot_vmm[(size_t) b]->mapped_count() == bslot_vmm[(size_t) b]->chunks());
+        };
+        // maps slot b: the expert cache first gives up what the mapping needs on top of the start-up reserve
+        auto slot_map = [&](int b, std::string& e) -> bool {
+            if (slot_mapped(b)) return true;
+            strata::core::VmmRange& r = *bslot_vmm[(size_t) b];
+            const auto t0 = Clock::now();
+            const long long need_mib = (long long) ((r.chunks() - r.mapped_count()) * (int64_t) strata::core::vmm_granularity() >> 20);
+            if (!vram_command("VRAM " + std::to_string((long long) o.vram_reserve_mib + need_mib + 64), e, false)) return false;
+            if (!r.map_range(0, r.chunks(), [] { return (strata::core::VmmChunk) 0; })) {
+                for (int64_t c = 0; c < r.chunks(); ++c) strata::core::vmm_chunk_free(r.unmap(c));
+                std::string ge;
+                vram_command("VRAM", ge, false);
+                e = "batch slot " + std::to_string(b) + ": its session could not be mapped";
+                return false;
+            }
+            strata::core::session_zero(*bslot_ss[0][(size_t) b], g, nullptr, nullptr);
+            if (cudaDeviceSynchronize() != cudaSuccess) { e = "batch slot map: device sync failed"; return false; }
+            std::fprintf(stderr, "strata batch: slot %d mapped (%lld MiB from the expert cache, %lld slots now) in %.0f ms\n", b,
+                         need_mib, (long long) xcache.slots(), std::chrono::duration<double, std::milli>(Clock::now() - t0).count());
+            return true;
+        };
+        // unmaps every idle slot but `keep` (its conversation is dropped: bs[].cached = false) and gives the VRAM back to
+        // the expert cache.  A slot that is running, or holds a prompt read that gave way (partial), stays.
+        auto slots_release_idle = [&](int keep) {
+            if (!elastic_slots) return;
+            bool any = false;
+            for (int b = 0; b < (int) bs.size(); ++b) {
+                BSlot& sl = bs[(size_t) b];
+                strata::core::VmmRange& r = *bslot_vmm[(size_t) b];
+                if (b == keep || sl.active || sl.partial || r.mapped_count() == 0) continue;
+                if (!any && cudaDeviceSynchronize() != cudaSuccess) return;
+                any = true;
+                for (int64_t c = 0; c < r.chunks(); ++c) strata::core::vmm_chunk_free(r.unmap(c));
+                sl.cached = false;
+                sl.ids.clear();
+                sl.checks.clear();
+                std::fprintf(stderr, "strata batch: slot %d released (idle)\n", b);
+            }
+            std::string e;
+            if (any && !vram_command("VRAM", e, false))
+                std::fprintf(stderr, "strata batch: the expert cache could not take the slots' VRAM back: %s\n", e.c_str());
+        };
         // timing of the batch windows since the slots were last all idle (one stderr line then)
         double bt_run = 0, bt_commit = 0, bt_emit = 0;
         double bt_wait0 = 0, bt_pool0 = 0;
@@ -9917,9 +10009,20 @@ int main(int argc, char** argv) {
                     std::fflush(stdout);
                     continue;
                 }
+                if (elastic_slots) {
+                    std::string me;
+                    slots_release_idle((int) b);   // the others' idle conversations give their VRAM back first
+                    if (!slot_map((int) b, me)) {
+                        std::printf("ERR BGEN: %s\n", me.c_str());
+                        std::fflush(stdout);
+                        continue;
+                    }
+                }
                 admit_slot = (int) b;
                 admit_max_new = mn;
                 line = std::string(bimg ? "GENI 1" : "GEN 1") + e2;
+            } else if (elastic_slots && (line.rfind("GEN ", 0) == 0 || line.rfind("GENI ", 0) == 0)) {
+                slots_release_idle(-1);   // a request alone: the idle slots' VRAM goes back to the expert cache
             }
             // #477: every --expert-profile-save-every minutes, before the next request (at QUIT: after the loop)
             if (!heat.empty() && line != "QUIT" && o.expert_profile_save_min > 0 &&
