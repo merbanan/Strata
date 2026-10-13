@@ -9488,6 +9488,7 @@ int main(int argc, char** argv) {
         };
         std::vector<BSlot> bs((size_t) std::max(o.batch, 0));
         // STRATA_BATCH_ELASTIC: slot b's session is backed by VRAM only while mapped (see bslot_vmm)
+        std::vector<int64_t> slot_took(bs.size(), 0);   // the expert cache bytes slot b's mapping took
         auto slot_mapped = [&](int b) -> bool {
             return !elastic_slots || (b >= 0 && b < (int) bslot_vmm.size() && bslot_vmm[(size_t) b]->mapped_count() == bslot_vmm[(size_t) b]->chunks());
         };
@@ -9497,7 +9498,13 @@ int main(int argc, char** argv) {
             strata::core::VmmRange& r = *bslot_vmm[(size_t) b];
             const auto t0 = Clock::now();
             const long long need_mib = (long long) ((r.chunks() - r.mapped_count()) * (int64_t) strata::core::vmm_granularity() >> 20);
-            if (!vram_command("VRAM " + std::to_string((long long) o.vram_reserve_mib + need_mib + 64), e, false)) return false;
+            // the cache gives up what the mapping needs on top of what is free now (not the start-up reserve, which a
+            // full card may already be under); slot_took remembers it so the release gives back exactly that
+            size_t fb = 0, tb = 0;
+            cudaMemGetInfo(&fb, &tb);
+            const int64_t before = xcache.mapped_bytes();
+            if (!vram_command("VRAM " + std::to_string((long long) (fb >> 20) + need_mib + 16), e, false)) return false;
+            slot_took[(size_t) b] = before - xcache.mapped_bytes();
             if (!r.map_range(0, r.chunks(), [] { return (strata::core::VmmChunk) 0; })) {
                 for (int64_t c = 0; c < r.chunks(); ++c) strata::core::vmm_chunk_free(r.unmap(c));
                 std::string ge;
@@ -9528,8 +9535,16 @@ int main(int argc, char** argv) {
                 sl.checks.clear();
                 std::fprintf(stderr, "strata batch: slot %d released (idle)\n", b);
             }
+            int64_t back = 0;
+            for (int b = 0; b < (int) bs.size(); ++b)
+                if (bslot_vmm[(size_t) b]->mapped_count() == 0) { back += slot_took[(size_t) b]; slot_took[(size_t) b] = 0; }
+            if (!any || back <= 0) return;
+            // grow by exactly what the released slots took: keep free what is free now less that
+            size_t fb = 0, tb = 0;
+            cudaMemGetInfo(&fb, &tb);
+            const int64_t keep_free = std::max<int64_t>((int64_t) fb - back, 0);
             std::string e;
-            if (any && !vram_command("VRAM", e, false))
+            if (!vram_command("VRAM " + std::to_string((long long) (keep_free >> 20)), e, false))
                 std::fprintf(stderr, "strata batch: the expert cache could not take the slots' VRAM back: %s\n", e.c_str());
         };
         // timing of the batch windows since the slots were last all idle (one stderr line then)
