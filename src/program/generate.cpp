@@ -9489,6 +9489,7 @@ int main(int argc, char** argv) {
         std::vector<BSlot> bs((size_t) std::max(o.batch, 0));
         // STRATA_BATCH_ELASTIC: slot b's session is backed by VRAM only while mapped (see bslot_vmm)
         std::vector<int64_t> slot_took(bs.size(), 0);   // the expert cache bytes slot b's mapping took
+        int64_t free_home = -1;   // VRAM free before the first slot of a busy spell took its share (the release keeps it)
         auto slot_mapped = [&](int b) -> bool {
             return !elastic_slots || (b >= 0 && b < (int) bslot_vmm.size() && bslot_vmm[(size_t) b]->mapped_count() == bslot_vmm[(size_t) b]->chunks());
         };
@@ -9503,6 +9504,9 @@ int main(int argc, char** argv) {
             size_t fb = 0, tb = 0;
             cudaMemGetInfo(&fb, &tb);
             const int64_t before = xcache.mapped_bytes();
+            bool none = true;
+            for (const auto& v : bslot_vmm) if (v->mapped_count() > 0) none = false;
+            if (none) free_home = (int64_t) fb;
             // the shrink keeps whole segments (it rounds what stays UP): ask for the shortfall in whole segments
             const int64_t seg = std::max<int64_t>(xcache.segment_bytes(), 1);
             const int64_t shortfall = (need_mib + 16) * (1ll << 20) - (int64_t) fb;
@@ -9545,7 +9549,11 @@ int main(int argc, char** argv) {
             // grow by exactly what the released slots took: keep free what is free now less that
             size_t fb = 0, tb = 0;
             cudaMemGetInfo(&fb, &tb);
-            const int64_t keep_free = std::max<int64_t>((int64_t) fb - back, 0);
+            // never below what was free before the spell: the prompt path's buffers grow back with its chunk (an out of
+            // memory in the next prompt's GEMM otherwise)
+            bool none = true;
+            for (const auto& v : bslot_vmm) if (v->mapped_count() > 0) none = false;
+            const int64_t keep_free = std::max<int64_t>({(int64_t) fb - back, none ? free_home : 0, 0});
             std::string e;
             if (!vram_command("VRAM " + std::to_string((long long) (keep_free >> 20)), e, false))
                 std::fprintf(stderr, "strata batch: the expert cache could not take the slots' VRAM back: %s\n", e.c_str());
