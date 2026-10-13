@@ -1299,7 +1299,8 @@ void launch_multi(const GrMulti& m, int variant, cudaStream_t st, unsigned long 
         return;
     }
 #endif
-    if (n_tok >= 3 && up75_on()) {   // T 1-2: gr_up_multi_kernel is as fast or faster (fused_gr_bench, cold)
+    // gr_up75_kernel reads BF16 rows only: STRATA_HC_REQ8's int8 rows (s_up) stay on gr_up_multi_kernel
+    if (n_tok >= 3 && m.a[0].s_up == nullptr && up75_on()) {   // T 1-2: gr_up_multi_kernel is as fast or faster (fused_gr_bench, cold)
         switch (no_multi_gr ? kFusedGrMaxT : n_tok) {
             case 1: gr_up75_kernel<1, true><<<UPM_BLOCKS, THREADS, 0, st>>>(m); break;
             case 2: gr_up75_kernel<2, true><<<UPM_BLOCKS, THREADS, 0, st>>>(m); break;
