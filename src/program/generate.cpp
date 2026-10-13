@@ -9328,10 +9328,10 @@ int main(int argc, char** argv) {
                 e = "VRAM needs an engine started with --vram-elastic (one NVIDIA GPU, --serve)";
                 return false;
             }
-            if (src.complement_ready()) {
-                e = "VRAM: not with the resident low-RAM mode (the cache holds experts RAM does not)";
-                return false;
-            }
+            // the resident low-RAM mode: the RAM copy holds the experts the cache does not, plus the prompt path's lend
+            // region (the cache's tail).  A shrink inside that region evicts only experts RAM still holds; anything
+            // past it would leave an expert nowhere, so that is refused per expert below.
+            const bool comp = src.complement_ready();
             if (peer.valid()) { e = "VRAM: not with --peer-device"; return false; }
             for (const PfPart& p : pf_parts)
                 if (!p.lent.empty()) { e = "VRAM: a prompt's loan is still out"; return false; }
@@ -9357,6 +9357,16 @@ int main(int argc, char** argv) {
                     keep = floor_b;
                     note = " (the cache keeps its smallest size: the prompt path's buffers)";
                 }
+                if (comp) {
+                    const int64_t seg = std::max<int64_t>(xcache.segment_bytes(), 1);
+                    const int64_t after = xcache.slots_within((keep + seg - 1) / seg * seg);
+                    for (size_t i = 0; i < host_res.size(); ++i)
+                        if (host_res[i] >= after && !src.has_resident((int64_t) i / g.n_expert, (int64_t) i % g.n_expert)) {
+                            e = "VRAM: a slot given up holds an expert the resident RAM copy does not (past the prompt "
+                                "path's lend region)";
+                            return false;
+                        }
+                }
                 if (!xcache.shrink(keep, e)) return false;
                 const int64_t live = xcache.slots();
                 for (size_t i = 0; i < host_res.size(); ++i)
@@ -9375,6 +9385,9 @@ int main(int argc, char** argv) {
                     if (slot >= live) { keep_out.emplace_back(i, slot); continue; }
                     const int64_t layer = i / g.n_expert;
                     int64_t pick = i;
+                    // the resident RAM mode: only the evicted expert itself goes back (RAM holds it); a stand-in would
+                    // then be in both tiers, which the adaptive tier's exchanges do not expect
+                    if (comp && (host_res[(size_t) i] >= 0 || !src.has_resident(layer, i % g.n_expert))) continue;
                     if (host_res[(size_t) i] >= 0) {   // back already (the adaptive tier): the layer's most-routed miss
                         pick = -1;
                         float best = -1.0f;
