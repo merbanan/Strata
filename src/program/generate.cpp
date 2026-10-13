@@ -9507,7 +9507,7 @@ int main(int argc, char** argv) {
             const int64_t seg = std::max<int64_t>(xcache.segment_bytes(), 1);
             const int64_t shortfall = (need_mib + 16) * (1ll << 20) - (int64_t) fb;
             if (shortfall > 0 &&
-                !vram_command("VRAM " + std::to_string((long long) (((int64_t) fb + (shortfall + seg - 1) / seg * seg) >> 20)), e, false))
+                !vram_command("VRAM " + std::to_string((long long) ((((int64_t) fb + (shortfall + seg - 1) / seg * seg) >> 20) + 2)), e, false))
                 return false;
             slot_took[(size_t) b] = before - xcache.mapped_bytes();
             if (!r.map_range(0, r.chunks(), [] { return (strata::core::VmmChunk) 0; })) {
