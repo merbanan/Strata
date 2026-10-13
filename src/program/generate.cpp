@@ -9373,17 +9373,14 @@ int main(int argc, char** argv) {
                         const float ub = drive.d.usage.empty() ? 0.0f : drive.d.usage[b.second];
                         return ua > ub;
                     });
-                    int64_t moved = 0;
+                    int64_t moved = 0, to_file = 0;
                     for (size_t i = 0; i < host_res.size(); ++i) {
                         if (host_res[i] < after || has_ram(i)) continue;
                         const int64_t need = (int64_t) strata::kernels::cpu::expert_layout().blob_bytes((int64_t) i / g.n_expert);
                         int64_t pick = -1;
                         for (int64_t q = (int64_t) dups.size() - 1; q >= 0; --q)
                             if (slot_size(dups[(size_t) q].first) >= need) { pick = q; break; }
-                        if (pick < 0) {
-                            e = "VRAM: no kept slot can take an expert the resident RAM copy does not hold";
-                            return false;
-                        }
+                        if (pick < 0) { ++to_file; continue; }   // evicted: the mapped file serves it until the grow
                         const auto [to, victim] = dups[(size_t) pick];
                         dups.erase(dups.begin() + pick);
                         if (cudaMemcpy(xcache.device_slot(to), xcache.device_slot(host_res[i]), (size_t) need,
@@ -9395,11 +9392,12 @@ int main(int argc, char** argv) {
                         host_res[i] = to;
                         ++moved;
                     }
-                    if (moved > 0) {
-                        res_upload();
-                        std::fprintf(stderr, "strata serve: VRAM: %lld experts only the GPU held moved below slot %lld\n",
-                                     (long long) moved, (long long) after);
-                    }
+                    if (moved > 0) res_upload();
+                    if (moved > 0 || to_file > 0)
+                        std::fprintf(stderr, "strata serve: VRAM: of the experts only the GPU held past slot %lld, %lld "
+                                             "moved below it (%zu RAM-held slots left to take more), %lld read from the "
+                                             "model file until the cache grows back\n", (long long) after,
+                                     (long long) moved, dups.size(), (long long) to_file);
                 }
                 if (!xcache.shrink(keep, e)) return false;
                 const int64_t live = xcache.slots();
@@ -9419,9 +9417,9 @@ int main(int argc, char** argv) {
                     if (slot >= live) { keep_out.emplace_back(i, slot); continue; }
                     const int64_t layer = i / g.n_expert;
                     int64_t pick = i;
-                    // the resident RAM mode: only the evicted expert itself goes back (RAM holds it); a stand-in would
-                    // then be in both tiers, which the adaptive tier's exchanges do not expect
-                    if (comp && (host_res[(size_t) i] >= 0 || !src.has_resident(layer, i % g.n_expert))) continue;
+                    // the resident RAM mode: only the evicted expert itself goes back (from RAM, or the mapped file when
+                    // RAM does not hold it); a stand-in would then be in both tiers, which the exchanges do not expect
+                    if (comp && host_res[(size_t) i] >= 0) continue;
                     if (host_res[(size_t) i] >= 0) {   // back already (the adaptive tier): the layer's most-routed miss
                         pick = -1;
                         float best = -1.0f;
