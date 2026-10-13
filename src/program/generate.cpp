@@ -9503,12 +9503,15 @@ int main(int argc, char** argv) {
             size_t fb = 0, tb = 0;
             cudaMemGetInfo(&fb, &tb);
             const int64_t before = xcache.mapped_bytes();
-            if (!vram_command("VRAM " + std::to_string((long long) (fb >> 20) + need_mib + 16), e, false)) return false;
+            // the shrink keeps whole segments (it rounds what stays UP): ask for the shortfall in whole segments
+            const int64_t seg = std::max<int64_t>(xcache.segment_bytes(), 1);
+            const int64_t shortfall = (need_mib + 16) * (1ll << 20) - (int64_t) fb;
+            if (shortfall > 0 &&
+                !vram_command("VRAM " + std::to_string((long long) (((int64_t) fb + (shortfall + seg - 1) / seg * seg) >> 20)), e, false))
+                return false;
             slot_took[(size_t) b] = before - xcache.mapped_bytes();
             if (!r.map_range(0, r.chunks(), [] { return (strata::core::VmmChunk) 0; })) {
                 for (int64_t c = 0; c < r.chunks(); ++c) strata::core::vmm_chunk_free(r.unmap(c));
-                std::string ge;
-                vram_command("VRAM", ge, false);
                 e = "batch slot " + std::to_string(b) + ": its session could not be mapped";
                 return false;
             }
