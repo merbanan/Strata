@@ -323,7 +323,7 @@ void native_qsa_indexer_append_steps_layers(const float* raw0, int64_t raw_strid
         const std::size_t pos_span = (n_steps == 1 || pos_stride <= 0) ? 4 : (std::size_t(n_steps - 1) * pos_stride + 1) * 4;
         const Span spans[] = {{raw0 + (std::size_t) i * (std::size_t) raw_stride, std::size_t(n_steps)*D*4},
             {relative_pos_device,pos_span},{layers.gamma[i],D*4},{layers.tail[i],(R-1)*D*4},{layers.dead[i],D*4},
-            {layers.pooled[i],std::size_t(max_cells/R+1)*D*4},{layers.block_pos[i],4}};
+            {layers.pooled[i],std::size_t(max_cells/R+1)*D*qsa_idx_key_bytes()},{layers.block_pos[i],4}};
         for (const auto& span : spans) validate(span);
         for (int a = 0; a < 7; ++a) for (int b = a + 1; b < 7; ++b)
             if (overlaps(spans[a], spans[b])) throw std::invalid_argument("native QSA indexer buffers overlap");
