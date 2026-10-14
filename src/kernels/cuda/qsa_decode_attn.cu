@@ -293,6 +293,9 @@ __global__ void __launch_bounds__(THREADS) attn_chunk_kernel(const float* __rest
 // RTX 2080 Ti, 2051 selected cells: 1 / 2 / 3 / 4 queries 51.6 / 78.5 / 110 / 146 -> 34.5 / 41.0 / 73.0 / 84.9 us
 // (with the merge); 600 cells 45.9 / 74.6 / 105 / 137 -> 28.6 / 32.8 / 33.5 / 33.3 us.  STRATA_ATTN_V3=0 keeps the
 // default kernel; =1 takes this one on any CUDA card.
+// KV_MODE 3 (k8v4: INT8 K, rotated Q4_0 V) takes the same body with attn_chunk_kernel<3>'s value decode, bit for bit
+// that kernel as <1> is attn_chunk_kernel<1>.
+template <int KV_MODE>
 __global__ void __launch_bounds__(THREADS) attn_chunk_q8_v3_kernel(const float* __restrict__ q, QsaAttnPools p,
                                                                    const int32_t* __restrict__ ids,
                                                                    const int32_t* __restrict__ step, int n_kv_heads,
@@ -348,7 +351,7 @@ __global__ void __launch_bounds__(THREADS) attn_chunk_q8_v3_kernel(const float* 
             continue;
         }
         float k8[8];
-        load8<1>(p, false, srow[c], lane * 8, k8);
+        load8<KV_MODE>(p, false, srow[c], lane * 8, k8);
         float part[16];
 #pragma unroll
         for (int h = 0; h < G; ++h)
@@ -377,8 +380,21 @@ __global__ void __launch_bounds__(THREADS) attn_chunk_q8_v3_kernel(const float* 
     for (int h = 0; h < G; ++h) acc[h] = 0.0f;
     for (int c = 0; c < n_here; ++c) {
         if (srow[c] < 0) continue;   // masked above, weight 0
-        const float sc = __half2float(__ushort_as_half(p.v_scale[srow[c] * (HD / KV_Q8_GROUP) + t / KV_Q8_GROUP]));
-        const float v = (float) p.v_q[srow[c] * HD + t] * sc;
+        float v;
+        if constexpr (KV_MODE == 1) {
+            const float sc = __half2float(__ushort_as_half(p.v_scale[srow[c] * (HD / KV_Q8_GROUP) + t / KV_Q8_GROUP]));
+            v = (float) p.v_q[srow[c] * HD + t] * sc;
+        } else {   // rotated Q4_0 V, as attn_chunk_kernel<3>; the caller rotates the output back
+            constexpr int bytes_per_head = (HD / QK4_0) * sizeof(block_q4_0);
+            const int b = t / QK4_0;
+            const int rem = t % QK4_0;
+            const block_q4_0* blk = reinterpret_cast<const block_q4_0*>(p.v_q4 + srow[c] * bytes_per_head) + b;
+            const float d = __half2float(__ushort_as_half(blk->d));
+            const int j = rem < 16 ? rem : (rem - 16);
+            const uint8_t byte = blk->qs[j];
+            const int nibble = (rem < 16) ? ((byte & 0x0F) - 8) : ((byte >> 4) - 8);
+            v = (float) nibble * d;
+        }
         const float4 p0 = *reinterpret_cast<const float4*>(&spt[c][0]);
         const float4 p1 = *reinterpret_cast<const float4*>(&spt[c][4]);
         const float4 p2 = *reinterpret_cast<const float4*>(&spt[c][8]);
@@ -403,6 +419,11 @@ bool attn_v3_on() {
         on[dev] = ok && maj == 7 && mnr == 5 ? 1 : -1;   // measured on Turing only
     }
     return on[dev] > 0;
+}
+// STRATA_ATTN_V3_K8V4=0 keeps k8v4's default kernel while INT8 pools take v3
+bool attn_v3_k8v4_on() {
+    static const bool on = [] { const char* v = std::getenv("STRATA_ATTN_V3_K8V4"); return !(v && v[0] == '0'); }();
+    return on;
 }
 #endif
 
@@ -948,7 +969,10 @@ void launch_chunks_batch(const float* q, const QsaAttnPools& pools, const int32_
 #endif
 #if !defined(__HIPCC__)
     if (kv_mode == 1 && attn_v3_on())
-        attn_chunk_q8_v3_kernel<<<grid, THREADS, 0, st>>>(q, pools, ids, steps, (int) s.n_head_kv, (int) s.page_size,
+        attn_chunk_q8_v3_kernel<1><<<grid, THREADS, 0, st>>>(q, pools, ids, steps, (int) s.n_head_kv, (int) s.page_size,
+                                                          scale, part_acc, part_m, part_l, n_chunks, (int) cap, stride);
+    else if (kv_mode == 3 && attn_v3_on() && attn_v3_k8v4_on())
+        attn_chunk_q8_v3_kernel<3><<<grid, THREADS, 0, st>>>(q, pools, ids, steps, (int) s.n_head_kv, (int) s.page_size,
                                                           scale, part_acc, part_m, part_l, n_chunks, (int) cap, stride);
     else
 #endif
@@ -1030,7 +1054,10 @@ void qsa_decode_attn_step(const float* q, const QsaAttnPools& pools, const int32
     cudaStream_t st = (cudaStream_t) stream;
 #if !defined(__HIPCC__)
     if (kv_mode == 1 && attn_v3_on())
-        attn_chunk_q8_v3_kernel<<<grid, THREADS, 0, st>>>(q, pools, ids, step, (int) s.n_head_kv, (int) s.page_size,
+        attn_chunk_q8_v3_kernel<1><<<grid, THREADS, 0, st>>>(q, pools, ids, step, (int) s.n_head_kv, (int) s.page_size,
+                                                          scale, part_acc, part_m, part_l, n_chunks, 0, 0);
+    else if (kv_mode == 3 && attn_v3_on() && attn_v3_k8v4_on())
+        attn_chunk_q8_v3_kernel<3><<<grid, THREADS, 0, st>>>(q, pools, ids, step, (int) s.n_head_kv, (int) s.page_size,
                                                           scale, part_acc, part_m, part_l, n_chunks, 0, 0);
     else
 #endif
