@@ -5,13 +5,50 @@ calls (iq_kernels' grouped experts, native_mmvq incl. the packed Q8_0 GEMVs, nat
 prefill/gemm and moe_mmq, the CPU expert pool). The ones that could touch it were applied or switched on and measured
 with q36_bench.sh on the V100 (Qwen3.6-35B-A3B UD-Q4_K_M; v100 baseline short 99.0-99.8 / 16K 84.1-84.8 tok/s).
 
+## The PRs that change strata-q36's kernel files (27)
+
+strata-q36's kernels: iq_kernels (grouped experts), native_mmvq (GEMVs), native_router, fused_gdn / native_gdn, prefill
+gemm and moe_mmq, dequant_bf16, quantize_act, the CPU expert pool (native_expert, pool, kq / iq AVX dots).
+
+| PR | Files it changes in that set | Verdict |
+|---|---|---|
+| #2492 | native_mmvq | gfx12 (RDNA4) grid padding in native_mmvq: the stall it fixes (empty workgroups past a full-die fill) is an AMD scheduling effect; the CUDA launch path is unchanged by it |
+| #2447 | native_mmvq | sm_86 Q8_0 GEMV rows per block (closed, unmerged) - sm_86 only |
+| #2419 | native_expert, pool | arm64 / GB10 build (sm_121): another platform; its CPU-pool and router-dot changes are for ARM |
+| #2356 | iq_kernels | pf_wmma2 for IQ2_S / IQ4_NL prompt experts in prefill.cpp - not strata-q36's path, not its expert types |
+| #2355 | iq_kernels | pf_wmma tile attribute for a layer split's second card - prefill.cpp, not strata-q36 |
+| #2327 | q36_engine | qwen35 build fix for CUDA 12.1 (closed) - builds here with CUDA 12.x already |
+| #2321 | native_router | route-resident in verify.cpp (Flash-Next decode) - strata-q36 routes with native_router_topk |
+| #2231 | dequant_bf16, iq_kernels, native_mmvq, native_moe, native_router | HIP gfx1100 decode / prompt kernels: the changes in these shared files sit under the HIP / gfx11 paths (closed) |
+| #2230 | gemm | HIP: prefill GEMM modes per device for mixed gfx cards - the HIP GEMM path |
+| #2222 | native_mmvq | sm_75 launch folding in the Flash-Next decode layer - not strata-q36 |
+| #2221 | native_mmvq | sm_75 Q2_0 matvec - Q2_0 not in Qwen3.6 files |
+| #2215 | iq_avx2, native_expert | CPU IQ rows - IQ types and the CPU pool, not used here |
+| #2179 | fused_gdn, native_gdn | geometry checks (closed) - no speed change |
+| #2178 | dequant_bf16, gemm, iq_kernels, native_mmvq | sm_61 (P40) tables (closed) - other arch |
+| #2174 | pool | pool UMWAIT (Intel instruction; this host is a Ryzen) |
+| #2091 | gemm | sm_75 hyper-connection xn16 - Flash-Next mHC |
+| #2089 | native_mmvq | sm_75 GEMV table (closed); Volta's own table (STRATA_SM70_TABLE, PR 1401) measured 93.1 vs 94.3 tok/s |
+| #2081 | dequant_bf16 | sm_75 vector dequant stores: hard-gated to cc 7.5 and no longer applies to main; the dequant it speeds is ~2% of a strata-q36 prompt on the V100 (0.158 s of 7.7 s at 4K) - ceiling under 2% |
+| #2069 | iq_kernels, native_mmvq | sm_75 tables / expert mode 4: mode 4 measured on the V100 via STRATA_EXP_MODE=4 - 99.6 / 84.4 tok/s, noise; mode 8 (Volta's) 99.8 / 84.8, noise |
+| #2063 | native_expert, pool | Windows ARM64 build - another platform |
+| #2058 | iq_kernels | tested on v100 (STRATA_EXPDEC=1): 99.1 / 84.4 tok/s - noise, same tokens, not taken |
+| #1961 | native_mmvq | DFlash2 runtime for the Flash-Next path - not strata-q36 |
+| #1949 | kq_avx1, kq_avx2 | CPU AVX2 dots for the hybrid CPU pool - not used when every Qwen3.6 expert is in VRAM |
+| #1909 | iq_kernels | tested on v100: 99.5 / 84.2 tok/s vs 99.0-99.7 / 84.1-84.7, same tokens - noise, not taken |
+| #1822 | moe_mmq | in-place MMQ for prefill.cpp - strata-q36 calls moe_mmq on resident blobs already |
+| #1820 | iq_kernels, native_router, pool | a separate qwen35moe branch (+5,529 lines: VRAM cap, quality mode, chunked GDN) - superseded by strata-q36 in main |
+| #1818 | native_expert | CPU IQ dispatch fix - the CPU pool, unused with every expert in VRAM |
+
+## All PRs
+
 | PR | State | Title | Verdict |
 |---|---|---|---|
 | #2497 | open | serve: an engine program that cannot be started is a 503, not a dropped connection | no engine code (docs, web, benchmark reports, tools, setup, serve front end) |
 | #2495 | open | sycl: images on the SYCL port (CPU encoder, --vision cpu) | no engine code (docs, web, benchmark reports, tools, setup, serve front end) |
 | #2494 | open | Adding new model/{model id} endpoint to allow use of Strata with Visual Studio | no engine code (docs, web, benchmark reports, tools, setup, serve front end) |
 | #2493 | open | bench: community report - RTX 5060 Ti 16 GB, Coder IQ1_M, 204800-token context (0.1.44.1) | no engine code (docs, web, benchmark reports, tools, setup, serve front end) |
-| #2492 | open | gfx12: empty workgroups past the full-die fill stall in the decode matvecs (grid_pad) | another backend (SYCL / HIP / Metal / Vulkan) |
+| #2492 | open | gfx12: empty workgroups past the full-die fill stall in the decode matvecs (grid_pad) | gfx12 (RDNA4) grid padding in native_mmvq: the stall it fixes (empty workgroups past a full-die fill) is an AMD scheduling effect; the CUDA launch path is unchanged by it |
 | #2491 | open | fix(setup): don't require tensor-data alignment for GGUF shards without … | no engine code (docs, web, benchmark reports, tools, setup, serve front end) |
 | #2490 | open | setup: Alchemist on xe also gets the Level Zero v2 adapter (UR_LOADER_USE_LEVEL_ZERO_V2=1; A770 decode +7%, pr | no engine code (docs, web, benchmark reports, tools, setup, serve front end) |
 | #2489 | open | kernel benches: host-timed (graph + barrier-event profiling hung on an A770 under xe); native_grouped_parity - | no engine code (docs, web, benchmark reports, tools, setup, serve front end) |
@@ -148,8 +185,8 @@ with q36_bench.sh on the V100 (Qwen3.6-35B-A3B UD-Q4_K_M; v100 baseline short 99
 | #2237 | open | bench: community report, RX 6900 XT (gfx1030) x1 and x2 on 0.1.43.1 - IQ3_S and UD-Q4_K_XL, stock and with the | no engine code (docs, web, benchmark reports, tools, setup, serve front end) |
 | #2234 | open | Batch decode: one launch for all rows in QSA attention and GDN recurrence (opt-in) | batch decode of QSA attention and GDN recurrence rows in verify.cpp - the Flash-Next decode, not strata-q36 |
 | #2233 | open | docs(bench): RTX 3060 12GB / 32GB RAM Coder IQ1_M with Budget12 64K profile | no engine code (docs, web, benchmark reports, tools, setup, serve front end) |
-| #2231 | closed | HIP gfx1100: bit-exact decode and prompt-path speedups (+12% decode, KL 0) | another backend (SYCL / HIP / Metal / Vulkan) |
-| #2230 | open | [HIP] Keep mixed-gfx prefill GEMM modes per device (#690, #703) | another backend (SYCL / HIP / Metal / Vulkan) |
+| #2231 | closed | HIP gfx1100: bit-exact decode and prompt-path speedups (+12% decode, KL 0) | HIP gfx1100 decode / prompt kernels: the changes in these shared files sit under the HIP / gfx11 paths (closed) |
+| #2230 | open | [HIP] Keep mixed-gfx prefill GEMM modes per device (#690, #703) | HIP: prefill GEMM modes per device for mixed gfx cards - the HIP GEMM path |
 | #2229 | open | sycl: enable vision (--vision cpu) on intel | no engine code (docs, web, benchmark reports, tools, setup, serve front end) |
 | #2226 | open | STRATA_HC_PERSIST=1 (opt-in, HIP): the verifier's hyper-connection read as one persistent kernel (gfx1030: rea | another backend (SYCL / HIP / Metal / Vulkan) |
 | #2224 | open | pcie: the measured PCIe share default (PcieAuto) on gfx1100 too — gate-measured on a native pack | another backend (SYCL / HIP / Metal / Vulkan) |
