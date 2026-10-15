@@ -34,7 +34,7 @@ Together: decode after a 16K prompt 56.4 -> 94.1 tok/s (+67%), after a short one
 | iq_parity (10 expert types, fixtures from tools/iq_fixture.py) | 0 failures: dequant exact, mmvq rel 4.6-5.7e-3 (ncols 1-8) |
 | gemm_f32_parity | FAILED on sm_70: the opt-in STRATA_DENSE_F32 dense projections are bit-compared with cuBLAS's own Sgemm, whose algorithm choice on cc 7.0 differs for these shapes (T >= 256 / 512 / 4096) - not used by strata-q36 |
 | gdn_rec_parity's chunked prompt recurrence | not on this card (needs sm_80+, 93.7 KB a block) |
-| q8_gemv_bench | 1 col ~ 666 GB/s at 2 cols, 434 GB/s at 6 |
+| q8_gemv_bench | 666 GB/s at 2 columns, 623 at 3, 547 at 4, 434 at 6 |
 | mmq_expert_bench | 20-30 TOPS (q8_0 / iq3_s / iq4_nl / nvfp4) |
 | mmvq_il_parity --bench | the V100 table equal to the multi kernel within 1% (e.g. Q3_K 6144x2560 T=3: 37.1 vs 37.8 us) - as the end-to-end -1.3% |
 | native_expert_parity, native_expert_bench, expert_parity | need Flash-Next shards / packs - not on this machine |
