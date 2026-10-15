@@ -333,10 +333,19 @@ __global__ void k_attn_part_g(const float* q, const float* kc, const float* vc, 
         float a[G];
 #pragma unroll
         for (int g = 0; g < G; ++g) a[g] = 0.f;
-        for (int i = 0; i < HD; ++i) {
-            const float kv = kp[i];
+        // the key row in 16-byte loads (a quarter of the load instructions; each head's sum keeps the order i = 0..255)
+        const float4* kp4 = (const float4*) kp;
+#pragma unroll 4
+        for (int i4 = 0; i4 < HD / 4; ++i4) {
+            const float4 kv = kp4[i4];
+            const int i = 4 * i4;
 #pragma unroll
-            for (int g = 0; g < G; ++g) a[g] += qs[g][i] * kv;
+            for (int g = 0; g < G; ++g) {
+                a[g] += qs[g][i] * kv.x;
+                a[g] += qs[g][i + 1] * kv.y;
+                a[g] += qs[g][i + 2] * kv.z;
+                a[g] += qs[g][i + 3] * kv.w;
+            }
         }
 #pragma unroll
         for (int g = 0; g < G; ++g) s[g] = a[g] * scale;
