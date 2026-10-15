@@ -1,5 +1,5 @@
 """bench/v100/fn_bench.py (run from the repo root; FN_GGUF = shard 1, FN_PACK = tools/iq_pack.py --gguf FN_GGUF --out <dir>). Flash-Next (Qwen3.8-Flash-Next GSQ-RCO Q2_0) on this card through strata --serve: three short greedy answers (decode
-tok/s) and a ~4K-token prompt (prompt tok/s).  python fnbench.py LABEL [NEW] ; extra engine env from the environment."""
+tok/s) and a ~6K-token prompt (prompt tok/s).  FN_PREFILL / FN_RESERVE / FN_CTX / FN_FILL (filler repeats, 400 = ~6K tokens) change the run.  python fnbench.py LABEL [NEW] ; extra engine env from the environment."""
 import os, subprocess, sys
 sys.path.insert(0, "tools")
 import strata_tokenizer as T
@@ -11,12 +11,13 @@ label = sys.argv[1]; n_new = int(sys.argv[2]) if len(sys.argv) > 2 else 128
 Q = ["Write a Python function that parses a CSV file and returns the average of every numeric column. Explain it.",
      "Explain how a refrigerator works, step by step, for a curious ten year old.",
      "List the first twenty prime numbers and describe the sieve of Eratosthenes."]
-FILL = "The committee met to discuss the river, the market and the old library. " * 400
+FILL = "The committee met to discuss the river, the market and the old library. " * int(os.environ.get("FN_FILL", "400"))
 def chat(q): return "<|im_start|>user\n" + q + "<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
 env = dict(os.environ)
 err = "/tmp/fnbench-%s.err" % label
 p = subprocess.Popen(["build/strata", "--serve", "--pack", P, "--native", G, "--ple-gguf", G.replace("00001-of", "00002-of"), "--expert-profile",
-                      "data/expert-profile.bin", "--expert-cache", "auto", "--max-context", "8192", "--kv", "int8", "--spec", "2", "--prefill", "512", "--vram-reserve-mib", "2048"],
+                      "data/expert-profile.bin", "--expert-cache", "auto", "--max-context", os.environ.get("FN_CTX", "8192"), "--kv", "int8", "--spec", "2", "--prefill", os.environ.get("FN_PREFILL", "auto"),
+                      "--vram-reserve-mib", os.environ.get("FN_RESERVE", "2048")],
                      stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=open(err, "w"), text=True, env=env)
 for line in p.stdout:
     if line.startswith(("READY", "ERR")):

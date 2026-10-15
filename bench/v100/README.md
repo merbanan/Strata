@@ -18,7 +18,7 @@ Together: decode after a 16K prompt 56.4 -> 94.1 tok/s (+67%), after a short one
 ## Flash-Next (Strata's main engine) on the V100
 
 Qwen3.8-Flash-Next GSQ-RCO Q2_0 (ISTA-DASLab, 66.4 GB, two shards; pack from `tools/iq_pack.py`), `strata --serve`
-with `--spec 2 --prefill 512 --kv int8 --vram-reserve-mib 2048 --expert-cache auto` (the default 700 MiB reserve left
+with `--spec 2 --prefill auto --kv int8 --vram-reserve-mib 2048 --expert-cache auto` (the tables below up to 35c9285 used `--prefill 512`) (the default 700 MiB reserve left
 too little for the verify windows' graph capture here), `fn_bench.py`: three 128-token greedy answers and a 6K prompt.
 
 | Build | Decode (tok/s) | 6K prompt | Tokens |
@@ -33,6 +33,24 @@ Measured on Flash-Next and not taken (same tokens in every run): #2221 STRATA_Q2
 55.9, #2222 STRATA_FUSE_WAIT=2 STRATA_QIL=1 57.7 / 57.4 / 56.2, #1949 57.4 / 57.1 / 55.9, STRATA_NO_MMVQ_ROWS2=1 (#2447's switch)
 57.8 / 57.3 / 56.0, against v100 57.5 / 57.2 / 56.0 and 57.2 / 56.9 / 55.7. With mode 4 (35c9285) the tree runs 58.2 / 57.8 /
 56.7 tok/s; strata-q36 on it 103.9 / 94.2, md5 75a302c75b7c.
+
+### Prompt chunks (`--prefill`), 2026-10-15
+
+`--prefill 512` (what the runs above used) keeps every chunk below `stream_all_min` (1024 tokens), so the whole prompt
+takes the staged small-chunk path (8 expert slots, the CPU share on, ~10 rows an expert). `--prefill auto` streams the
+experts in chunks of up to 8K. `STRATA_PREFILL_TIMING=1`, fn_bench.py (`FN_PREFILL`, `FN_RESERVE`, `FN_CTX`, `FN_FILL`):
+
+| `--prefill`, reserve, context | 6K prompt (tok/s) | 16.5K prompt | decode (tok/s) | tokens |
+|---|---|---|---|---|
+| 512, 2048 MiB | 665 | 658 | 58.0 / 57.7 / 56.5 | c7a041f7db35 (8K ctx), c4ce9bff1fe8 (20K) |
+| 2048, 2048 MiB | 1,165 | 1,168 | 57.9 / 57.3 / 54.9 | same |
+| 4096, 2048 MiB | 1,319 | - | 58.2 / 57.9 / 56.7 | same |
+| **auto, 2048 MiB** | **1,527** | - | 58.1 / 57.7 / 56.5 | **same** |
+| auto, 3072 MiB | 1,528 | 1,582 | 57.8 / 57.7 / 55.8 | differ (another expert-cache mix) |
+
+The phase split at 6K moves from experts + dequant 57% (512: dequant 13.8%, host grouping 4.8%) to 47% (auto: dequant
+4.4%); QSA attention is 10.4% and GDN 14% at auto. With the 2048 MiB reserve, auto fits the verify-graph capture at an
+8K context. fn_bench.py now defaults to `--prefill auto`.
 
 Not applicable to this file: #2356 (pf_wmma2) - its experts are all Q2_0 (native_experts.txt: type 42), not IQ2_S /
 IQ4_NL. Volta's mode-8 experts, the mmvq_il table and the GR up kernel are main's sm_70 defaults already
