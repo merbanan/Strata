@@ -3615,7 +3615,11 @@ int exp_mode() {
         // IQ4_XS 328 -> 261 us, bitwise equal); STRATA_SM61_TABLE=0 keeps the CUDA layout
         const char* sm61 = std::getenv("STRATA_SM61_TABLE");
         const bool p40 = major == 6 && minor == 1 && (sm61 == nullptr || std::atoi(sm61) != 0);
-        per_dev[dev] = 1 + ((major == 7 && minor == 0 && sm70 != nullptr && std::atoi(sm70) != 0) || p100 || p40 ? 8 : kExpModeDefault);
+        // the V100 tree: sm_70 takes mode 4 (Turing's layout) by default - V100-PCIe-32GB, Qwen3.8-Flash-Next GSQ-RCO Q2_0,
+        // three 128-token answers: modes 0 / 8 / 4 at 56.8 / 57.2 / 57.5 tok/s average, the same tokens (the Qwen3.6
+        // engine's experts: all three within noise); STRATA_SM70_TABLE=1 still gives mode 8, STRATA_EXP_MODE any mode
+        const bool v100_m4 = major == 7 && minor == 0 && sm70 == nullptr;
+        per_dev[dev] = 1 + (v100_m4 ? 4 : (major == 7 && minor == 0 && sm70 != nullptr && std::atoi(sm70) != 0) || p100 || p40 ? 8 : kExpModeDefault);
     }
     return per_dev[dev] - 1;
 #endif
