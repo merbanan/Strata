@@ -52,7 +52,7 @@ with q36_bench.sh on the V100 (Qwen3.6-35B-A3B UD-Q4_K_M; v100 baseline short 99
 | #2423 | open | serve: GET /metrics gives each request's PCIe expert bytes and its own KV streaming share, and a bandwidth sum | no engine code (docs, web, benchmark reports, tools, setup, serve front end) |
 | #2422 | open | web: the PCIe metric shows the current link generation, not the card's capability | no engine code (docs, web, benchmark reports, tools, setup, serve front end) |
 | #2421 | open | Video: the encoder reads the clip itself (ENCV - mtmd samples its frames at video_fps and merges them) | no engine code (docs, web, benchmark reports, tools, setup, serve front end) |
-| #2419 | open | arm64: build + run Strata on NVIDIA DGX Spark (GB10, sm_121) - rebased onto v0.1.41, IQ3_S validated | kernels strata-q36 does not call (QSA, PLE, hyper-connections, verify, CPU pool) |
+| #2419 | open | arm64: build + run Strata on NVIDIA DGX Spark (GB10, sm_121) - rebased onto v0.1.41, IQ3_S validated | arm64 / GB10 build (sm_121): another platform; its CPU-pool and router-dot changes are for ARM |
 | #2414 | open | bench: community report, 2x RTX 5060 Ti 16 GB, Xeon E5-2690 v4, IQ3_XXS at 204,800-token context, engine 0.1.4 | no engine code (docs, web, benchmark reports, tools, setup, serve front end) |
 | #2413 | open | docs/AMD_HIP.md: short GPU stalls while the kernel compacts memory, and how to keep them out of a speed compar | no engine code (docs, web, benchmark reports, tools, setup, serve front end) |
 | #2409 | open | fix: avoid CUDA OOM during conversation-cache restore | engine plumbing (serve, caches, batching, splits, memory) - no strata-q36 code |
@@ -103,12 +103,12 @@ with q36_bench.sh on the V100 (Qwen3.6-35B-A3B UD-Q4_K_M; v100 baseline short 99
 | #2332 | open | Add community benchmarks: RTX 4090 Laptop, IQ3_XXS and IQ3_S, default vs calibrated | no engine code (docs, web, benchmark reports, tools, setup, serve front end) |
 | #2328 | open | Community benchmark: Tesla P40 (Windows Server 2022 VM), four models at 256K context | no engine code (docs, web, benchmark reports, tools, setup, serve front end) |
 | #2327 | closed | qwen35: widen F16 by hand so upload_f32 builds on CUDA 12.1 | qwen35 build fix for CUDA 12.1 (closed) - builds here with CUDA 12.x already |
-| #2326 | open | batch-groups: read a cold prompt beside the decoding slots, stall 11.9 -> 0.8 s, same work 6.4% sooner (opt-in | kernels strata-q36 does not call (QSA, PLE, hyper-connections, verify, CPU pool) |
+| #2326 | open | batch-groups: read a cold prompt beside the decoding slots, stall 11.9 -> 0.8 s, same work 6.4% sooner (opt-in | batch-groups: reads a cold prompt beside other decoding slots (multi-request serving) - strata-q36 serves one request |
 | #2325 | open | --batch: keep system-prompt roots apart from the conversations (--prompt-cache-roots, opt-in) | engine plumbing (serve, caches, batching, splits, memory) - no strata-q36 code |
 | #2321 | open | route-resident: support 256-expert top-8 models (Qwen3.6-35B-A3B) | route-resident in verify.cpp (Flash-Next decode) - strata-q36 routes with native_router_topk |
 | #2320 | open | bench: Unsloth UD-Q4_K_XL two-host RTX 5090/3090 rerun and quality checks | no engine code (docs, web, benchmark reports, tools, setup, serve front end) |
 | #2319 | open | SYCL verify: batch windows keep the doorbell nodes under the lean window ("parallel" crashed on a B70) | no engine code (docs, web, benchmark reports, tools, setup, serve front end) |
-| #2318 | open | KV cache: FP16 sliding window + attention sinks, and an optional 2-bit K / 4-bit V cache scheme (--kv q2k) [EX | kernels strata-q36 does not call (QSA, PLE, hyper-connections, verify, CPU pool) |
+| #2318 | open | KV cache: FP16 sliding window + attention sinks, and an optional 2-bit K / 4-bit V cache scheme (--kv q2k) [EX | KV window / sinks / q2k for the QSA (Flash-Next) decode attention - strata-q36 has its own F32 K/V and attention |
 | #2317 | open | Monitor: one line per card on a layer split (load, VRAM, temperature, power, PCIe) | no engine code (docs, web, benchmark reports, tools, setup, serve front end) |
 | #2312 | open | fix(calibrate): keep configured vision resident during tuning | no engine code (docs, web, benchmark reports, tools, setup, serve front end) |
 | #2311 | open | web: default temperature 1.0, as the model card and generation_config.json say | no engine code (docs, web, benchmark reports, tools, setup, serve front end) |
@@ -146,7 +146,7 @@ with q36_bench.sh on the V100 (Qwen3.6-35B-A3B UD-Q4_K_M; v100 baseline short 99
 | #2240 | open | Remote stage: a worker for the SYCL build (Intel Arc), stacked on #1748 / #1887 (protocol 7); STRATA_LOGPOS_ID | another backend (SYCL / HIP / Metal / Vulkan) |
 | #2238 | open | test: exercise uncached BPE paths in tokenizer parity checks | no engine code (docs, web, benchmark reports, tools, setup, serve front end) |
 | #2237 | open | bench: community report, RX 6900 XT (gfx1030) x1 and x2 on 0.1.43.1 - IQ3_S and UD-Q4_K_XL, stock and with the | no engine code (docs, web, benchmark reports, tools, setup, serve front end) |
-| #2234 | open | Batch decode: one launch for all rows in QSA attention and GDN recurrence (opt-in) | kernels strata-q36 does not call (QSA, PLE, hyper-connections, verify, CPU pool) |
+| #2234 | open | Batch decode: one launch for all rows in QSA attention and GDN recurrence (opt-in) | batch decode of QSA attention and GDN recurrence rows in verify.cpp - the Flash-Next decode, not strata-q36 |
 | #2233 | open | docs(bench): RTX 3060 12GB / 32GB RAM Coder IQ1_M with Budget12 64K profile | no engine code (docs, web, benchmark reports, tools, setup, serve front end) |
 | #2231 | closed | HIP gfx1100: bit-exact decode and prompt-path speedups (+12% decode, KL 0) | another backend (SYCL / HIP / Metal / Vulkan) |
 | #2230 | open | [HIP] Keep mixed-gfx prefill GEMM modes per device (#690, #703) | another backend (SYCL / HIP / Metal / Vulkan) |
@@ -156,7 +156,7 @@ with q36_bench.sh on the V100 (Qwen3.6-35B-A3B UD-Q4_K_M; v100 baseline short 99
 | #2223 | open | verify: STRATA_NO_PCIE_GROUP=1 drops the empty PCIe-share stage with --pcie-frac 0 | engine plumbing (serve, caches, batching, splits, memory) - no strata-q36 code |
 | #2222 | open | sm_75: fewer launches per decode layer: plan wait folded, fused quantize + interleave (bitwise) | sm_75 launch folding in the Flash-Next decode layer - not strata-q36 |
 | #2221 | open | sm_75: Q2_0 matvec with one warp per four rows (bitwise) | sm_75 Q2_0 matvec - Q2_0 not in Qwen3.6 files |
-| #2220 | open | sm_75: QSA decode attention for INT8 KV off the shared-memory pipe (bitwise) | another NVIDIA architecture's kernels |
+| #2220 | open | sm_75: QSA decode attention for INT8 KV off the shared-memory pipe (bitwise) | sm_75 QSA INT8 decode attention - Flash-Next attention, another arch |
 | #2217 | open | Count clean active file cache as reclaimable under a cgroup limit | engine plumbing (serve, caches, batching, splits, memory) - no strata-q36 code |
 | #2216 | open | bench: community report, one Arc A770 16 GB (xe) - main on the card and the A770 pull requests, same-day A/B | no engine code (docs, web, benchmark reports, tools, setup, serve front end) |
 | #2215 | open | cpu: one token's IQ3_XXS/IQ3_S/IQ2_S gate/up rows in ggml's exact bits, faster (same output; STRATA_CPU_SINGLE | CPU IQ rows - IQ types and the CPU pool, not used here |
@@ -173,7 +173,7 @@ with q36_bench.sh on the V100 (Qwen3.6-35B-A3B UD-Q4_K_M; v100 baseline short 99
 | #2196 | closed | serve: the image encoder only while there are pictures ("elastic": true in the vision section) | no engine code (docs, web, benchmark reports, tools, setup, serve front end) |
 | #2195 | closed | setup --update: an MTP folder shared by several configs keeps the draft subset of the most recently used one ( | no engine code (docs, web, benchmark reports, tools, setup, serve front end) |
 | #2193 | closed | sycl: fused GR read without the private GrMulti copy (GR_PICK); large GRF on Arc A-series only - A770 decode 5 | no engine code (docs, web, benchmark reports, tools, setup, serve front end) |
-| #2191 | closed | --prefill-head-alias (opt-in, --serve, one GPU): the output head's VRAM holds the prompt buffers while a promp | kernels strata-q36 does not call (QSA, PLE, hyper-connections, verify, CPU pool) |
+| #2191 | closed | --prefill-head-alias (opt-in, --serve, one GPU): the output head's VRAM holds the prompt buffers while a promp | prefill-head-alias: VRAM headroom for the Flash-Next prompt path; strata-q36 has every expert in VRAM here |
 | #2190 | closed | sycl: size the expert cache from the DRM fdinfo when xe reports 0 free card memory (Arc A770, #1545) | no engine code (docs, web, benchmark reports, tools, setup, serve front end) |
 | #2189 | closed | HIP: virtual memory for --kv-grow and --vram-elastic (#533) through vmm.hpp | another backend (SYCL / HIP / Metal / Vulkan) |
 | #2187 | open | RTX 4070 ti 12GB / 96GB RAM Bench | no engine code (docs, web, benchmark reports, tools, setup, serve front end) |
@@ -204,8 +204,8 @@ with q36_bench.sh on the V100 (Qwen3.6-35B-A3B UD-Q4_K_M; v100 baseline short 99
 | #2150 | open | SYCL: opt in to 256 GRFs for fused hyperconnection up | no engine code (docs, web, benchmark reports, tools, setup, serve front end) |
 | #2148 | open | hip: add a gfx1150 hipBLASLt 100500 tuning table (Radeon 890M / Ryzen AI 9 HX 370) | no engine code (docs, web, benchmark reports, tools, setup, serve front end) |
 | #2147 | open | setup: opt-in gfx1150 (Radeon 890M / 880M, Strix Point) as a unified-memory AMD card | no engine code (docs, web, benchmark reports, tools, setup, serve front end) |
-| #2146 | open | sm_75: the v2 prompt attention in one stage, three blocks per SM (bitwise, attention 1.66x; stacked on #2092) | another NVIDIA architecture's kernels |
-| #2145 | open | prefill: the fused int8 prompt experts on Turing (sm_75), opt-in (+9 % prefill on RTX 2080 Ti) | another NVIDIA architecture's kernels |
+| #2146 | open | sm_75: the v2 prompt attention in one stage, three blocks per SM (bitwise, attention 1.66x; stacked on #2092) | sm_75 v2 prompt attention - Flash-Next prompt attention, another arch |
+| #2145 | open | prefill: the fused int8 prompt experts on Turing (sm_75), opt-in (+9 % prefill on RTX 2080 Ti) | sm_75 fused int8 prompt experts (moe_fused) - Turing kernels, the Flash-Next prompt path |
 | #2144 | closed | bench: community report, 2x Tesla P40 (PCIe 3.0 x8), i5-6500, 39 GiB RAM, IQ3_S, 131K, 0.1.43 | no engine code (docs, web, benchmark reports, tools, setup, serve front end) |
 | #2142 | open | Community benchmark: mixed dual V100 + RTX PRO 4000 Blackwell on Windows | no engine code (docs, web, benchmark reports, tools, setup, serve front end) |
 | #2140 | open | serve: honour llama-server's thinking_budget_tokens (a llama.cpp client's thinking budget was silently ignored | no engine code (docs, web, benchmark reports, tools, setup, serve front end) |
@@ -229,31 +229,31 @@ with q36_bench.sh on the V100 (Qwen3.6-35B-A3B UD-Q4_K_M; v100 baseline short 99
 | #2100 | open | bench: add RTX 3090 community benchmarks | no engine code (docs, web, benchmark reports, tools, setup, serve front end) |
 | #2098 | open | disk park: the profile tag carries the engine version, and the blob carries the tag | engine plumbing (serve, caches, batching, splits, memory) - no strata-q36 code |
 | #2094 | open | Draft: immutable branching contexts with validated restore and serial benchmarks | engine plumbing (serve, caches, batching, splits, memory) - no strata-q36 code |
-| #2093 | open | sm_75: the prompt path's top-k with one full read of the scores (identical ids) | another NVIDIA architecture's kernels |
-| #2092 | open | sm_75: the v2 int8 prompt attention with register staging instead of cp.async (STRATA_PA_V2T=1) | another NVIDIA architecture's kernels |
-| #2091 | open | sm_75: the hyper-connection's xn16 written as the FP16 its tensor-core GEMMs read (bitwise, prompt +3 %) | another NVIDIA architecture's kernels |
+| #2093 | open | sm_75: the prompt path's top-k with one full read of the scores (identical ids) | sm_75 prompt top-k - QSA selection |
+| #2092 | open | sm_75: the v2 int8 prompt attention with register staging instead of cp.async (STRATA_PA_V2T=1) | sm_75 int8 prompt attention register staging - QSA prompt attention |
+| #2091 | open | sm_75: the hyper-connection's xn16 written as the FP16 its tensor-core GEMMs read (bitwise, prompt +3 %) | sm_75 hyper-connection xn16 - Flash-Next mHC |
 | #2089 | closed | CUDA sm_75: interleaved 2-4 column GEMV with a Turing rows table (CMP 50HX), opt-in STRATA_SM75_TABLE=1 | sm_75 GEMV table (closed); Volta's own table (STRATA_SM70_TABLE, PR 1401) measured 93.1 vs 94.3 tok/s |
 | #2087 | open | Community benchmark: RTX 3090 / Qwen3.8-Flash-Next-UD-Q4_K_XL / Strata 0.1.43 | no engine code (docs, web, benchmark reports, tools, setup, serve front end) |
 | #2086 | open | Community benchmark: RTX 3090 + RTX 5070 + RTX 5070 Ti layer split (Q2_0) | no engine code (docs, web, benchmark reports, tools, setup, serve front end) |
 | #2083 | open | bench: community report, RTX 5060 Ti 16 GB + RTX 3060 12 GB unequal layer split (PCIe gen5 x8 + gen3 x4), IQ3_ | no engine code (docs, web, benchmark reports, tools, setup, serve front end) |
 | #2082 | open | fix: make conversation parking admission fail safely | engine plumbing (serve, caches, batching, splits, memory) - no strata-q36 code |
-| #2081 | open | dequant: the prompt projections' BF16 dequant with 16-byte stores on sm_75 (bit-exact; STRATA_TC_SM75=0 keeps  | another NVIDIA architecture's kernels |
-| #2080 | open | qsa_select: the FP32 tiled block scores below sm_80 (PR #1091) on by default; STRATA_SELECT_SIMT=0 keeps the w | kernels strata-q36 does not call (QSA, PLE, hyper-connections, verify, CPU pool) |
+| #2081 | open | dequant: the prompt projections' BF16 dequant with 16-byte stores on sm_75 (bit-exact; STRATA_TC_SM75=0 keeps  | sm_75 vector dequant stores: hard-gated to cc 7.5 and no longer applies to main; the dequant it speeds is ~2% of a strata-q36 prompt on the V100 (0.158 s of 7.7 s at 4K) - ceiling under 2% |
+| #2080 | open | qsa_select: the FP32 tiled block scores below sm_80 (PR #1091) on by default; STRATA_SELECT_SIMT=0 keeps the w | qsa_select scoring below sm_80 - QSA (Flash-Next) selection, not in strata-q36 |
 | #2079 | open | Add native Windows support for Intel SYCL GPUs | no engine code (docs, web, benchmark reports, tools, setup, serve front end) |
 | #2078 | open | prefill: refill the lent expert slots from the GGUF mapping's pieces (opt-in STRATA_REFILL_PARTS=1; gfx1151 ta | another backend (SYCL / HIP / Metal / Vulkan) |
 | #2077 | open | serve: --prompt-cache-file <path>, the long prompt prefix saved to disk and restored across restarts (opt-in) | engine plumbing (serve, caches, batching, splits, memory) - no strata-q36 code |
 | #2076 | open | bench: 2x RTX 5060 Ti + i7-12700, IQ3_XXS high reasoning on 0.1.42 | no engine code (docs, web, benchmark reports, tools, setup, serve front end) |
-| #2075 | open | QSA decode attention: PR #540's two-cells-per-step chunk kernel on every CUDA card and a bounded merge (STRATA | kernels strata-q36 does not call (QSA, PLE, hyper-connections, verify, CPU pool) |
-| #2073 | open | PLE: --ple-io direct stays direct when the start-up probe measures the disk slow (STRATA_PLE_AUTO_MMAP=1 opts  | kernels strata-q36 does not call (QSA, PLE, hyper-connections, verify, CPU pool) |
-| #2072 | open | sm_75: the decode QSA selection at long context, a halving scorer and a split top-k (bitwise, decode +6-12 % a | another NVIDIA architecture's kernels |
-| #2071 | open | sm_75: a faster tiled FP32 block scorer (STRATA_SELECT_SIMT=2), and the case for SIMT on RTX 20 by default | another NVIDIA architecture's kernels |
-| #2070 | open | sm_75: a hyper-connection up kernel for 3+ tokens and the staged down kernel in token pairs (bitwise) | another NVIDIA architecture's kernels |
+| #2075 | open | QSA decode attention: PR #540's two-cells-per-step chunk kernel on every CUDA card and a bounded merge (STRATA | QSA decode attention chunk kernel - Flash-Next's attention; strata-q36's own got the grouped kernel (810d1ea) |
+| #2073 | open | PLE: --ple-io direct stays direct when the start-up probe measures the disk slow (STRATA_PLE_AUTO_MMAP=1 opts  | PLE reader I/O - Flash-Next's per-layer n-gram table, none in Qwen3.6 |
+| #2072 | open | sm_75: the decode QSA selection at long context, a halving scorer and a split top-k (bitwise, decode +6-12 % a | sm_75 long-context QSA selection - Flash-Next |
+| #2071 | open | sm_75: a faster tiled FP32 block scorer (STRATA_SELECT_SIMT=2), and the case for SIMT on RTX 20 by default | sm_75 tiled FP32 block scorer - QSA selection |
+| #2070 | open | sm_75: a hyper-connection up kernel for 3+ tokens and the staged down kernel in token pairs (bitwise) | sm_75 hyper-connection up/down kernels - Flash-Next mHC |
 | #2069 | open | sm_75: Turing tables for the decode matvecs and the grouped experts (bitwise, decode +6 %) | sm_75 tables / expert mode 4: mode 4 measured on the V100 via STRATA_EXP_MODE=4 - 99.6 / 84.4 tok/s, noise; mode 8 (Volta's) 99.8 / 84.8, noise |
 | #2066 | open | bench: dual Quadro RTX 6000 results, upgrade A/B and NUMA comparison | no engine code (docs, web, benchmark reports, tools, setup, serve front end) |
 | #2064 | open | Community benchmarks: RTX PRO 1000 Blackwell 8 GB, Windows, Coder IQ1_M and IQ2_XS, Strata 0.1.43 | no engine code (docs, web, benchmark reports, tools, setup, serve front end) |
-| #2063 | open | Add Windows ARM64 RTX Spark support | kernels strata-q36 does not call (QSA, PLE, hyper-connections, verify, CPU pool) |
+| #2063 | open | Add Windows ARM64 RTX Spark support | Windows ARM64 build - another platform |
 | #2060 | open | Linux AMD: images on the GPU through Vulkan, on a chosen card or the integrated GPU (vision.device) | no engine code (docs, web, benchmark reports, tools, setup, serve front end) |
-| #2059 | open | QSA decode: the window's block scores with the queries in registers and six shuffles per block (STRATA_QSA_ROW | kernels strata-q36 does not call (QSA, PLE, hyper-connections, verify, CPU pool) |
+| #2059 | open | QSA decode: the window's block scores with the queries in registers and six shuffles per block (STRATA_QSA_ROW | QSA window block scores in registers - Flash-Next selection |
 | #2058 | open | Verify window: the routed experts' gate/up with the group's q8_1 rows in shared memory (STRATA_EXPDEC=1, opt-i | tested on v100 (STRATA_EXPDEC=1): 99.1 / 84.4 tok/s - noise, same tokens, not taken |
 | #2057 | open | serve: an opt-in "stream_all_tool_args" sends a tool call's non-string argument in pieces as the model writes  | no engine code (docs, web, benchmark reports, tools, setup, serve front end) |
 | #2056 | closed | hip: gfx103x creates the MTP drafter's side stream again (RX 6800, Windows: 7.9K prompt 584–596 → 798–808 tok/ | another backend (SYCL / HIP / Metal / Vulkan) |
@@ -268,14 +268,14 @@ with q36_bench.sh on the V100 (Qwen3.6-35B-A3B UD-Q4_K_M; v100 baseline short 99
 | #2039 | open | serve: preserve literal </tool_call> in prompts | no engine code (docs, web, benchmark reports, tools, setup, serve front end) |
 | #2035 | open | Add opt-in Windows Tray with managed lifecycle, profiles and updates | no engine code (docs, web, benchmark reports, tools, setup, serve front end) |
 | #2032 | open | community bench: 2x RTX 2080 Ti (sm_75, NVLink unused), IQ3_S, 0.1.43 | no engine code (docs, web, benchmark reports, tools, setup, serve front end) |
-| #2031 | open | Add Q4_1 PLE dequantization support | kernels strata-q36 does not call (QSA, PLE, hyper-connections, verify, CPU pool) |
+| #2031 | open | Add Q4_1 PLE dequantization support | Q4_1 PLE dequant - PLE table, none in Qwen3.6 |
 | #2030 | open | bench: RX 9060 XT 16 GiB, Flash-Next IQ3_S at 262K, engine 0.1.43 (Linux, HIP gfx1200) | no engine code (docs, web, benchmark reports, tools, setup, serve front end) |
 | #2025 | open | docs: use Strata as the backend for ACP-capable editors (Zed / JetBrains) via acp-bridge | no engine code (docs, web, benchmark reports, tools, setup, serve front end) |
 | #2024 | open | bench: RTX 5090 desktop 1M-agent — 0.1.42 vs 0.1.43 interleaved A/B (overlap default pays +1.2/+2.4% decode; # | no engine code (docs, web, benchmark reports, tools, setup, serve front end) |
 | #2023 | open | Video input: bounded preparation progress and cancellation follow-up | no engine code (docs, web, benchmark reports, tools, setup, serve front end) |
 | #2022 | open | bench: community reports - RTX 2000 Ada 16 GB, Flash-Next IQ3_XXS at 262K, 0.1.42 and 0.1.43 | no engine code (docs, web, benchmark reports, tools, setup, serve front end) |
 | #2020 | open | prefill: gfx11 F16 matrix-core routed experts (opt-in STRATA_PF_F16=1): UD-Q4_K_XL 32K +15.6%, UD-IQ4_XS 32K + | another backend (SYCL / HIP / Metal / Vulkan) |
-| #2019 | open | prefill: q's split + norm + rope as one kernel (STRATA_QPREP=1); gate_attn in the prompt attention's epilogue  | kernels strata-q36 does not call (QSA, PLE, hyper-connections, verify, CPU pool) |
+| #2019 | open | prefill: q's split + norm + rope as one kernel (STRATA_QPREP=1); gate_attn in the prompt attention's epilogue  | prompt q split/norm/rope fusion in qsa_prompt_attn - Flash-Next's prompt attention |
 | #2018 | open | prefill: VGPR-capped gfx11 fused expert kernels back on for gfx1151 on clang 23 (same bits, 2-15% less time pe | another backend (SYCL / HIP / Metal / Vulkan) |
 | #2017 | open | prompt attention (gfx11 / gfx12 WMMA): issue a chunk's reads before its compute | another backend (SYCL / HIP / Metal / Vulkan) |
 | #2016 | open | prefill: the QSA top-k radix digit by a cooperative scan (same ids; gfx1151 -5% to -49% at 16K-128K, RTX 3060  | another backend (SYCL / HIP / Metal / Vulkan) |
@@ -293,7 +293,7 @@ with q36_bench.sh on the V100 (Qwen3.6-35B-A3B UD-Q4_K_M; v100 baseline short 99
 | #1998 | open | bench: community suite 1 (--long) on RX 9070 XT, engine 0.1.43, IQ3_S | no engine code (docs, web, benchmark reports, tools, setup, serve front end) |
 | #1992 | open | calibrate: measure the shared-expert stream fork on AMD (STRATA_SH_STREAM) and keep it per PC (#1272) | no engine code (docs, web, benchmark reports, tools, setup, serve front end) |
 | #1990 | open | Add opt-in external llama.cpp token engine | no engine code (docs, web, benchmark reports, tools, setup, serve front end) |
-| #1989 | open | STRATA_HC_HOST=1: hyper-connection down/up pairs in pinned host memory (opt-in, CUDA) | kernels strata-q36 does not call (QSA, PLE, hyper-connections, verify, CPU pool) |
+| #1989 | open | STRATA_HC_HOST=1: hyper-connection down/up pairs in pinned host memory (opt-in, CUDA) | hyper-connection pairs in host memory - Flash-Next mHC, none in Qwen3.6 |
 | #1987 | open | Community benchmark: RTX 4090 D 48 GB + Flash-Next IQ3_XXS (0.1.43), 4K/16K/32K fresh 2,314/3,333/3,528 tok/s | no engine code (docs, web, benchmark reports, tools, setup, serve front end) |
 | #1986 | open | Add community benchmark: Quadro RTX 8000 48 GB, UD-Q4_K_XL, 131K (v0.… | no engine code (docs, web, benchmark reports, tools, setup, serve front end) |
 | #1983 | closed | Linux CUDA: warm adaptive-overlap callbacks before host pinning (opt-in) | engine plumbing (serve, caches, batching, splits, memory) - no strata-q36 code |
@@ -323,7 +323,7 @@ with q36_bench.sh on the V100 (Qwen3.6-35B-A3B UD-Q4_K_M; v100 baseline short 99
 | #1940 | open | Add Arc native Windows support | no engine code (docs, web, benchmark reports, tools, setup, serve front end) |
 | #1939 | open | setup: write run-<model>.bat and the build .bat with single CRLF line ends | no engine code (docs, web, benchmark reports, tools, setup, serve front end) |
 | #1937 | open | serve: parked conversations on the disk, optionally across restarts (--conversation-disk-dir, --conversation-d | engine plumbing (serve, caches, batching, splits, memory) - no strata-q36 code |
-| #1934 | open | mtp_pack: Q2_0 scale search over 0.15 to 1.0 x max/w/, either sign | kernels strata-q36 does not call (QSA, PLE, hyper-connections, verify, CPU pool) |
+| #1934 | open | mtp_pack: Q2_0 scale search over 0.15 to 1.0 x max/w/, either sign | mtp_pack Q2_0 scale search - a test only |
 | #1933 | closed | serve: aggregate batch request timings | no engine code (docs, web, benchmark reports, tools, setup, serve front end) |
 | #1931 | open | fix(hip): add opt-in stability profile for reset reports | another backend (SYCL / HIP / Metal / Vulkan) |
 | #1927 | open | bench: community report, RX 6900 XT (gfx1030) x1 and x2 on 0.1.42 - Unsloth UD-Q4_K_XL beside GSQ-RCO IQ3_S, s | no engine code (docs, web, benchmark reports, tools, setup, serve front end) |
@@ -345,12 +345,12 @@ with q36_bench.sh on the V100 (Qwen3.6-35B-A3B UD-Q4_K_M; v100 baseline short 99
 | #1895 | open | chat: syntax highlighting for fenced code blocks in streamed output | no engine code (docs, web, benchmark reports, tools, setup, serve front end) |
 | #1894 | open | bench: community report, RX 6900 XT (gfx1030): STRATA_ROUTE_TAIL_SKIP=7 on HIP, decode x1.24 (Unsloth UD-Q4_K_ | no engine code (docs, web, benchmark reports, tools, setup, serve front end) |
 | #1893 | open | docs: the three things 0.1.42 changed that no page told | no engine code (docs, web, benchmark reports, tools, setup, serve front end) |
-| #1892 | closed | Non-finite logits (#879): a guard with self-healing | kernels strata-q36 does not call (QSA, PLE, hyper-connections, verify, CPU pool) |
+| #1892 | closed | Non-finite logits (#879): a guard with self-healing | non-finite logits guard in verify.cpp - correctness guard, Flash-Next decode |
 | #1891 | open | logit_bias: normalize a long list once per request (65,929 entries: +175 ms -> +24 ms) | no engine code (docs, web, benchmark reports, tools, setup, serve front end) |
 | #1890 | open | sycl: Windows/OpenCL support for the merged port, and a live free-VRAM figure for the expert cache (#1549) | another backend (SYCL / HIP / Metal / Vulkan) |
 | #1889 | open | Verify window: the mixer's input-only work on graph branches (STRATA_SIDE_MIXER=1/2, opt-in) | engine plumbing (serve, caches, batching, splits, memory) - no strata-q36 code |
-| #1888 | open | QSA decode attention: split each query's cells across blocks on the int8 mma path (STRATA_QSA_SPLIT_ATTN=1, op | kernels strata-q36 does not call (QSA, PLE, hyper-connections, verify, CPU pool) |
-| #1887 | open | Remote stage: conversation checkpoints across the link (--prompt-cache), stacked on #1748 | kernels strata-q36 does not call (QSA, PLE, hyper-connections, verify, CPU pool) |
+| #1888 | open | QSA decode attention: split each query's cells across blocks on the int8 mma path (STRATA_QSA_SPLIT_ATTN=1, op | QSA int8 mma split attention - Flash-Next attention |
+| #1887 | open | Remote stage: conversation checkpoints across the link (--prompt-cache), stacked on #1748 | remote-stage conversation checkpoints - multi-host serving |
 | #1886 | open | serve: preserve literal </think> across reasoning parsing | no engine code (docs, web, benchmark reports, tools, setup, serve front end) |
 | #1883 | open | serve: on Windows the engine and the image encoder start without a console window of their own | no engine code (docs, web, benchmark reports, tools, setup, serve front end) |
 | #1882 | open | serve: /v1/models also gives the context size as `max_model_len` and `context_length` | no engine code (docs, web, benchmark reports, tools, setup, serve front end) |
@@ -385,13 +385,13 @@ with q36_bench.sh on the V100 (Qwen3.6-35B-A3B UD-Q4_K_M; v100 baseline short 99
 | #1829 | open | Add shared LaTeX/web math core without a rendering engine | no engine code (docs, web, benchmark reports, tools, setup, serve front end) |
 | #1828 | closed | sycl: register iq_parity and ple_parity like the top-level build | no engine code (docs, web, benchmark reports, tools, setup, serve front end) |
 | #1826 | closed | serve: probe the SYCL launcher's engine binary for --tail-role-token | no engine code (docs, web, benchmark reports, tools, setup, serve front end) |
-| #1825 | open | qsa_select: prompt-path block scores with a thread per query head (below sm_80, same bits) | kernels strata-q36 does not call (QSA, PLE, hyper-connections, verify, CPU pool) |
-| #1824 | open | cpu: Q2_0 rows on AVX-only CPUs (q2_avx1.cpp) instead of ggml-cpu's scalar dot | kernels strata-q36 does not call (QSA, PLE, hyper-connections, verify, CPU pool) |
+| #1825 | open | qsa_select: prompt-path block scores with a thread per query head (below sm_80, same bits) | qsa_select prompt block scores - Flash-Next selection |
+| #1824 | open | cpu: Q2_0 rows on AVX-only CPUs (q2_avx1.cpp) instead of ggml-cpu's scalar dot | CPU Q2_0 rows on AVX-only CPUs - Q2_0 and the CPU pool; this host has AVX-512 and all experts in VRAM |
 | #1823 | open | tokenizer: a long message's ids remembered whole, on top of the piece cache | no engine code (docs, web, benchmark reports, tools, setup, serve front end) |
 | #1822 | open | prefill: gate/up MMQ reads the experts in place (CUDA; patched copy of llama.cpp mmq.cuh) | in-place MMQ for prefill.cpp - strata-q36 calls moe_mmq on resident blobs already |
-| #1821 | open | qsa_prompt_attn: int8 K/V prefetched in registers and sharing one buffer (Turing / sm_75) | another NVIDIA architecture's kernels |
+| #1821 | open | qsa_prompt_attn: int8 K/V prefetched in registers and sharing one buffer (Turing / sm_75) | QSA prompt attention int8 K/V register prefetch on sm_75 - Flash-Next |
 | #1820 | open | qwen35moe follow-ups: VRAM cap + quality mode, MTP for F16 draft tensors, chunked GDN, 256/8 route-resident | a separate qwen35moe branch (+5,529 lines: VRAM cap, quality mode, chunked GDN) - superseded by strata-q36 in main |
-| #1818 | open | fix: make CPU IQ dispatch independent of draft occupancy | kernels strata-q36 does not call (QSA, PLE, hyper-connections, verify, CPU pool) |
+| #1818 | open | fix: make CPU IQ dispatch independent of draft occupancy | CPU IQ dispatch fix - the CPU pool, unused with every expert in VRAM |
 | #1817 | closed | sycl: use the source version for setup model checks | no engine code (docs, web, benchmark reports, tools, setup, serve front end) |
 | #1816 | open | Opt-in OTLP traces of every /v1 request (0.1.41), plus the docs pages 0.1.41 left uncovered | engine plumbing (serve, caches, batching, splits, memory) - no strata-q36 code |
 | #1813 | open | Add exact speculative-window token parity and coverage gate | no engine code (docs, web, benchmark reports, tools, setup, serve front end) |
