@@ -9,8 +9,9 @@ with `-DSTRATA_EXPERIMENTAL_SM60=ON -DCMAKE_CUDA_ARCHITECTURES=70`. `q36_bench.s
 | Change | Before | After |
 |---|---|---|
 | Decode attention: a K/V head's query heads in one block (`k_attn_part_g`, 810d1ea; `STRATA_Q36_ATTN_GQA=0` the old) | 16K prompt: tg256 56.4 tok/s; 16K greedy run 56.4 tok/s | **84.5** / **90.9** tok/s, the same tokens (md5) |
+| ... its key rows in float4 loads (same summation order) | short tg256 99.6-99.7, 16K 84.0-84.6, 16K greedy 90.4-90.7 tok/s | **104.1** / **94.0-94.2** / **97.5-97.8** tok/s, the same tokens |
 
-Short prompts are unchanged (pp512 / tg256 1,685 / 99-100 tok/s), the prompt speed too (pp16384 ~1,517 tok/s).
+Together: decode after a 16K prompt 56.4 -> 94.1 tok/s (+67%), after a short one 99.6 -> 104.1 (+4.5%); the prompt speed is unchanged (pp512 / pp16384 ~1,685 / ~1,516 tok/s). Strata main measured 94.3 tok/s short on the same file and card before either change.
 
 ## Measured, not taken
 
