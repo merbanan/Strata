@@ -1005,7 +1005,7 @@ bool gr_down_max4() {
     return on;
 }
 
-// the split norm with registers (gr_norm_split_fast_kernel): gfx12 only until another arch is measured;
+// the split norm with registers (gr_norm_split_fast_kernel): on by default on gfx12; CUDA opt-in (measured on sm_70 only);
 // STRATA_GR_NORM_FAST=0 / 1 forces it off / on
 bool norm_fast_on() {
 #if defined(__HIPCC__)
@@ -1020,7 +1020,17 @@ bool norm_fast_on() {
     }
     return per_dev[dev] == 2;
 #else
-    return false;
+    // CUDA: the V100 tree turns it on by default on sm_70 (STRATA_GR_NORM_FAST=0 off); other cards opt in with =1
+    static const bool on = [] {
+        const char* e = std::getenv("STRATA_GR_NORM_FAST");
+        if (e != nullptr) return std::atoi(e) != 0;
+        int dev = 0, major = 0, minor = 0;
+        if (cudaGetDevice(&dev) != cudaSuccess) return false;
+        cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, dev);
+        cudaDeviceGetAttribute(&minor, cudaDevAttrComputeCapabilityMinor, dev);
+        return major == 7 && minor == 0;
+    }();
+    return on;
 #endif
 }
 
