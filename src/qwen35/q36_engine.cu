@@ -308,6 +308,67 @@ __global__ void k_attn_part(const float* q, const float* kc, const float* vc, co
         pl[o] = l;
     }
 }
+/// k_attn_part for the G query heads of one K/V head together: grid (n_chunk, n_tokens x HKV).  Each key and value
+/// row is read once for the group instead of once a query head (8x fewer K/V reads for Qwen3.6's 16 / 2 heads); every
+/// head's dot products, softmax reductions and value sums run in k_attn_part's order, so its output is bit for bit
+/// k_attn_part's (the same pacc / pm / pl rows, the same merge).
+template <int G>
+__global__ void k_attn_part_g(const float* q, const float* kc, const float* vc, const int32_t* pos0, int t0, int H,
+                              int HKV, int ctx, float scale, int n_chunk, float* pacc, float* pm, float* pl) {
+    constexpr int HD = 256;
+    __shared__ float qs[G][HD], sc[G][kChunkCells], sh[kThreads];
+    const int c = blockIdx.x, r = blockIdx.y;
+    const int tr = r / HKV, kvh = r % HKV, t = t0 + tr, h0 = kvh * G;
+    const int npos = *pos0 + t + 1;
+    const int p0 = c * kChunkCells;
+    if (p0 >= npos) return;
+    const int j = threadIdx.x;
+#pragma unroll
+    for (int g = 0; g < G; ++g) qs[g][j] = q[((size_t) t * H + h0 + g) * HD + j];
+    __syncthreads();
+    const int p = p0 + j;
+    float s[G];
+    if (p < npos) {
+        const float* kp = kc + ((size_t) kvh * ctx + p) * HD;
+        float a[G];
+#pragma unroll
+        for (int g = 0; g < G; ++g) a[g] = 0.f;
+        for (int i = 0; i < HD; ++i) {
+            const float kv = kp[i];
+#pragma unroll
+            for (int g = 0; g < G; ++g) a[g] += qs[g][i] * kv;
+        }
+#pragma unroll
+        for (int g = 0; g < G; ++g) s[g] = a[g] * scale;
+    } else {
+#pragma unroll
+        for (int g = 0; g < G; ++g) s[g] = -INFINITY;
+    }
+    const int n = min(kChunkCells, npos - p0);
+#pragma unroll 1
+    for (int g = 0; g < G; ++g) {
+        const float m = block_max(s[g], sh);
+        const float e = p < npos ? expf(s[g] - m) : 0.f;
+        sc[g][j] = e;
+        const float l = block_sum(e, sh);
+        if (j == 0) {
+            const size_t o = (size_t) (tr * H + h0 + g) * n_chunk + c;
+            pm[o] = m;
+            pl[o] = l;
+        }
+    }
+    float acc[G];
+#pragma unroll
+    for (int g = 0; g < G; ++g) acc[g] = 0.f;
+    const float* vp = vc + ((size_t) kvh * ctx + p0) * HD + j;
+    for (int k = 0; k < n; ++k) {
+        const float v = vp[(size_t) k * HD];
+#pragma unroll
+        for (int g = 0; g < G; ++g) acc[g] += sc[g][k] * v;
+    }
+#pragma unroll
+    for (int g = 0; g < G; ++g) pacc[((size_t) (tr * H + h0 + g) * n_chunk + c) * HD + j] = acc[g];
+}
 /// The chunks merged, times sigmoid(gate): grid (n_rows), block HD.
 __global__ void k_attn_merge(const float* pacc, const float* pm, const float* pl, const float* gate,
                              const int32_t* pos0, int t0, int H, int n_chunk, float* out) {
@@ -1429,8 +1490,23 @@ struct Engine {
                     const int nt = std::min(rows_per, T - t0);
                     const int nc = graph_mode ? n_chunk
                                               : (int) std::min<int64_t>(n_chunk, (p0 + t0 + nt + kChunkCells - 1) / kChunkCells);
-                    k_attn_part<<<dim3(nc, nt * H), kChunkCells, 0, st>>>(q, kc[li], vc[li], dpos, t0, H, HKV, ctx,
-                                                                         1.0f / sqrtf((float) HD), n_chunk, pacc, pm, pl);
+                    // the query heads of a K/V head together (k_attn_part_g, bit for bit k_attn_part's);
+                    // STRATA_Q36_ATTN_GQA=0: a block a query head
+                    static const bool gqa = [] {
+                        const char* v = std::getenv("STRATA_Q36_ATTN_GQA");
+                        return v == nullptr || std::atoi(v) != 0;
+                    }();
+                    const float sc = 1.0f / sqrtf((float) HD);
+                    const int G = H / HKV;
+                    if (gqa && H % HKV == 0 && (G == 8 || G == 4 || G == 2)) {
+                        const dim3 gr(nc, nt * HKV);
+                        if (G == 8) k_attn_part_g<8><<<gr, kChunkCells, 0, st>>>(q, kc[li], vc[li], dpos, t0, H, HKV, ctx, sc, n_chunk, pacc, pm, pl);
+                        else if (G == 4) k_attn_part_g<4><<<gr, kChunkCells, 0, st>>>(q, kc[li], vc[li], dpos, t0, H, HKV, ctx, sc, n_chunk, pacc, pm, pl);
+                        else k_attn_part_g<2><<<gr, kChunkCells, 0, st>>>(q, kc[li], vc[li], dpos, t0, H, HKV, ctx, sc, n_chunk, pacc, pm, pl);
+                    } else {
+                        k_attn_part<<<dim3(nc, nt * H), kChunkCells, 0, st>>>(q, kc[li], vc[li], dpos, t0, H, HKV, ctx, sc,
+                                                                             n_chunk, pacc, pm, pl);
+                    }
                     k_attn_merge<<<nt * H, HD, 0, st>>>(pacc, pm, pl, gate, dpos, t0, H, n_chunk, att);
                 }
             }
