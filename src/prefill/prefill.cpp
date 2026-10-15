@@ -37,6 +37,7 @@
 #include "strata/prefill/gemm.hpp"
 #include "strata/prefill/moe_fused.hpp"
 #include "strata/prefill/moe_fused_iq.hpp"
+#include "strata/prefill/moe_fp16tc.hpp"
 #include "strata/prefill/moe_mmq.hpp"
 #include "strata/core/peer_experts.hpp"
 #include "strata/prefill/kernels.hpp"
@@ -997,6 +998,20 @@ uint64_t qsa_set_bytes(size_t T, int64_t cap, int64_t max_blocks, int64_t sel_ba
 // Step 2b: which layers' experts go through MMQ (both weight types covered; the Strata Q2_0 pack always - its blob
 // is converted to GGUF Q2_0 blocks on the gather), whether any layer keeps the FP16 path (IQ1_M), and the largest
 // gate/up and down matrices a group buffer slot holds.  STRATA_PREFILL_MMQ=0: the FP16 path everywhere (the A/B).
+// the FP16 tensor-core prompt experts (moe_fp16tc): the device is sm_70 and STRATA_PREFILL_FP16TC is not 0; chunks of
+// at least STRATA_PREFILL_FP16TC_MIN tokens (default 2048: shorter chunks leave the 64-row tiles mostly padding)
+bool fp16tc_ok() {
+    static const bool ok = [] {
+        const char* e = std::getenv("STRATA_PREFILL_FP16TC");
+        if (e && std::atoi(e) == 0) return false;
+        return strata::prefill::fp16tc::available();
+    }();
+    return ok;
+}
+int64_t fp16tc_min() {
+    static const int64_t v = std::getenv("STRATA_PREFILL_FP16TC_MIN") ? std::atoll(std::getenv("STRATA_PREFILL_FP16TC_MIN")) : 2048;
+    return v;
+}
 constexpr int MMQ_GROUP = 16;                  // experts per MMQ launch (the gather is per expert, as blobs arrive)
 // MMQ reads up to one 256-value tile past a matrix's last row when the row length is not a multiple of it (the down
 // product: 640 values).  Those bytes meet zero activations, which is harmless only if they decode to finite numbers -
@@ -3905,6 +3920,28 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                                 int64_t maxr = 0;
                                 for (size_t i = j0; i <= j; ++i) maxr = std::max<int64_t>(maxr, m.cnt[(size_t) order[i]]);
                                 pt.mark(kPfGemmGU, cs);
+                                // sm_70 + a native Q2_0 layer + a chunk of fp16tc_min() tokens or more: the products on
+                                // the FP16 tensor cores (same gathered blobs, q8_1 activations and bounds as MMQ; not
+                                // bit-identical, relative rms ~1e-3 against MMQ)
+                                const bool tc = lay.native && T >= fp16tc_min() && fp16tc_ok() &&
+                                                fp16tc::geom_ok(mmq_gt, mmq_dt, N, 640, mmq_gub / 1280, mmq_db / N,
+                                                                mmq_gub / 2, mmq_gub) &&
+                                                !lay.fmt[(size_t) l].tail_off && ngx <= fp16tc::kMaxBatch;
+                                if (tc) {
+                                    fp16tc::Geom tg;
+                                    tg.n_embd = (int) N; tg.n_ff = 640; tg.gu_row = mmq_gub / 1280; tg.d_row = mmq_db / N;
+                                    tg.up_off = mmq_gub / 2;
+                                    fp16tc::Batch tb;
+                                    tb.n = ngx; tb.max_rows = (int) maxr;
+                                    for (int z = 0; z < ngx; ++z) { tb.blob[z] = m.grp_gu + z * mmq_gub; tb.down[z] = m.grp_d + z * mmq_db; }
+                                    fp16tc::gu(tb, tg, m.bounds_dev + j0, m.Xq, T * K, m.GU, 1280, m.cs);
+                                    mmq::swiglu(m.GU + r0 * 1280, m.H + r0 * 640, nr, 640, !lay.native, m.cs);
+                                    pt.mark(kPfGemmD, cs);
+                                    mmq::quantize(m.H + r0 * 640, nullptr, m.Hq, mmq_dt, 640, 640, nr, m.cs, m.Hscale);
+                                    fp16tc::down(tb, tg, m.bounds_dev + n + 1 + g * (MMQ_GROUP + 1), m.Hq, nr, m.Dm + r0 * N,
+                                                 N, 0, m.cs);
+                                    return true;
+                                }
                                 mmq::Product gu;
                                 gu.w = m.grp_gu; gu.type = mmq_gt; gu.w_rows = 1280; gu.w_cols = N; gu.expert_bytes = mmq_gub;
                                 gu.n = ngx; gu.xq = m.Xq; gu.bounds = m.bounds_dev + j0; gu.ids = m.ids_identity;

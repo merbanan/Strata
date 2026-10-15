@@ -1422,6 +1422,10 @@ if(STRATA_NATIVE_EXPERTS)
     add_library(strata_mmq STATIC src/prefill/moe_mmq.cu src/prefill/moe_fused.cu src/prefill/moe_fused_iq.cu
                 src/prefill/mmq_nvfp4_w4a8.cu
                 src/prefill/ggml_cuda_host.cu ${_strata_mmq}/quantize.cu)
+    # the Q2_0 pack's prompt experts on Volta's FP16 tensor cores (jmnargi/Strata-V100 31ad437c; sm_70 only at runtime,
+    # STRATA_PREFILL_FP16TC=0 keeps MMQ)
+    target_sources(strata_mmq PRIVATE src/prefill/moe_fp16tc.cu)
+    target_compile_definitions(strata_mmq PUBLIC STRATA_PREFILL_FP16TC=1)
     # q8_0: the drafter's matrices (E-9); STRATA_ORCA_Q4KS_MMQ adds q5_0 (#296, in _strata_mmq_types), and
     # STRATA_MMQ_KQUANTS q4_k q5_k q5_1 q6_k, the experts of Unsloth's UD-Q4/Q5/Q6_K_XL (docs/QUANTS.md; the dispatch
     # follows eddoursul/Strata 7706c1b).  MODEL-UPDATE Phase 1: on CUDA they are a library of their own, strata_kq
@@ -1509,6 +1513,11 @@ if(STRATA_NATIVE_EXPERTS)
       target_link_libraries(prefill_fused_moe_test PRIVATE strata_mmq ggml-base ${_strata_gpu_runtime_target})
       add_test(NAME prefill_fused_moe_test COMMAND prefill_fused_moe_test)
       set_tests_properties(prefill_fused_moe_test PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300)
+      # the FP16 tensor-core Q2_0 experts against a double-precision reference and MMQ (exit 77 off sm_70)
+      add_executable(prefill_fp16tc_test tests/cuda/prefill_fp16tc_test.cpp)
+      target_link_libraries(prefill_fp16tc_test PRIVATE strata_mmq ggml-base ${_strata_gpu_runtime_target} CUDA::cublas)
+      add_test(NAME prefill_fp16tc_test COMMAND prefill_fp16tc_test)
+      set_tests_properties(prefill_fp16tc_test PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300)
       # #136: the same for the native packs' formats (IQ2_XXS IQ2_XS IQ2_S IQ3_XXS IQ3_S IQ4_XS, down Q2_0 IQ4_NL)
       add_executable(prefill_fused_iq_test tests/cuda/prefill_fused_iq_test.cpp)
       target_link_libraries(prefill_fused_iq_test PRIVATE strata_mmq ggml-base ${_strata_gpu_runtime_target})
