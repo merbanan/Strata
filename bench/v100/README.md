@@ -8,10 +8,29 @@ with `-DSTRATA_EXPERIMENTAL_SM60=ON -DCMAKE_CUDA_ARCHITECTURES=70`. `q36_bench.s
 
 | Change | Before | After |
 |---|---|---|
+| Flash-Next: #2357 + #2358 on by default on sm_70 (e584be8) | decode 56.0-56.2 avg | 56.8-56.9 avg (+1.3-2%), the same tokens |
 | Decode attention: a K/V head's query heads in one block (`k_attn_part_g`, 810d1ea; `STRATA_Q36_ATTN_GQA=0` the old) | 16K prompt: tg256 56.4 tok/s; 16K greedy run 56.4 tok/s | **84.5** / **90.9** tok/s, the same tokens (md5) |
 | ... its key rows in float4 loads (same summation order) | short tg256 99.6-99.7, 16K 84.0-84.6, 16K greedy 90.4-90.7 tok/s | **104.1** / **94.0-94.2** / **97.5-97.8** tok/s, the same tokens |
 
 Together: decode after a 16K prompt 56.4 -> 94.1 tok/s (+67%), after a short one 99.6 -> 104.1 (+4.5%); the prompt speed is unchanged (pp512 / pp16384 ~1,685 / ~1,516 tok/s). Strata main measured 94.3 tok/s short on the same file and card before either change.
+
+## Flash-Next (Strata's main engine) on the V100
+
+Qwen3.8-Flash-Next GSQ-RCO Q2_0 (ISTA-DASLab, 66.4 GB, two shards; pack from `tools/iq_pack.py`), `strata --serve`
+with `--spec 2 --prefill 512 --kv int8 --vram-reserve-mib 2048 --expert-cache auto` (the default 700 MiB reserve left
+too little for the verify windows' graph capture here), `fn_bench.py`: three 128-token greedy answers and a 6K prompt.
+
+| Build | Decode (tok/s) | 6K prompt | Tokens |
+|---|---|---|---|
+| main / v100 before e584be8, two rounds | 56.6 / 56.3 / 55.1, 56.8 / 56.5 / 55.3 | 729-731 tok/s | md5 c7a041f7db35 |
+| + #2357 (STRATA_ARGMAX_ROWS_SM70=1) | 56.4 / 56.6 / 55.5 | 728 | same |
+| + #2358 (STRATA_GR_NORM_FAST=1) | 57.1 / 56.8 / 55.6 | 728 | same |
+| **v100 (e584be8: both, default on sm_70)**, two rounds | **57.6 / 57.3 / 56.1, 57.5 / 57.2 / 56.0** | 729 | same |
+| v100 with both set to 0 | 56.1 / 56.2 / 54.3 | 728 | same |
+
+Not applicable to this file: #2356 (pf_wmma2) - its experts are all Q2_0 (native_experts.txt: type 42), not IQ2_S /
+IQ4_NL. Volta's mode-8 experts, the mmvq_il table and the GR up kernel are main's sm_70 defaults already
+(docs/NVIDIA_V100.md).
 
 ## Measured, not taken
 
