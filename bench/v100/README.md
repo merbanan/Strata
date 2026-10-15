@@ -8,6 +8,7 @@ with `-DSTRATA_EXPERIMENTAL_SM60=ON -DCMAKE_CUDA_ARCHITECTURES=70`. `q36_bench.s
 
 | Change | Before | After |
 |---|---|---|
+| Flash-Next: grouped experts in mode 4 (#2069's Turing layout) by default on sm_70 (35c9285) | modes 0 / 8: 56.8 / 57.2 avg | 57.5 avg (+1.2%), the same tokens |
 | Flash-Next: #2357 + #2358 on by default on sm_70 (e584be8) | decode 56.0-56.2 avg | 56.8-56.9 avg (+1.3-2%), the same tokens |
 | Decode attention: a K/V head's query heads in one block (`k_attn_part_g`, 810d1ea; `STRATA_Q36_ATTN_GQA=0` the old) | 16K prompt: tg256 56.4 tok/s; 16K greedy run 56.4 tok/s | **84.5** / **90.9** tok/s, the same tokens (md5) |
 | ... its key rows in float4 loads (same summation order) | short tg256 99.6-99.7, 16K 84.0-84.6, 16K greedy 90.4-90.7 tok/s | **104.1** / **94.0-94.2** / **97.5-97.8** tok/s, the same tokens |
@@ -27,6 +28,11 @@ too little for the verify windows' graph capture here), `fn_bench.py`: three 128
 | + #2358 (STRATA_GR_NORM_FAST=1) | 57.1 / 56.8 / 55.6 | 728 | same |
 | **v100 (e584be8: both, default on sm_70)**, two rounds | **57.6 / 57.3 / 56.1, 57.5 / 57.2 / 56.0** | 729 | same |
 | v100 with both set to 0 | 56.1 / 56.2 / 54.3 | 728 | same |
+
+Measured on Flash-Next and not taken (same tokens in every run): #2221 STRATA_Q2_WARP=1 57.3 / 57.0 / 55.8, #2091 57.4 / 57.1 /
+55.9, #2222 STRATA_FUSE_WAIT=2 STRATA_QIL=1 57.7 / 57.4 / 56.2, #1949 57.4 / 57.1 / 55.9, STRATA_NO_MMVQ_ROWS2=1 (#2447's switch)
+57.8 / 57.3 / 56.0, against v100 57.5 / 57.2 / 56.0 and 57.2 / 56.9 / 55.7. With mode 4 (35c9285) the tree runs 58.2 / 57.8 /
+56.7 tok/s; strata-q36 on it 103.9 / 94.2, md5 75a302c75b7c.
 
 Not applicable to this file: #2356 (pf_wmma2) - its experts are all Q2_0 (native_experts.txt: type 42), not IQ2_S /
 IQ4_NL. Volta's mode-8 experts, the mmvq_il table and the GR up kernel are main's sm_70 defaults already

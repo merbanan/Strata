@@ -13,30 +13,30 @@ gemm and moe_mmq, dequant_bf16, quantize_act, the CPU expert pool (native_expert
 | PR | Files it changes in that set | Verdict |
 |---|---|---|
 | #2492 | native_mmvq | gfx12 (RDNA4) grid padding in native_mmvq: the stall it fixes (empty workgroups past a full-die fill) is an AMD scheduling effect; the CUDA launch path is unchanged by it |
-| #2447 | native_mmvq | sm_86 Q8_0 GEMV rows per block (closed, unmerged) - sm_86 only |
+| #2447 | native_mmvq | its switch (STRATA_NO_MMVQ_ROWS2=1, in main) MEASURED: Flash-Next 57.8 / 57.3 / 56.0 vs 57.5 / 57.2 / 56.0, strata-q36 104.2 / 94.0 vs 104.3 / 94.3 tok/s - noise, same tokens; not taken |
 | #2419 | native_expert, pool | arm64 / GB10 build (sm_121): another platform; its CPU-pool and router-dot changes are for ARM |
-| #2356 | iq_kernels | pf_wmma2 for IQ2_S / IQ4_NL prompt experts in prefill.cpp - not strata-q36's path, not its expert types |
+| #2356 | iq_kernels | n/a for both models here: its kernel is for IQ2_S gate/up / IQ4_NL down; the Flash-Next file's experts are Q2_0 (type 42 in every layer), Qwen3.6's Q4_K / Q5_K |
 | #2355 | iq_kernels | pf_wmma tile attribute for a layer split's second card - prefill.cpp, not strata-q36 |
 | #2327 | q36_engine | qwen35 build fix for CUDA 12.1 (closed) - builds here with CUDA 12.x already |
 | #2321 | native_router | route-resident in verify.cpp (Flash-Next decode) - strata-q36 routes with native_router_topk |
 | #2231 | dequant_bf16, iq_kernels, native_mmvq, native_moe, native_router | HIP gfx1100 decode / prompt kernels: the changes in these shared files sit under the HIP / gfx11 paths (closed) |
 | #2230 | gemm | HIP: prefill GEMM modes per device for mixed gfx cards - the HIP GEMM path |
-| #2222 | native_mmvq | sm_75 launch folding in the Flash-Next decode layer - not strata-q36 |
-| #2221 | native_mmvq | sm_75 Q2_0 matvec - Q2_0 not in Qwen3.6 files |
+| #2222 | native_mmvq | MEASURED on Flash-Next (STRATA_FUSE_WAIT=2 STRATA_QIL=1): 57.7 / 57.4 / 56.2 vs 57.5 / 57.2 / 56.0 / 57.2 / 56.9 / 55.7 - within noise, same tokens; not taken |
+| #2221 | native_mmvq | MEASURED on Flash-Next (STRATA_Q2_WARP=1): 57.3 / 57.0 / 55.8 vs 57.5 / 57.2 / 56.0 tok/s - noise, same tokens; not taken |
 | #2215 | iq_avx2, native_expert | CPU IQ rows - IQ types and the CPU pool, not used here |
 | #2179 | fused_gdn, native_gdn | geometry checks (closed) - no speed change |
 | #2178 | dequant_bf16, gemm, iq_kernels, native_mmvq | sm_61 (P40) tables (closed) - other arch |
 | #2174 | pool | pool UMWAIT (Intel instruction; this host is a Ryzen) |
-| #2091 | gemm | sm_75 hyper-connection xn16 - Flash-Next mHC |
+| #2091 | gemm | MEASURED on Flash-Next (on by default once applied): 57.4 / 57.1 / 55.9 tok/s, prompt 728.8 vs 729.0 - noise, same tokens; not taken |
 | #2089 | native_mmvq | sm_75 GEMV table (closed); Volta's own table (STRATA_SM70_TABLE, PR 1401) measured 93.1 vs 94.3 tok/s |
-| #2081 | dequant_bf16 | sm_75 vector dequant stores: hard-gated to cc 7.5 and no longer applies to main; the dequant it speeds is ~2% of a strata-q36 prompt on the V100 (0.158 s of 7.7 s at 4K) - ceiling under 2% |
-| #2069 | iq_kernels, native_mmvq | sm_75 tables / expert mode 4: mode 4 measured on the V100 via STRATA_EXP_MODE=4 - 99.6 / 84.4 tok/s, noise; mode 8 (Volta's) 99.8 / 84.8, noise |
+| #2081 | dequant_bf16 | not measurable without a port: hard-gated to cc 7.5 and conflicts with main's dequant_bf16.cu; the dequant it speeds is ~2% of a strata-q36 prompt here |
+| #2069 | iq_kernels, native_mmvq | MEASURED on the V100 - its expert mode 4 is the best layout here: Flash-Next 58.1 / 57.8 / 56.6 tok/s (three rounds) vs mode 0 57.4 / 57.1 / 55.9 and mode 8 57.8 / 57.5 / 56.3, same tokens; strata-q36 neutral. TAKEN: mode 4 is the v100 tree's sm_70 default (35c9285). (The PR itself no longer applies to main; mode 4 is in main already.) |
 | #2063 | native_expert, pool | Windows ARM64 build - another platform |
-| #2058 | iq_kernels | tested on v100 (STRATA_EXPDEC=1): 99.1 / 84.4 tok/s - noise, same tokens, not taken |
+| #2058 | iq_kernels | MEASURED on strata-q36 (STRATA_EXPDEC=1): 99.1 / 84.4 tok/s - noise, same tokens; not taken |
 | #1961 | native_mmvq | DFlash2 runtime for the Flash-Next path - not strata-q36 |
-| #1949 | kq_avx1, kq_avx2 | CPU AVX2 dots for the hybrid CPU pool - not used when every Qwen3.6 expert is in VRAM |
-| #1909 | iq_kernels | tested on v100: 99.5 / 84.2 tok/s vs 99.0-99.7 / 84.1-84.7, same tokens - noise, not taken |
-| #1822 | moe_mmq | in-place MMQ for prefill.cpp - strata-q36 calls moe_mmq on resident blobs already |
+| #1949 | kq_avx1, kq_avx2 | MEASURED on Flash-Next (its CPU lane computes the ~1.5% missed experts): 57.4 / 57.1 / 55.9 tok/s - noise, same tokens; not taken |
+| #1909 | iq_kernels | MEASURED on strata-q36: 99.5 / 84.2 tok/s vs 99.0-99.7 / 84.1-84.7 - noise, same tokens; not taken |
+| #1822 | moe_mmq | not measurable without a port: conflicts with main's prompt path in CMakeLists.txt, moe_mmq.hpp, moe_mmq.cu and prefill.cpp (main's prefill was rewritten since); the feature is not in main |
 | #1820 | iq_kernels, native_router, pool | a separate qwen35moe branch (+5,529 lines: VRAM cap, quality mode, chunked GDN) - superseded by strata-q36 in main |
 | #1818 | native_expert | CPU IQ dispatch fix - the CPU pool, unused with every expert in VRAM |
 
@@ -74,7 +74,7 @@ gemm and moe_mmq, dequant_bf16, quantize_act, the CPU expert pool (native_expert
 | #2458 | open | engine: --dump-kv-select, the decode windows' KV block selections as a policy-bench trace (#2415) | engine plumbing (serve, caches, batching, splits, memory) - no strata-q36 code |
 | #2455 | open | serve: an all-cached image turn never wakes the elastic encoder | no engine code (docs, web, benchmark reports, tools, setup, serve front end) |
 | #2450 | open | setup: no KV streaming on one card that holds every expert and the whole KV cache (#2261) | no engine code (docs, web, benchmark reports, tools, setup, serve front end) |
-| #2447 | closed | native_kernels: sm_86 dense Q8_0 GEMVs keep two rows per block (#2441) | sm_86 Q8_0 GEMV rows per block (closed, unmerged) - sm_86 only |
+| #2447 | closed | native_kernels: sm_86 dense Q8_0 GEMVs keep two rows per block (#2441) | its switch (STRATA_NO_MMVQ_ROWS2=1, in main) MEASURED: Flash-Next 57.8 / 57.3 / 56.0 vs 57.5 / 57.2 / 56.0, strata-q36 104.2 / 94.0 vs 104.3 / 94.3 tok/s - noise, same tokens; not taken |
 | #2443 | open | conversation cache: evict redundant holders without losing pinned prefixes | engine plumbing (serve, caches, batching, splits, memory) - no strata-q36 code |
 | #2439 | open | docs: community benchmark — RTX 5080 + 4070 Ti unequal pair, both orders (+ helper cache arm) | no engine code (docs, web, benchmark reports, tools, setup, serve front end) |
 | #2437 | open | SYCL: the IQ4_XS expert dot reads its codebook from registers | no engine code (docs, web, benchmark reports, tools, setup, serve front end) |
@@ -121,9 +121,9 @@ gemm and moe_mmq, dequant_bf16, quantize_act, the CPU expert pool (native_expert
 | #2362 | open | tools: poll the server address the config binds, not loopback (#2330) | no engine code (docs, web, benchmark reports, tools, setup, serve front end) |
 | #2360 | open | telemetry: the Mac's Monitor cards - GPU load and VRAM from IOKit, th… | no engine code (docs, web, benchmark reports, tools, setup, serve front end) |
 | #2359 | open | serve: average the throughput gauges over the window between scrapes (#2341) | no engine code (docs, web, benchmark reports, tools, setup, serve front end) |
-| #2358 | open | fused_gr: STRATA_GR_NORM_FAST=1 on CUDA too (opt-in): decode +0.5-0.6% on a V100 + PG500 layer split | fused_gr (Flash-Next hyper-connection) - not called by strata-q36 |
-| #2357 | open | sm_70: the multi-block greedy pick (argmax_rows) as an opt-in, STRATA_ARGMAX_ROWS_SM70=1: decode +0.7-0.8% on  | argmax_rows on sm_70: strata-q36 already has its own two-stage multi-block argmax (k_argmax) |
-| #2356 | open | pf_wmma: a second Volta prompt-expert kernel for IQ2_S gate/up and IQ4_NL down (STRATA_PF_WMMA2=1, opt-in): pr | pf_wmma2 for IQ2_S / IQ4_NL prompt experts in prefill.cpp - not strata-q36's path, not its expert types |
+| #2358 | open | fused_gr: STRATA_GR_NORM_FAST=1 on CUDA too (opt-in): decode +0.5-0.6% on a V100 + PG500 layer split | MEASURED on Flash-Next: with #2357 +1.3-2% decode, same tokens - TAKEN, on by default on sm_70 (e584be8) |
+| #2357 | open | sm_70: the multi-block greedy pick (argmax_rows) as an opt-in, STRATA_ARGMAX_ROWS_SM70=1: decode +0.7-0.8% on  | MEASURED on Flash-Next: with #2358 +1.3-2% decode, same tokens - TAKEN, on by default on sm_70 (e584be8) |
+| #2356 | open | pf_wmma: a second Volta prompt-expert kernel for IQ2_S gate/up and IQ4_NL down (STRATA_PF_WMMA2=1, opt-in): pr | n/a for both models here: its kernel is for IQ2_S gate/up / IQ4_NL down; the Flash-Next file's experts are Q2_0 (type 42 in every layer), Qwen3.6's Q4_K / Q5_K |
 | #2355 | open | pf_wmma: set the tiles' shared-memory attribute on each card, so the second card of a layer split can launch t | pf_wmma tile attribute for a layer split's second card - prefill.cpp, not strata-q36 |
 | #2352 | open | serve: preserve explicit false against configured reasoning defaults | no engine code (docs, web, benchmark reports, tools, setup, serve front end) |
 | #2351 | open | Suffix-reuse: conversation KV prefix mount, quant-safe splices, state checkpoint ladder | engine plumbing (serve, caches, batching, splits, memory) - no strata-q36 code |
@@ -191,8 +191,8 @@ gemm and moe_mmq, dequant_bf16, quantize_act, the CPU expert pool (native_expert
 | #2226 | open | STRATA_HC_PERSIST=1 (opt-in, HIP): the verifier's hyper-connection read as one persistent kernel (gfx1030: rea | another backend (SYCL / HIP / Metal / Vulkan) |
 | #2224 | open | pcie: the measured PCIe share default (PcieAuto) on gfx1100 too — gate-measured on a native pack | another backend (SYCL / HIP / Metal / Vulkan) |
 | #2223 | open | verify: STRATA_NO_PCIE_GROUP=1 drops the empty PCIe-share stage with --pcie-frac 0 | engine plumbing (serve, caches, batching, splits, memory) - no strata-q36 code |
-| #2222 | open | sm_75: fewer launches per decode layer: plan wait folded, fused quantize + interleave (bitwise) | sm_75 launch folding in the Flash-Next decode layer - not strata-q36 |
-| #2221 | open | sm_75: Q2_0 matvec with one warp per four rows (bitwise) | sm_75 Q2_0 matvec - Q2_0 not in Qwen3.6 files |
+| #2222 | open | sm_75: fewer launches per decode layer: plan wait folded, fused quantize + interleave (bitwise) | MEASURED on Flash-Next (STRATA_FUSE_WAIT=2 STRATA_QIL=1): 57.7 / 57.4 / 56.2 vs 57.5 / 57.2 / 56.0 / 57.2 / 56.9 / 55.7 - within noise, same tokens; not taken |
+| #2221 | open | sm_75: Q2_0 matvec with one warp per four rows (bitwise) | MEASURED on Flash-Next (STRATA_Q2_WARP=1): 57.3 / 57.0 / 55.8 vs 57.5 / 57.2 / 56.0 tok/s - noise, same tokens; not taken |
 | #2220 | open | sm_75: QSA decode attention for INT8 KV off the shared-memory pipe (bitwise) | sm_75 QSA INT8 decode attention - Flash-Next attention, another arch |
 | #2217 | open | Count clean active file cache as reclaimable under a cgroup limit | engine plumbing (serve, caches, batching, splits, memory) - no strata-q36 code |
 | #2216 | open | bench: community report, one Arc A770 16 GB (xe) - main on the card and the A770 pull requests, same-day A/B | no engine code (docs, web, benchmark reports, tools, setup, serve front end) |
@@ -268,13 +268,13 @@ gemm and moe_mmq, dequant_bf16, quantize_act, the CPU expert pool (native_expert
 | #2094 | open | Draft: immutable branching contexts with validated restore and serial benchmarks | engine plumbing (serve, caches, batching, splits, memory) - no strata-q36 code |
 | #2093 | open | sm_75: the prompt path's top-k with one full read of the scores (identical ids) | sm_75 prompt top-k - QSA selection |
 | #2092 | open | sm_75: the v2 int8 prompt attention with register staging instead of cp.async (STRATA_PA_V2T=1) | sm_75 int8 prompt attention register staging - QSA prompt attention |
-| #2091 | open | sm_75: the hyper-connection's xn16 written as the FP16 its tensor-core GEMMs read (bitwise, prompt +3 %) | sm_75 hyper-connection xn16 - Flash-Next mHC |
+| #2091 | open | sm_75: the hyper-connection's xn16 written as the FP16 its tensor-core GEMMs read (bitwise, prompt +3 %) | MEASURED on Flash-Next (on by default once applied): 57.4 / 57.1 / 55.9 tok/s, prompt 728.8 vs 729.0 - noise, same tokens; not taken |
 | #2089 | closed | CUDA sm_75: interleaved 2-4 column GEMV with a Turing rows table (CMP 50HX), opt-in STRATA_SM75_TABLE=1 | sm_75 GEMV table (closed); Volta's own table (STRATA_SM70_TABLE, PR 1401) measured 93.1 vs 94.3 tok/s |
 | #2087 | open | Community benchmark: RTX 3090 / Qwen3.8-Flash-Next-UD-Q4_K_XL / Strata 0.1.43 | no engine code (docs, web, benchmark reports, tools, setup, serve front end) |
 | #2086 | open | Community benchmark: RTX 3090 + RTX 5070 + RTX 5070 Ti layer split (Q2_0) | no engine code (docs, web, benchmark reports, tools, setup, serve front end) |
 | #2083 | open | bench: community report, RTX 5060 Ti 16 GB + RTX 3060 12 GB unequal layer split (PCIe gen5 x8 + gen3 x4), IQ3_ | no engine code (docs, web, benchmark reports, tools, setup, serve front end) |
 | #2082 | open | fix: make conversation parking admission fail safely | engine plumbing (serve, caches, batching, splits, memory) - no strata-q36 code |
-| #2081 | open | dequant: the prompt projections' BF16 dequant with 16-byte stores on sm_75 (bit-exact; STRATA_TC_SM75=0 keeps  | sm_75 vector dequant stores: hard-gated to cc 7.5 and no longer applies to main; the dequant it speeds is ~2% of a strata-q36 prompt on the V100 (0.158 s of 7.7 s at 4K) - ceiling under 2% |
+| #2081 | open | dequant: the prompt projections' BF16 dequant with 16-byte stores on sm_75 (bit-exact; STRATA_TC_SM75=0 keeps  | not measurable without a port: hard-gated to cc 7.5 and conflicts with main's dequant_bf16.cu; the dequant it speeds is ~2% of a strata-q36 prompt here |
 | #2080 | open | qsa_select: the FP32 tiled block scores below sm_80 (PR #1091) on by default; STRATA_SELECT_SIMT=0 keeps the w | qsa_select scoring below sm_80 - QSA (Flash-Next) selection, not in strata-q36 |
 | #2079 | open | Add native Windows support for Intel SYCL GPUs | no engine code (docs, web, benchmark reports, tools, setup, serve front end) |
 | #2078 | open | prefill: refill the lent expert slots from the GGUF mapping's pieces (opt-in STRATA_REFILL_PARTS=1; gfx1151 ta | another backend (SYCL / HIP / Metal / Vulkan) |
@@ -285,13 +285,13 @@ gemm and moe_mmq, dequant_bf16, quantize_act, the CPU expert pool (native_expert
 | #2072 | open | sm_75: the decode QSA selection at long context, a halving scorer and a split top-k (bitwise, decode +6-12 % a | sm_75 long-context QSA selection - Flash-Next |
 | #2071 | open | sm_75: a faster tiled FP32 block scorer (STRATA_SELECT_SIMT=2), and the case for SIMT on RTX 20 by default | sm_75 tiled FP32 block scorer - QSA selection |
 | #2070 | open | sm_75: a hyper-connection up kernel for 3+ tokens and the staged down kernel in token pairs (bitwise) | sm_75 hyper-connection up/down kernels - Flash-Next mHC |
-| #2069 | open | sm_75: Turing tables for the decode matvecs and the grouped experts (bitwise, decode +6 %) | sm_75 tables / expert mode 4: mode 4 measured on the V100 via STRATA_EXP_MODE=4 - 99.6 / 84.4 tok/s, noise; mode 8 (Volta's) 99.8 / 84.8, noise |
+| #2069 | open | sm_75: Turing tables for the decode matvecs and the grouped experts (bitwise, decode +6 %) | MEASURED on the V100 - its expert mode 4 is the best layout here: Flash-Next 58.1 / 57.8 / 56.6 tok/s (three rounds) vs mode 0 57.4 / 57.1 / 55.9 and mode 8 57.8 / 57.5 / 56.3, same tokens; strata-q36 neutral. TAKEN: mode 4 is the v100 tree's sm_70 default (35c9285). (The PR itself no longer applies to main; mode 4 is in main already.) |
 | #2066 | open | bench: dual Quadro RTX 6000 results, upgrade A/B and NUMA comparison | no engine code (docs, web, benchmark reports, tools, setup, serve front end) |
 | #2064 | open | Community benchmarks: RTX PRO 1000 Blackwell 8 GB, Windows, Coder IQ1_M and IQ2_XS, Strata 0.1.43 | no engine code (docs, web, benchmark reports, tools, setup, serve front end) |
 | #2063 | open | Add Windows ARM64 RTX Spark support | Windows ARM64 build - another platform |
 | #2060 | open | Linux AMD: images on the GPU through Vulkan, on a chosen card or the integrated GPU (vision.device) | no engine code (docs, web, benchmark reports, tools, setup, serve front end) |
 | #2059 | open | QSA decode: the window's block scores with the queries in registers and six shuffles per block (STRATA_QSA_ROW | QSA window block scores in registers - Flash-Next selection |
-| #2058 | open | Verify window: the routed experts' gate/up with the group's q8_1 rows in shared memory (STRATA_EXPDEC=1, opt-i | tested on v100 (STRATA_EXPDEC=1): 99.1 / 84.4 tok/s - noise, same tokens, not taken |
+| #2058 | open | Verify window: the routed experts' gate/up with the group's q8_1 rows in shared memory (STRATA_EXPDEC=1, opt-i | MEASURED on strata-q36 (STRATA_EXPDEC=1): 99.1 / 84.4 tok/s - noise, same tokens; not taken |
 | #2057 | open | serve: an opt-in "stream_all_tool_args" sends a tool call's non-string argument in pieces as the model writes  | no engine code (docs, web, benchmark reports, tools, setup, serve front end) |
 | #2056 | closed | hip: gfx103x creates the MTP drafter's side stream again (RX 6800, Windows: 7.9K prompt 584–596 → 798–808 tok/ | another backend (SYCL / HIP / Metal / Vulkan) |
 | #2053 | open | Community benchmark: RTX 5070 Ti 16 GB / 64 GB RAM, v0.1.43 IQ2_XS and IQ3_XXS | no engine code (docs, web, benchmark reports, tools, setup, serve front end) |
@@ -351,7 +351,7 @@ gemm and moe_mmq, dequant_bf16, quantize_act, the CPU expert pool (native_expert
 | #1959 | open | serve: --prompt-cache-spread, checkpoints kept spread back from the conversation's end (opt-in) | engine plumbing (serve, caches, batching, splits, memory) - no strata-q36 code |
 | #1955 | open | Tool calls: a boolean parameter written as True/False is a boolean | no engine code (docs, web, benchmark reports, tools, setup, serve front end) |
 | #1953 | open | serve: the keep-alive while a prompt is read is a real SSE frame, not a comment | no engine code (docs, web, benchmark reports, tools, setup, serve front end) |
-| #1949 | open | cpu(bug): the AVX2 dot kernels keep their accumulators in registers (2.1x router; +20-24% expert rows at 4 tok | CPU AVX2 dots for the hybrid CPU pool - not used when every Qwen3.6 expert is in VRAM |
+| #1949 | open | cpu(bug): the AVX2 dot kernels keep their accumulators in registers (2.1x router; +20-24% expert rows at 4 tok | MEASURED on Flash-Next (its CPU lane computes the ~1.5% missed experts): 57.4 / 57.1 / 55.9 tok/s - noise, same tokens; not taken |
 | #1948 | open | Add files via upload | no engine code (docs, web, benchmark reports, tools, setup, serve front end) |
 | #1947 | open | bench: ROG Flow Z13 Windows HIP, Huihui IQ4_XS 256K tuning and placement | no engine code (docs, web, benchmark reports, tools, setup, serve front end) |
 | #1946 | open | fix(vision): scale GPU warm-up for image caps above 4096 | no engine code (docs, web, benchmark reports, tools, setup, serve front end) |
@@ -372,7 +372,7 @@ gemm and moe_mmq, dequant_bf16, quantize_act, the CPU expert pool (native_expert
 | #1914 | open | bench: community report, RTX 5080 Laptop 16 GB, IQ3_XXS, engine 0.1.42 | no engine code (docs, web, benchmark reports, tools, setup, serve front end) |
 | #1912 | open | --pool-affinity measure: on a hybrid CPU, time the all and p-cores pool layouts at start and take the faster ( | engine plumbing (serve, caches, batching, splits, memory) - no strata-q36 code |
 | #1911 | open | Expert cache: STRATA_VRAM_FREE=device reads the whole card's free VRAM through NVML (opt-in, Windows + NVIDIA) | engine plumbing (serve, caches, batching, splits, memory) - no strata-q36 code |
-| #1909 | open | kernels: process all groups in fused GU and LDS down launches | tested on v100: 99.5 / 84.2 tok/s vs 99.0-99.7 / 84.1-84.7, same tokens - noise, not taken |
+| #1909 | open | kernels: process all groups in fused GU and LDS down launches | MEASURED on strata-q36: 99.5 / 84.2 tok/s vs 99.0-99.7 / 84.1-84.7 - noise, same tokens; not taken |
 | #1905 | closed | arena: pin by need (STRATA_PIN_BY_NEED=1) and a PCIe share floor (STRATA_PCIE_MIN1=1), +5-7 % prompt read on W | engine plumbing (serve, caches, batching, splits, memory) - no strata-q36 code |
 | #1904 | closed | adaptive tier: --adapt-async 1 in the arena mode (one GPU, copy-in only), x1.07-1.11 cold decode on an RTX 309 | engine plumbing (serve, caches, batching, splits, memory) - no strata-q36 code |
 | #1901 | open | test: synchronize the keepawake service fixture | no engine code (docs, web, benchmark reports, tools, setup, serve front end) |
@@ -425,7 +425,7 @@ gemm and moe_mmq, dequant_bf16, quantize_act, the CPU expert pool (native_expert
 | #1825 | open | qsa_select: prompt-path block scores with a thread per query head (below sm_80, same bits) | qsa_select prompt block scores - Flash-Next selection |
 | #1824 | open | cpu: Q2_0 rows on AVX-only CPUs (q2_avx1.cpp) instead of ggml-cpu's scalar dot | CPU Q2_0 rows on AVX-only CPUs - Q2_0 and the CPU pool; this host has AVX-512 and all experts in VRAM |
 | #1823 | open | tokenizer: a long message's ids remembered whole, on top of the piece cache | no engine code (docs, web, benchmark reports, tools, setup, serve front end) |
-| #1822 | open | prefill: gate/up MMQ reads the experts in place (CUDA; patched copy of llama.cpp mmq.cuh) | in-place MMQ for prefill.cpp - strata-q36 calls moe_mmq on resident blobs already |
+| #1822 | open | prefill: gate/up MMQ reads the experts in place (CUDA; patched copy of llama.cpp mmq.cuh) | not measurable without a port: conflicts with main's prompt path in CMakeLists.txt, moe_mmq.hpp, moe_mmq.cu and prefill.cpp (main's prefill was rewritten since); the feature is not in main |
 | #1821 | open | qsa_prompt_attn: int8 K/V prefetched in registers and sharing one buffer (Turing / sm_75) | QSA prompt attention int8 K/V register prefetch on sm_75 - Flash-Next |
 | #1820 | open | qwen35moe follow-ups: VRAM cap + quality mode, MTP for F16 draft tensors, chunked GDN, 256/8 route-resident | a separate qwen35moe branch (+5,529 lines: VRAM cap, quality mode, chunked GDN) - superseded by strata-q36 in main |
 | #1818 | open | fix: make CPU IQ dispatch independent of draft occupancy | CPU IQ dispatch fix - the CPU pool, unused with every expert in VRAM |
