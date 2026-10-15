@@ -21,8 +21,11 @@ Short prompts are unchanged (pp512 / tg256 1,685 / 99-100 tok/s), the prompt spe
 | `STRATA_Q36_NO_MMQ=1` (the native grouped prompt experts) | pp512 / 4K / 16K 1,147 / 1,124 / 849 against MMQ's 1,685 / 1,650 / 1,515 tok/s |
 | #1909 (all groups in the fused GU / LDS down launches) | short 99.5, 16K 84.2 tok/s against 99.0-99.7 / 84.1-84.7 - noise; same tokens |
 | #2058 `STRATA_EXPDEC=1` (grouped gate/up with q8_1 rows in shared memory) | 99.1 / 84.4 tok/s - noise; same tokens |
+| `STRATA_EXP_MODE=8 / 4 / 7` (Volta's mode 8, Turing's 4, the AMD default 7) against 0 | 99.8 / 99.6 / 99.7 against 99.4 tok/s short, 84.8 / 84.4 / 84.6 against 84.4 at 16K - noise, same tokens |
 | #2357 (the multi-block argmax on sm_70) | strata-q36 has its own two-stage multi-block argmax already |
 | #2358 (fused GR norm), #2356 (pf_wmma2 for IQ2_S / IQ4_NL), #1822 (in-place prompt MMQ), #2321 / #1961 (route-resident, DFlash2 runtime) | the Flash-Next path / other expert types - not in strata-q36 |
+
+Every reviewed PR and its verdict: [STRATA_PRS.md](STRATA_PRS.md).
 
 ## Where a V100 still loses
 
