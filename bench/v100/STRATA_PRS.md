@@ -1,7 +1,7 @@
 # Strata PRs reviewed for the V100 tree
 
-Every PR of the 400 most recent in Niko1221/Strata (2026-10-15), classified by the files it changes against what
- calls (iq_kernels' grouped experts, native_mmvq incl. the packed Q8_0 GEMVs, native_router_topk, fused_gdn,
+Every PR of the 400 most recent in Niko1221/Strata (2026-10-15), classified by the files it changes against what `strata-q36`
+calls (iq_kernels' grouped experts, native_mmvq incl. the packed Q8_0 GEMVs, native_router_topk, fused_gdn,
 prefill/gemm and moe_mmq, the CPU expert pool). The ones that could touch it were applied or switched on and measured
 with q36_bench.sh on the V100 (Qwen3.6-35B-A3B UD-Q4_K_M; v100 baseline short 99.0-99.8 / 16K 84.1-84.8 tok/s).
 
