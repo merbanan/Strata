@@ -1433,6 +1433,10 @@ if(STRATA_NATIVE_EXPERTS)
     # STRATA_PREFILL_FP16TC=0 keeps MMQ)
     target_sources(strata_mmq PRIVATE src/prefill/moe_fp16tc.cu)
     target_compile_definitions(strata_mmq PUBLIC STRATA_PREFILL_FP16TC=1)
+    # strata-q36's K-quant prompt experts (Q4_K / Q5_K / Q6_K) on the same register-fragment design (sm_70 at runtime,
+    # STRATA_PREFILL_TCKQ=0 keeps MMQ)
+    target_sources(strata_mmq PRIVATE src/prefill/moe_tc_kq.cu)
+    target_compile_definitions(strata_mmq PUBLIC STRATA_PREFILL_TCKQ=1)
     # q8_0: the drafter's matrices (E-9); STRATA_ORCA_Q4KS_MMQ adds q5_0 (#296, in _strata_mmq_types), and
     # STRATA_MMQ_KQUANTS q4_k q5_k q5_1 q6_k, the experts of Unsloth's UD-Q4/Q5/Q6_K_XL (docs/QUANTS.md; the dispatch
     # follows eddoursul/Strata 7706c1b).  MODEL-UPDATE Phase 1: on CUDA they are a library of their own, strata_kq
