@@ -8,6 +8,7 @@ with `-DSTRATA_EXPERIMENTAL_SM60=ON -DCMAKE_CUDA_ARCHITECTURES=70`. `q36_bench.s
 
 | Change | Before | After |
 |---|---|---|
+| Flash-Next: the sm_70 prompt attention's latency pipeline (jmnargi/Strata-V100 2680b4de, cherry-picked: loads before stores, double-buffered page-table rows) | `--prefill auto`, two cooled rounds: 6K 1,849 / 1,856, 16.5K 1,870 / 1,874 tok/s | 1,889 / 1,889 and 1,908 / 1,904 tok/s (+2%), the same decode tokens |
 | Flash-Next: routed prompt experts on the FP16 tensor cores (jmnargi/Strata-V100's moe_fp16tc.cu, 31ad437c; sm_70 + native Q2_0 + chunks of 2048 or more; `STRATA_PREFILL_FP16TC=0` keeps MMQ) | `--prefill auto`, two cooled rounds: 6K 1,510 / 1,510, 16.5K 1,591 / 1,592 tok/s; gate/up + down 1,577 / 3,862 ms | 1,750 / 1,737 and 1,790 / 1,793 tok/s (+15% / +12.5%), gate/up + down 1,047 / 2,695 ms; decode tokens the same (md5 c7a041f7db35, c4ce9bff1fe8); prefill_fp16tc_test passes |
 | Flash-Next: grouped experts in mode 4 (#2069's Turing layout) by default on sm_70 (35c9285) | modes 0 / 8: 56.8 / 57.2 avg | 57.5 avg (+1.2%), the same tokens |
 | Flash-Next: #2357 + #2358 on by default on sm_70 (e584be8) | decode 56.0-56.2 avg | 56.8-56.9 avg (+1.3-2%), the same tokens |
