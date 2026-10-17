@@ -1,5 +1,6 @@
 """bench/v100/fn_bench.py (run from the repo root; FN_GGUF = shard 1, FN_PACK = tools/iq_pack.py --gguf FN_GGUF --out <dir>). Flash-Next (Qwen3.8-Flash-Next GSQ-RCO Q2_0) on this card through strata --serve: three short greedy answers (decode
-tok/s) and a ~6K-token prompt (prompt tok/s).  FN_PREFILL / FN_RESERVE / FN_CTX / FN_FILL (filler repeats, 400 = ~6K tokens) change the run.  python fnbench.py LABEL [NEW] ; extra engine env from the environment."""
+tok/s) and a ~6K-token prompt (prompt tok/s).  FN_PREFILL / FN_RESERVE / FN_CTX / FN_FILL (filler repeats, 400 = ~6K tokens) change the run;
+FN_KV (int8) / FN_SPEC (2) / FN_MTP (an MTP draft-layer directory: --mtp) / FN_ARGS (more engine flags) the engine setup.  python fnbench.py LABEL [NEW] ; extra engine env from the environment."""
 import os, subprocess, sys
 sys.path.insert(0, "tools")
 import strata_tokenizer as T
@@ -16,8 +17,9 @@ def chat(q): return "<|im_start|>user\n" + q + "<|im_end|>\n<|im_start|>assistan
 env = dict(os.environ)
 err = "/tmp/fnbench-%s.err" % label
 p = subprocess.Popen(["build/strata", "--serve", "--pack", P, "--native", G, "--ple-gguf", G.replace("00001-of", "00002-of"), "--expert-profile",
-                      "data/expert-profile.bin", "--expert-cache", "auto", "--max-context", os.environ.get("FN_CTX", "8192"), "--kv", "int8", "--spec", "2", "--prefill", os.environ.get("FN_PREFILL", "auto"),
-                      "--vram-reserve-mib", os.environ.get("FN_RESERVE", "2048")],
+                      "data/expert-profile.bin", "--expert-cache", "auto", "--max-context", os.environ.get("FN_CTX", "8192"), "--kv", os.environ.get("FN_KV", "int8"), "--spec", os.environ.get("FN_SPEC", "2"), "--prefill", os.environ.get("FN_PREFILL", "auto"),
+                      "--vram-reserve-mib", os.environ.get("FN_RESERVE", "2048")]
+                     + (["--mtp", os.environ["FN_MTP"]] if os.environ.get("FN_MTP") else []) + os.environ.get("FN_ARGS", "").split(),
                      stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=open(err, "w"), text=True, env=env)
 for line in p.stdout:
     if line.startswith(("READY", "ERR")):
