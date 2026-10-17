@@ -167,6 +167,17 @@ inline int64_t stream_all_min() {
     if (env >= 0) return env;
     return g_stream_min_share > 0 ? g_stream_min_share : (int64_t) 1024;
 }
+// A chunk below stream_all_min() on a native pack: its resident experts with at most this many rows skip MMQ (whose
+// per-expert gather into GGUF blocks and 16-expert tiles dominate a short chunk: 187 tokens = 0.2 s of 0.52) and run
+// as one launch of the decode path's grouped kernel (native_expert_grouped) straight from their cache slots.
+// V100, Flash-Next Q2_0, two rounds, 0 / 8 / 16 rows: 80 tokens 339 -> 254-275 -> 241-255 ms, 232 tokens 525-540 -> 405-414
+// -> 373-394, 783 tokens 1,056-1,076 -> 863-899 -> 833-870; 1.9K and 6K (streamed chunks) and decode unchanged.  The
+// decode kernel rounds differently from MMQ, so an answer can differ slightly (as with the CPU share).
+// STRATA_PREFILL_SMALL_ROWS=<n> (default 16; 0: off).
+inline int small_grouped_rows() {
+    static const int n = [] { const char* v = std::getenv("STRATA_PREFILL_SMALL_ROWS"); return v ? std::max(0, std::atoi(v)) : 16; }();
+    return n;
+}
 // STRATA_PREFILL_CPU_SHARE (opt-in; set_cpu_pool): a chunk below stream_all_min() hands the decode CPU pool - idle
 // while a prompt is read - the non-resident experts few of its tokens route to, instead of streaming them over PCIe.
 // `auto`: the share measured, each layer's CPU time per expert and the GPU's per streamed expert (CUDA events around
@@ -811,6 +822,13 @@ struct Prefill::Impl {
     // pool's per-token activations and jobs.
     float *cpu_x = nullptr, *cpu_rows = nullptr, *cpu_ones = nullptr;
     size_t cpu_x_n = 0, cpu_rows_n = 0, cpu_ones_n = 0;
+    // small_grouped(): a short chunk's resident experts with few rows on the decode grouped kernel - the chunk's q8_1
+    // token rows, the kernel's scratch and its tables (grp_ptr | grp_start | n_groups | ent_dst | ent_tok), device
+    uint8_t* sg_xq = nullptr;
+    void* sg_scr = nullptr;
+    int32_t* sg_tab = nullptr;
+    size_t sg_xq_n = 0, sg_scr_n = 0, sg_tab_n = 0;
+    std::vector<int32_t> sg_host;
     bool cpu_dead = false;   // a pinned buffer of the share could not be had (host memory is short): the GPU does it all
     std::vector<uint8_t> cpu_nact;
     std::vector<kernels::cpu::ActQ> cpu_actq;   // a Q2_0 layer's activations (the pool's Q2_0 kernels read ActQ)
@@ -3363,6 +3381,28 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                                 m.cache != nullptr, m.host_res ? m.host_res + (size_t) l * m.g->n_expert : nullptr,
                                 m.g->n_expert, stream_all, !stream_all || seq_start[(size_t) l] == seq_start[(size_t) l + 1]))
                             detail::mmq_resident_sort_rows(ids_h, T * K, (int32_t) K, m.cnt, m.off, order, slot_h, src_h);
+                        // small_grouped_rows(): the resident experts with few rows to the end of `order`, their rows after
+                        // the MMQ experts' (the CPU's block stays last, where it was); MMQ runs order[0, n_mmq)
+                        size_t n_mmq = order.size();
+                        if (small_grouped_rows() > 0 && use_mmq && lay.native && !stream_all && on_peer.empty() &&
+                            m.host_res && m.cache && !lay.fmt[(size_t) l].tail_off) {
+                            const int32_t* res = m.host_res + (size_t) l * m.g->n_expert;
+                            auto small = [&](int32_t e) { return res[e] >= 0 && m.cnt[(size_t) e] <= small_grouped_rows(); };
+                            std::stable_partition(order.begin(), order.end(), [&](int32_t e) { return !small(e); });
+                            n_mmq = 0;
+                            while (n_mmq < order.size() && !small(order[n_mmq])) ++n_mmq;
+                            if (n_mmq < order.size()) {
+                                int32_t cursor = 0;
+                                for (int32_t e : order) { m.off[(size_t) e] = cursor; cursor += m.cnt[(size_t) e]; }
+                                std::vector<int32_t> fill2(m.off.begin(), m.off.end() - 1);
+                                for (int64_t i = 0; i < T * K; ++i) {
+                                    const int32_t e = ids_h[(size_t) i];
+                                    const int32_t p = fill2[(size_t) e]++;
+                                    slot_h[(size_t) i] = p;
+                                    src_h[(size_t) p] = (int32_t) (i / K);
+                                }
+                            }
+                        }
                         if (grp_mapped) {
                             copy_i32(m.slot_dev, m.grp_dev + m.grp_tk, T * K, m.cs);
                             copy_i32(m.src_dev, m.grp_dev + 2 * m.grp_tk, T * K, m.cs);
@@ -3472,10 +3512,10 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                             mmq::quantize(m.mixed, m.src_dev, m.Xq, mmq_gt, N, N, T * K, m.cs, m.Xscale);
                             // each group's rows: absolute bounds (gate/up reads the layer's rows), relative ones (down
                             // reads the group's own quantized H)
-                            const size_t n = order.size(), ng = (n + MMQ_GROUP - 1) / MMQ_GROUP;
+                            const size_t n = n_mmq, ng = (n + MMQ_GROUP - 1) / MMQ_GROUP;
                             m.bounds_host.resize(n + 1 + ng * (MMQ_GROUP + 1));
                             for (size_t j = 0; j < n; ++j) m.bounds_host[j] = m.off[(size_t) order[j]];
-                            m.bounds_host[n] = (int32_t) rows_local;
+                            m.bounds_host[n] = n < order.size() ? m.off[(size_t) order[n]] : (int32_t) rows_local;
                             for (size_t g = 0; g < ng; ++g)
                                 for (size_t i = 0; i <= MMQ_GROUP; ++i)
                                     m.bounds_host[n + 1 + g * (MMQ_GROUP + 1) + i] =
@@ -3880,6 +3920,68 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                             gg_nslots = 0;
                             gg.first = gg.n;
                         };
+                        // small_grouped_rows(): order[n0, end) - resident experts of few rows each - in one launch of the
+                        // decode grouped kernel, from their cache slots, on the chunk's per-token q8_1 rows; each entry
+                        // writes its own row of Dm (unweighted, as MMQ's)
+                        auto small_grouped = [&](const std::vector<int32_t>& ord, size_t n0) -> bool {
+                            const auto& f = lay.fmt[(size_t) l];
+                            const int64_t ng = (int64_t) (ord.size() - n0);
+                            int64_t ne = 0;
+                            for (size_t j = n0; j < ord.size(); ++j) ne += m.cnt[(size_t) ord[j]];
+                            const size_t xq_b = (size_t) T * (N / 32) * 36;
+                            const size_t scr_b = kernels::native_expert_scratch_bytes(ne, f.n_ff);
+                            const size_t tab_n = (size_t) ng * 2 + (size_t) (ng + 1) + 1 + 2 * (size_t) ne + 2;
+                            auto grow = [](void** p, size_t& have, size_t want) {
+                                if (have >= want) return true;
+                                if (*p) cudaFree(*p);
+                                *p = nullptr;
+                                have = 0;
+                                if (cudaMalloc(p, want + want / 2) != cudaSuccess) { (void) cudaGetLastError(); return false; }
+                                have = want + want / 2;
+                                return true;
+                            };
+                            if (!grow((void**) &m.sg_xq, m.sg_xq_n, xq_b) || !grow(&m.sg_scr, m.sg_scr_n, scr_b) ||
+                                !grow((void**) &m.sg_tab, m.sg_tab_n, tab_n * 4)) {
+                                err = "prefill: the small experts' buffers did not allocate (STRATA_PREFILL_SMALL_ROWS=0)";
+                                return false;
+                            }
+                            // the table: grp_ptr (ng x u64, 8-aligned at the start) | grp_start | n_groups | ent_dst | ent_tok
+                            m.sg_host.assign(tab_n, 0);
+                            unsigned long long* hp = (unsigned long long*) m.sg_host.data();
+                            int32_t* hs = m.sg_host.data() + 2 * ng;
+                            int32_t* hn = hs + ng + 1;
+                            int32_t* hd = hn + 1;
+                            int32_t* ht = hd + ne;
+                            int64_t q = 0;
+                            for (size_t j = n0; j < ord.size(); ++j) {
+                                const int32_t e = ord[j];
+                                const int64_t gi = (int64_t) (j - n0);
+                                hp[gi] = (unsigned long long) (uintptr_t) m.cache->device_slot(m.host_res[(size_t) l * m.g->n_expert + e]);
+                                hs[gi] = (int32_t) q;
+                                for (int32_t r = 0; r < m.cnt[(size_t) e]; ++r, ++q) {
+                                    const int32_t p = m.off[(size_t) e] + r;
+                                    hd[q] = p;
+                                    ht[q] = src_h[(size_t) p];
+                                }
+                            }
+                            hs[ng] = (int32_t) q;
+                            hn[0] = (int32_t) ng;
+                            // (pageable: the copy has the table before cudaMemcpyAsync returns, so the next layer may rewrite it)
+                            if (cudaMemcpyAsync(m.sg_tab, m.sg_host.data(), tab_n * 4, cudaMemcpyHostToDevice, m.cs) != cudaSuccess) {
+                                err = "prefill: the small experts' table upload failed";
+                                return false;
+                            }
+                            pt.mark(kPfGemmGU, cs);
+                            kernels::quantize_q8_1_rows(m.mixed, T, N, m.sg_xq, m.cs);
+                            const unsigned long long* dp = (const unsigned long long*) m.sg_tab;
+                            const int32_t* ds = m.sg_tab + 2 * ng;
+                            const int32_t* dn = ds + ng + 1;
+                            const int32_t* dd = dn + 1;
+                            const int32_t* dt = dd + ne;
+                            const kernels::NativeExpertLayout L = kernels::native_expert_layout(f.gu_type, f.d_type, f.n_embd, f.n_ff);
+                            kernels::native_expert_grouped(L, dp, ds, dn, dd, dt, ng, ne, m.sg_xq, m.sg_scr, m.Dm, m.cs);
+                            return true;
+                        };
                         // one expert's products from its blob on the device; `slot` (a ring slot, or -1 for a resident
                         // expert) is released once the blob is read
                         auto compute = [&](size_t j, const uint8_t* blob_dev, int slot) -> bool {
@@ -3889,7 +3991,7 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                                 // gather the expert into its group slot (GGUF blocks, unchanged or converted)
                                 const size_t q = j % MMQ_GROUP;
                                 // the group's last expert also zeroes the MMQ tail after its slot (see MMQ_TAIL)
-                                const bool last_of_group = q + 1 == MMQ_GROUP || j + 1 == order.size();
+                                const bool last_of_group = q + 1 == MMQ_GROUP || j + 1 == n_mmq;
                                 if (group_gather) {
                                     gg.blob[q] = blob_dev;
                                     gg.n = (int) q + 1;
@@ -3912,9 +4014,9 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                                     }
                                 }
                                 if (slot >= 0 && !group_gather) { cudaEventRecord(m.used[slot], m.cs); m.used_of[slot] = slot; }
-                                if (q + 1 < MMQ_GROUP && j + 1 < order.size()) return true;
+                                if (q + 1 < MMQ_GROUP && j + 1 < n_mmq) return true;
                                 // the group's products: gate/up, swiglu, the group's H to q8_1, down
-                                const size_t j0 = j - q, g = j0 / MMQ_GROUP, n = order.size();
+                                const size_t j0 = j - q, g = j0 / MMQ_GROUP, n = n_mmq;
                                 const int ngx = (int) (q + 1);
                                 const int64_t r0 = m.bounds_host[j0], nr = m.bounds_host[j + 1] - r0;
                                 int64_t maxr = 0;
@@ -4001,6 +4103,7 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                                     ++staged;
                                 }
                                 const int32_t e = order[j];
+                                if (j >= n_mmq) { ++stats_.experts_resident; continue; }   // small_grouped_rows(): below
                                 if (stage_of[j] < 0) {
                                     ++stats_.experts_resident;
                                     if (!compute(j, m.cache->device_slot(m.host_res[(size_t) l * m.g->n_expert + e]), -1)) return false;
@@ -4011,6 +4114,7 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                                     --pending;   // compute recorded the slot's release event before any reuse
                                 }
                             }
+                            if (n_mmq < order.size() && !small_grouped(order, n_mmq)) return false;
                         } else {
                             // the streamed walk: this layer's entries [k, kend) in id order; an entry the routing did not
                             // pick only gives its slot back
