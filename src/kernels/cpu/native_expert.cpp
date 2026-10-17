@@ -107,8 +107,8 @@ bool q8k_avx1(int type) {
     static const bool on = !cpu_avx2_ok() && cpu_avx1_ok() && std::getenv("STRATA_NO_Q8K_AVX1") == nullptr;
     return on && type == (int) GGML_TYPE_Q8_K;
 }
-// One token on an AVX-2 CPU without AVX-512 runs ggml-cpu's vec_dot below (the #152 rule).  For IQ3_XXS, IQ3_S and
-// IQ2_S gate/up rows, iq256_gu_single_exact computes that dot's bits with the AVX-2 rows' decode (iq_single_parity:
+// One token on an AVX-2 CPU without AVX-512 runs ggml-cpu's vec_dot below (the #152 rule).  For IQ2_XXS, IQ2_XS,
+// IQ3_XXS, IQ3_S and IQ2_S gate/up rows, iq256_gu_single_exact computes that dot's bits with the AVX-2 rows' decode (iq_single_parity:
 // every row, bit for bit), so the output does not change, only the time.  Only where ggml-cpu itself was built for
 // AVX2 and not AVX-512 (ggml_cpu_has_*: a STRATA_ISA_FLOOR build's ggml-cpu runs its AVX1/SSE dots, which round
 // differently) and the CPU has no AVX-512.  Measured on a Ryzen 7 3800X (Zen 2) only;
@@ -206,7 +206,12 @@ void native_gu_rows(const NativeFmt& f, const uint8_t* blob, const void* const* 
         return;
     }
     // ggml's own bits for a lone token, faster (single_exact above); STRATA_NO_IQ256 keeps ggml's dot as before
-    if (nt == 1 && avx2 && single_exact() && (f.gu_type == 18 || f.gu_type == 21 || f.gu_type == 22)) {
+    // only where it is the faster of the two (iq_single_bench, Ryzen 9 3900X, one thread, 640 gate/up rows: IQ3_XXS
+    // 348 vs ggml 373 us, IQ3_S 455 vs 545; IQ2_XXS 255 vs 251, IQ2_XS 369 vs 290, IQ2_S 329 vs 273 - ggml's IQ2 sign
+    // decode is vector shuffles, Fmt32's table lookups); STRATA_CPU_SINGLE_EXACT_IQ2=1 takes it for the IQ2 types too
+    static const bool iq2 = [] { const char* e = std::getenv("STRATA_CPU_SINGLE_EXACT_IQ2"); return e != nullptr && std::atoi(e) != 0; }();
+    if (nt == 1 && avx2 && single_exact() &&
+        (f.gu_type == 18 || f.gu_type == 21 || (iq2 && (f.gu_type == 16 || f.gu_type == 17 || f.gu_type == 22)))) {
         iq256_gu_single_exact(f.gu_type, blob, f.gu_row, f.up_off, (int) f.n_embd, act[0], ff[0], r0, r1);
         return;
     }

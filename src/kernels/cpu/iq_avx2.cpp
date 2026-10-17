@@ -324,7 +324,7 @@ bool vnni_on() { return STRATA_AVXVNNI && cpu_avxvnni_ok(); }
 
 // ---- one token's gate/up rows in ggml's own float order (iq256_gu_single_exact).
 // The rows above fold the format's constant into the block scale and reduce with hadd.  ggml's AVX2 single-token
-// dots (ggml-cpu/arch/x86/quants.c: ggml_vec_dot_iq3_xxs_q8_K, _iq3_s_q8_K, _iq2_s_q8_K) multiply by the constant
+// dots (ggml-cpu/arch/x86/quants.c: ggml_vec_dot_iq2_xxs_q8_K, _iq2_xs_q8_K, _iq3_xxs_q8_K, _iq3_s_q8_K, _iq2_s_q8_K) multiply by the constant
 // after the reduction and reduce with hsum_float_8.  These kernels keep ggml's order - the same integer sum per lane,
 // the same fmadd per block, the same horizontal tree - so a lone token gets ggml's bits (iq_single_parity checks every
 // row).  The grid and sign decode is the rows' (Fmt32), which is what is faster.
@@ -515,6 +515,8 @@ void iq256_gu_single_exact(int type, const uint8_t* blob, size_t gu_row, size_t 
                            float* ff, int r0, int r1) {
     const block_q8_K* y = static_cast<const block_q8_K*>(act);
     switch (type) {
+        case 16: gu_single<16>(blob, gu_row, up_off, n, y, ff, r0, r1); break;
+        case 17: gu_single<17>(blob, gu_row, up_off, n, y, ff, r0, r1); break;
         case 18: gu_single<18>(blob, gu_row, up_off, n, y, ff, r0, r1); break;
         case 21: gu_single<21>(blob, gu_row, up_off, n, y, ff, r0, r1); break;
         case 22: gu_single<22>(blob, gu_row, up_off, n, y, ff, r0, r1); break;
