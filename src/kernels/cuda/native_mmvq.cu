@@ -443,6 +443,46 @@ __global__ void native_q3_k_mmvq_kernel(const Q3KBlock* __restrict__ w,
     }
 }
 
+// Q3_K, one column, STRATA_Q3K_WR=1: a warp owns RPW rows, its two half-warps alternate the row's 256-value blocks (16
+// lanes a block, as q3_q8_dot), so a 2560-wide row (10 blocks) keeps every lane busy over 5 steps with RPW rows' loads
+// in flight - instead of one 128-thread block a row whose second pass runs 2 of 8 block slots.  The sums are added in
+// another order than native_q3_k_mmvq_kernel's (not bitwise).
+template <int RPW>
+__launch_bounds__(WARPS * WARP)
+__global__ void native_q3_k_mmvq_wr_kernel(const Q3KBlock* __restrict__ w, const Q81Block* __restrict__ x,
+                                           float* __restrict__ y, int n_in, int n_out) {
+    const int lane = int(threadIdx.x), half = lane >> 4, kqs = lane & 15;
+    const int row0 = (int(blockIdx.x) * WARPS + int(threadIdx.y)) * RPW;
+    if (row0 >= n_out) return;
+    const int bpr = n_in / 256;
+    float tmp[RPW] = {};
+#pragma unroll 2
+    for (int kbx = half; kbx < bpr; kbx += 2) {
+#pragma unroll
+        for (int i = 0; i < RPW; ++i)
+            if (row0 + i < n_out) tmp[i] += q3_q8_dot(w + std::size_t(row0 + i) * bpr + kbx, x + kbx * 8, kqs);
+    }
+#pragma unroll
+    for (int i = 0; i < RPW; ++i) {
+        const float s = warp_sum(tmp[i]);
+        if (lane == 0 && row0 + i < n_out) y[row0 + i] = s;
+    }
+}
+
+// V100 (native_mmvq bench, one column): 1 row a warp 2560x10240 41.8 -> 34.0 us, 2560x6144 27.0 -> 22.3; 2 rows 37.8 /
+// 24.4, 4 rows 58.5 / 41.1 (the unpack's integer work, not the loads, bounds it); 6144x2560 22.5 -> 24.1 and the small
+// shared-expert / hc shapes slower.  End to end (Flash-Next Q2_0 decode, those shapes only, two cooled rounds): 58.4 /
+// 58.1 / 56.9 -> 58.9 / 59.6 / 55.3 tok/s - even, the tokens differ - so opt-in: STRATA_Q3K_WR=auto (rows of <= 12
+// blocks with >= 4096 outputs, 1 row a warp) or 1 / 2 / 4 rows a warp everywhere.
+int q3k_wr_rows(int n_in, int n_out) {
+    static const int env = [] {
+        const char* v = std::getenv("STRATA_Q3K_WR");
+        return v == nullptr ? 0 : std::strcmp(v, "auto") == 0 ? -1 : std::atoi(v);
+    }();
+    if (env >= 0) return env;
+    return n_in / 256 <= 12 && n_out >= 4096 ? 1 : 0;
+}
+
 // The pinned nonlinear IQ4 codebook and its CUDA two-stage byte lookup. The
 // explicit alignment satisfies the four 32-bit table loads; values are unchanged.
 __device__ __align__(4) int8_t iq4nl_values[16] = {
@@ -2285,7 +2325,12 @@ void native_q3_k_mmvq(const void* weights, const void* x_q8_1, float* y,
     const auto* x = static_cast<const Q81Block*>(x_q8_1);
     const auto s = static_cast<cudaStream_t>(stream);
     const dim3 threads(WARP, WARPS);
-    if (n_in / 256 < WARPS * WARP / 16) {
+    if (const int rpw = q3k_wr_rows(n_in, n_out); rpw == 1 || rpw == 2 || rpw == 4) {
+        const unsigned blocks = unsigned((std::size_t(n_out) + WARPS * rpw - 1) / (WARPS * rpw));
+        if (rpw == 1) native_q3_k_mmvq_wr_kernel<1><<<blocks, threads, 0, s>>>(w, x, y, n_in, n_out);
+        else if (rpw == 2) native_q3_k_mmvq_wr_kernel<2><<<blocks, threads, 0, s>>>(w, x, y, n_in, n_out);
+        else native_q3_k_mmvq_wr_kernel<4><<<blocks, threads, 0, s>>>(w, x, y, n_in, n_out);
+    } else if (n_in / 256 < WARPS * WARP / 16) {
         const unsigned blocks = unsigned((std::size_t(n_out) + WARPS - 1) / WARPS);
         native_q3_k_mmvq_kernel<true><<<blocks, threads, 0, s>>>(w, x, y, n_in, n_out);
     } else {
