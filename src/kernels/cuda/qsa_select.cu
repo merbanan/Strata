@@ -1295,6 +1295,209 @@ bool qsa_block_topk_cluster(const float* scores, const int32_t* steps, int64_t n
 #endif
 }
 
+#if !defined(__HIPCC__)
+// ---- STRATA_QSA_TOPK_MULTI=1: a decode query's top-k on MT_G CTAs instead of one (pre-sm_90 cards have no clusters).
+// The selection's threshold is the one key value thr with weight(key > thr) < width <= weight(key >= thr) - whatever the
+// digit width - so two 16-bit radix passes (global histograms by atomics, one find CTA each) give block_topk_reg_kernel's
+// threshold and `above`; then each CTA counts its range's > / == weights and emits its cells after the earlier CTAs'
+// (ties to the lowest index, cells ascending): identical ids.
+// V100 (bench/micro/qsa_sel_bench.cu, one query in a graph): 3K / 30K / 60K / 120K cells 44.3 / 49.2 / 56.1 / 106.0 ->
+// 22.1 / 23.8 / 26.0 / 31.0 us; below 2,051 cells (the identity) 1.8 -> 10.6.  Flash-Next decode after a prompt, two
+// cooled rounds, tokens identical: 6K even, 60K 56.3 -> 57.0 tok/s, 120K 52.5 -> 54.9 (+4.6 %); short chats 58.0 ->
+// 57.3 (the fixed launches) - so opt-in, for long-context sessions.
+constexpr int MT_G = 64, MT_T = 256, MT_MAXQ = 8, MT_H = 65536 + 256;   // a pass's fine bins, then 256 coarse ones
+struct MtBuf {
+    int* hist = nullptr;        // [MT_MAXQ][2][MT_H]
+    uint32_t* state = nullptr;  // [MT_MAXQ][4]: hi digit, above after pass 0, threshold, above
+    int* cnt = nullptr;         // [MT_MAXQ][MT_G][2]
+};
+__device__ __forceinline__ void mt_range(int64_t nb, int g, int64_t& c0, int64_t& c1) {
+    const int64_t per = (nb + MT_G - 1) / MT_G;
+    c0 = (int64_t) g * per;
+    c1 = c0 + per < nb ? c0 + per : nb;
+}
+template <int PASS>
+__global__ void __launch_bounds__(MT_T) mt_hist_kernel(const float* __restrict__ scores, const int32_t* __restrict__ steps,
+                                                       int64_t max_blocks, MtBuf buf) {
+    const int q = blockIdx.y;
+    const int32_t* st = steps + (int64_t) q * kStepCount;
+    const int64_t n_kv = st[kStepNKv], n_bid = st[kStepNBid], width = st[kStepWidth];
+    if (n_kv <= width) return;
+    int64_t c0, c1;
+    mt_range(n_bid + 1, blockIdx.x, c0, c1);
+    __shared__ int coarse[256];
+    coarse[threadIdx.x] = 0;
+    __syncthreads();
+    const float* sc = scores + (int64_t) q * max_blocks;
+    int* h = buf.hist + ((int64_t) q * 2 + PASS) * MT_H;
+    const uint32_t hi = PASS ? buf.state[q * 4 + 0] : 0u;
+    for (int64_t b = c0 + threadIdx.x; b < c1; b += MT_T) {
+        const int w = b < n_bid ? R : (int) (n_kv - n_bid * R);
+        if (w == 0) continue;
+        const uint32_t k = order_key(sc[b]);
+        if (PASS == 1 && (k >> 16) != hi) continue;
+        const uint32_t d = PASS ? (k & 0xffffu) : (k >> 16);
+        atomicAdd(&h[d], w);
+        atomicAdd(&coarse[d >> 8], w);
+    }
+    __syncthreads();
+    if (coarse[threadIdx.x] != 0) atomicAdd(&h[65536 + threadIdx.x], coarse[threadIdx.x]);
+}
+// an exclusive scan over MT_T threads (thread order)
+__device__ __forceinline__ int mt_scan(int v, int* s_scan) {
+    const int t = threadIdx.x;
+    s_scan[t] = v;
+    __syncthreads();
+    for (int o = 1; o < MT_T; o <<= 1) {
+        const int y = t >= o ? s_scan[t - o] : 0;
+        __syncthreads();
+        s_scan[t] += y;
+        __syncthreads();
+    }
+    const int r = s_scan[t] - v;
+    __syncthreads();
+    return r;
+}
+// the digit d (scanned from the top) with above + weight(> d) < width <= above + weight(>= d): the coarse bucket first
+// (256 bins of 256), then the fine bin inside it - two coalesced 256-wide scans
+template <int PASS>
+__global__ void __launch_bounds__(MT_T) mt_find_kernel(const int32_t* __restrict__ steps, MtBuf buf) {
+    __shared__ int s_scan[MT_T];
+    __shared__ int s_c, s_cum;
+    const int q = blockIdx.x, t = threadIdx.x;
+    const int32_t* st = steps + (int64_t) q * kStepCount;
+    const int64_t n_kv = st[kStepNKv], width = st[kStepWidth];
+    if (n_kv <= width) return;
+    const int* h = buf.hist + ((int64_t) q * 2 + PASS) * MT_H;
+    const int base = PASS ? (int) buf.state[q * 4 + 1] : 0;
+    const int c = 255 - t, vc = h[65536 + c];
+    const int cum_c = base + mt_scan(vc, s_scan);
+    if (cum_c < width && cum_c + vc >= width) { s_c = c; s_cum = cum_c; }
+    __syncthreads();
+    const int d = s_c * 256 + 255 - t, vd = h[d];
+    const int cum = s_cum + mt_scan(vd, s_scan);
+    if (cum < width && cum + vd >= width) {
+        if (PASS == 0) { buf.state[q * 4 + 0] = (uint32_t) d; buf.state[q * 4 + 1] = (uint32_t) cum; }
+        else { buf.state[q * 4 + 2] = (buf.state[q * 4 + 0] << 16) | (uint32_t) d; buf.state[q * 4 + 3] = (uint32_t) cum; }
+    }
+}
+__global__ void __launch_bounds__(MT_T) mt_count_kernel(const float* __restrict__ scores, const int32_t* __restrict__ steps,
+                                                        int64_t max_blocks, MtBuf buf) {
+    __shared__ int s_gt[MT_T / 32], s_eq[MT_T / 32];
+    const int q = blockIdx.y;
+    const int32_t* st = steps + (int64_t) q * kStepCount;
+    const int64_t n_kv = st[kStepNKv], n_bid = st[kStepNBid], width = st[kStepWidth];
+    if (n_kv <= width) return;
+    int64_t c0, c1;
+    mt_range(n_bid + 1, blockIdx.x, c0, c1);
+    const float* sc = scores + (int64_t) q * max_blocks;
+    const uint32_t thr = buf.state[q * 4 + 2];
+    int gt = 0, eq = 0;
+    for (int64_t b = c0 + threadIdx.x; b < c1; b += MT_T) {
+        const int w = b < n_bid ? R : (int) (n_kv - n_bid * R);
+        const uint32_t k = order_key(sc[b]);
+        if (k > thr) gt += w;
+        else if (k == thr) eq += w;
+    }
+    for (int o = 16; o > 0; o >>= 1) {
+        gt += __shfl_xor_sync(0xffffffffu, gt, o);
+        eq += __shfl_xor_sync(0xffffffffu, eq, o);
+    }
+    if ((threadIdx.x & 31) == 0) { s_gt[threadIdx.x >> 5] = gt; s_eq[threadIdx.x >> 5] = eq; }
+    __syncthreads();
+    if (threadIdx.x == 0) {
+        int a = 0, e = 0;
+        for (int w = 0; w < MT_T / 32; ++w) { a += s_gt[w]; e += s_eq[w]; }
+        buf.cnt[((int64_t) q * MT_G + blockIdx.x) * 2] = a;
+        buf.cnt[((int64_t) q * MT_G + blockIdx.x) * 2 + 1] = e;
+    }
+}
+// emit: this CTA's cells after the earlier CTAs'; inside it, thread t's contiguous run after threads < t (scans)
+__global__ void __launch_bounds__(MT_T) mt_emit_kernel(const float* __restrict__ scores, const int32_t* __restrict__ steps,
+                                                       int64_t max_blocks, int64_t cap, int32_t* __restrict__ ids,
+                                                       MtBuf buf) {
+    __shared__ int s_scan[MT_T];
+    const int q = blockIdx.y, t = threadIdx.x, g = blockIdx.x;
+    const int32_t* st = steps + (int64_t) q * kStepCount;
+    const int64_t n_kv = st[kStepNKv], n_bid = st[kStepNBid], width = st[kStepWidth];
+    int32_t* out = ids + (int64_t) q * cap;
+    if (n_kv <= width) {   // the identity (block_topk_reg_kernel's first case)
+        for (int64_t j = (int64_t) g * MT_T + t; j < n_kv; j += (int64_t) MT_G * MT_T) out[j] = (int32_t) j;
+        return;
+    }
+    const uint32_t thr = buf.state[q * 4 + 2];
+    const int64_t eq_budget = width - (int64_t) buf.state[q * 4 + 3];
+    int64_t gt_before = 0, eq_before = 0;
+    for (int i = 0; i < g; ++i) {
+        gt_before += buf.cnt[((int64_t) q * MT_G + i) * 2];
+        eq_before += buf.cnt[((int64_t) q * MT_G + i) * 2 + 1];
+    }
+    int64_t c0, c1;
+    mt_range(n_bid + 1, g, c0, c1);
+    // thread t: blocks [r0, r1) of the CTA's range, contiguous
+    const int64_t per = (c1 - c0 + MT_T - 1) / MT_T;
+    const int64_t r0 = c0 + (int64_t) t * per < c1 ? c0 + (int64_t) t * per : c1, r1 = r0 + per < c1 ? r0 + per : c1;
+    const float* sc = scores + (int64_t) q * max_blocks;
+    auto weight = [&](int64_t b) -> int { return b < n_bid ? R : (int) (n_kv - n_bid * R); };
+    int gt = 0, eq = 0;
+    for (int64_t b = r0; b < r1; ++b) {
+        const uint32_t k = order_key(sc[b]);
+        if (k > thr) gt += weight(b);
+        else if (k == thr) eq += weight(b);
+    }
+    // exclusive scans over the threads: eq, then the selected count
+    auto scan = [&](int v) -> int { return mt_scan(v, s_scan); };
+    const int64_t eq_t_before = eq_before + scan(eq);
+    int64_t my_eq = eq_budget - eq_t_before;
+    if (my_eq < 0) my_eq = 0;
+    if (my_eq > eq) my_eq = eq;
+    const int64_t eq_used_before = eq_before < eq_budget ? eq_before : eq_budget;   // what the earlier CTAs emitted of ties
+    int64_t wpos = gt_before + eq_used_before + scan(gt + (int) my_eq);
+    int64_t eq_left = my_eq;
+    for (int64_t b = r0; b < r1; ++b) {
+        const uint32_t k = order_key(sc[b]);
+        const int w = weight(b);
+        if (w == 0) continue;
+        if (k > thr) {
+            for (int c = 0; c < w; ++c) out[wpos++] = (int32_t) (b * R + c);
+        } else if (k == thr) {
+            for (int c = 0; c < w && eq_left > 0; ++c, --eq_left) out[wpos++] = (int32_t) (b * R + c);
+        }
+    }
+}
+static bool qsa_topk_multi_on() {
+    static const bool on = [] { const char* v = std::getenv("STRATA_QSA_TOPK_MULTI"); return v != nullptr && std::atoi(v) != 0; }();
+    return on;
+}
+static bool qsa_block_topk_multi(const float* scores, const int32_t* steps, int64_t nq, int64_t max_blocks, int64_t cap,
+                                 int32_t* ids, cudaStream_t st) {
+    if (nq > MT_MAXQ) return false;
+    static MtBuf per[64];
+    int dev = 0;
+    if (cudaGetDevice(&dev) != cudaSuccess || dev < 0 || dev >= 64) { cudaGetLastError(); return false; }
+    MtBuf& b = per[dev];
+    if (b.hist == nullptr) {   // once, even inside a graph capture (relaxed mode lets cudaMalloc through)
+        cudaStreamCaptureMode mode = cudaStreamCaptureModeRelaxed;
+        cudaThreadExchangeStreamCaptureMode(&mode);
+        const bool ok = cudaMalloc(&b.hist, (size_t) MT_MAXQ * 2 * MT_H * sizeof(int)) == cudaSuccess &&
+                        cudaMalloc(&b.state, (size_t) MT_MAXQ * 4 * sizeof(uint32_t)) == cudaSuccess &&
+                        cudaMalloc(&b.cnt, (size_t) MT_MAXQ * MT_G * 2 * sizeof(int)) == cudaSuccess;
+        cudaThreadExchangeStreamCaptureMode(&mode);
+        if (!ok) { cudaGetLastError(); b = MtBuf{}; return false; }
+    }
+    static const int stages = [] { const char* v = std::getenv("STRATA_QSA_TOPK_MULTI_STAGES"); return v ? std::atoi(v) : 7; }();   // (bench)
+    if (stages > 0) cudaMemsetAsync(b.hist, 0, (size_t) nq * 2 * MT_H * sizeof(int), st);
+    const dim3 grid(MT_G, (unsigned) nq);
+    if (stages > 1) mt_hist_kernel<0><<<grid, MT_T, 0, st>>>(scores, steps, max_blocks, b);
+    if (stages > 2) mt_find_kernel<0><<<(unsigned) nq, MT_T, 0, st>>>(steps, b);
+    if (stages > 3) mt_hist_kernel<1><<<grid, MT_T, 0, st>>>(scores, steps, max_blocks, b);
+    if (stages > 4) mt_find_kernel<1><<<(unsigned) nq, MT_T, 0, st>>>(steps, b);
+    if (stages > 5) mt_count_kernel<<<grid, MT_T, 0, st>>>(scores, steps, max_blocks, b);
+    if (stages > 6) mt_emit_kernel<<<grid, MT_T, 0, st>>>(scores, steps, max_blocks, cap, ids, b);
+    return true;
+}
+#endif
+
 void qsa_block_topk(const float* scores, const int32_t* steps, int64_t nq, int64_t max_blocks, int64_t cap,
                     const QsaShapes& s, int32_t* ids, void* stream, int64_t active_blocks) {
     // keys in registers when every query's blocks fit (contexts up to ~135K cells), else (CUDA) the same threads
@@ -1310,6 +1513,12 @@ void qsa_block_topk(const float* scores, const int32_t* steps, int64_t nq, int64
     }();
     if (cluster && !old && nq <= CL_MAXQ && qsa_block_topk_cluster(scores, steps, nq, max_blocks, cap, s, ids, stream))
         return;
+    if (!old && active_blocks <= 0 && s.idx_block == R && qsa_topk_multi_on() &&
+        qsa_block_topk_multi(scores, steps, nq, max_blocks, cap, ids, (cudaStream_t) stream)) {
+        const cudaError_t e = cudaGetLastError();
+        if (e != cudaSuccess) { std::fprintf(stderr, "qsa_block_topk multi: %s\n", cudaGetErrorString(e)); std::exit(1); }
+        return;
+    }
 #endif
     // the blocks a query can have: the call's active count when the caller knows it (the prompt path), else the capacity.
     // Decode (no count) keeps the capacity rule and the original register width: nothing changes there.
