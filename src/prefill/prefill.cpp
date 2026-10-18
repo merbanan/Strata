@@ -1412,6 +1412,19 @@ bool Prefill::carve(size_t T, void* alloc) {
     take_stage(o, ss, s, m.stage, ok);
     m.T = (int64_t) T;
     m.group_cap = pf_group_scratch() && !m.fused_bufs ? group_cap_rows(T, m.g->n_expert) : 0;
+    // STRATA_PF_BUFS=1: what a chunk's buffers are made of (each layout the chunk scan tries, and the one laid out)
+    static const bool bufs_env = std::getenv("STRATA_PF_BUFS") != nullptr;
+    if (bufs_env) {
+        const strata::kernels::QsaShapes s2 = core::qsa_shapes(g);
+        const uint64_t gb = gdn_set_bytes(T), qb = qsa_set_bytes(T, m.cap, m.max_blocks, m.sel_batch, m.attn_batch, s2),
+                       mb = moe_set_bytes(T, g.n_expert, m.fused_bufs);
+        const uint64_t ringb = (uint64_t) m.ring * (uint64_t) MAXBLOB();
+        std::fprintf(stderr, "strata prefill bufs: T %zu%s: total %.1f MiB (%.1f KB/token); region %.1f MiB = max(gdn %.1f, qsa %.1f, "
+                             "moe %.1f); ring %d slots %.1f MiB; outside region and ring %.1f MiB (%.1f KB/token)\n",
+                     T, o.count_only ? " (count)" : "", o.used / 1048576.0, o.used / 1024.0 / (double) T, m.region_bytes / 1048576.0,
+                     gb / 1048576.0, qb / 1048576.0, mb / 1048576.0, m.ring, ringb / 1048576.0,
+                     (o.used - m.region_bytes - ringb) / 1048576.0, (o.used - m.region_bytes - ringb) / 1024.0 / (double) T);
+    }
     return ok;
 }
 
