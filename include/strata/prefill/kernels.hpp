@@ -95,6 +95,16 @@ void copy_f32_wide(float* dst, const float* src, int64_t n, void* stream);
 /// Gather rows: dst16[i, :] = x16[src[i], :] (n rows of `width` BF16).
 void gather_rows16(const uint16_t* x16, const int32_t* src, uint16_t* dst16, int64_t n, int64_t width, void* stream);
 /// bo[t, :] = shared[t, :] * sigmoid(sg[t]) + sum_k w[t, k] * D[slot[t, k], :]
+// STRATA_PF_DM_GROUP: the down rows of one expert group summed into a per-token accumulator as the group finishes,
+// instead of a chunk-wide Dm read by moe_combine.  moe_row_weights: each row's routing weight (row_w[slot[i]] = w[i]).
+// moe_group_accum: rows [bounds[0], bounds[ne]) of Dg (row r at Dg + (r - ra) * N), expert by expert in order (a token
+// has at most one row per expert, so the rows of one expert never write the same token), acc[src[r]] += row_w[r] * row.
+// moe_combine_acc: bo = acc + sigm(sg) * shared, moe_combine's epilogue.  Another summation order than moe_combine's
+// (a token's rows arrive in expert order, not in k order), deterministic.
+void moe_row_weights(const int32_t* slot, const float* w, float* row_w, int64_t n, void* stream);
+void moe_group_accum(float* acc, const float* Dg, const int32_t* src, const float* row_w, const int32_t* bounds, int ne,
+                     int64_t ra, void* stream);
+void moe_combine_acc(const float* acc, const float* shared, const float* sg, float* bo, int64_t T, void* stream);
 void moe_combine(const float* D, const int32_t* slot, const float* w, const float* shared, const float* sg, float* bo,
                  int64_t T, void* stream, const float* row_sd = nullptr);
 /// --peer-device's prompt share as sums: bo[t, :] = (sum over the k with slot[t, k] < rows_local of w[t, k] *

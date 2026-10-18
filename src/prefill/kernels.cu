@@ -1623,6 +1623,37 @@ __global__ void moe_combine4_kernel(const float* __restrict__ Dm, const int32_t*
     bo[i] = make_float4(s.x + sh.x * g, s.y + sh.y * g, s.z + sh.z * g, s.w + sh.w * g);
 }
 
+// STRATA_PF_DM_GROUP (see kernels.hpp): a row's routing weight, a group's rows into the per-token accumulator, the
+// accumulator's epilogue (moe_combine4_kernel's: s + sh * g)
+__global__ void moe_row_weights_kernel(const int32_t* __restrict__ slot, const float* __restrict__ w, float* __restrict__ row_w,
+                                       int64_t n) {
+    const int64_t i = (int64_t) blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) { const int32_t r = slot[i]; if (r >= 0) row_w[r] = w[i]; }
+}
+// block x: 32 columns; its warps take the rows of one expert at a time (expert order, a barrier between experts)
+__global__ void moe_group_accum_kernel(float* __restrict__ acc, const float* __restrict__ Dg, const int32_t* __restrict__ src,
+                                       const float* __restrict__ row_w, const int32_t* __restrict__ bounds, int ne, int64_t ra) {
+    const int64_t c = (int64_t) blockIdx.x * 32 + (threadIdx.x & 31);
+    const int wid = (int) (threadIdx.x >> 5), nw = (int) (blockDim.x >> 5);
+    for (int e = 0; e < ne; ++e) {
+        const int32_t r0 = bounds[e], r1 = bounds[e + 1];
+        for (int32_t r = r0 + wid; r < r1; r += nw) {
+            float* a = acc + (int64_t) src[r] * N + c;
+            *a = fmaf(row_w[r], Dg[(int64_t) (r - ra) * N + c], *a);
+        }
+        __syncthreads();
+    }
+}
+__global__ void moe_combine_acc4_kernel(const float4* __restrict__ acc, const float4* __restrict__ shared,
+                                        const float* __restrict__ sg, float4* __restrict__ bo, int64_t T) {
+    const int64_t i = (int64_t) blockIdx.x * blockDim.x + threadIdx.x;   // float4 index
+    if (i >= T * (N / 4)) return;
+    const int64_t t = i / (N / 4);
+    const float g = sigm(sg[t]);
+    const float4 s = acc[i], sh = shared[i];
+    bo[i] = make_float4(s.x + sh.x * g, s.y + sh.y * g, s.z + sh.z * g, s.w + sh.w * g);
+}
+
 // ---------------------------------------------------------------- QSA helpers
 __global__ void rms_rows_kernel(float* __restrict__ x, const float* __restrict__ w, int64_t cols, int64_t ld, float eps) {
     __shared__ float sh[32];
@@ -2298,6 +2329,26 @@ void moe_combine(const float* Dm, const int32_t* slot, const float* w, const flo
 #endif
     moe_combine_kernel<<<blocks_for(T * N), 256, 0, (cudaStream_t) stream>>>(Dm, slot, w, shared, sg, bo, T, row_sd);
     check("moe_combine");
+}
+void moe_row_weights(const int32_t* slot, const float* w, float* row_w, int64_t n, void* stream) {
+    if (n <= 0) return;
+    moe_row_weights_kernel<<<blocks_for(n), 256, 0, (cudaStream_t) stream>>>(slot, w, row_w, n);
+    check("moe_row_weights");
+}
+void moe_group_accum(float* acc, const float* Dg, const int32_t* src, const float* row_w, const int32_t* bounds, int ne,
+                     int64_t ra, void* stream) {
+    if (ne <= 0) return;
+    moe_group_accum_kernel<<<(unsigned) (N / 32), 256, 0, (cudaStream_t) stream>>>(acc, Dg, src, row_w, bounds, ne, ra);
+    check("moe_group_accum");
+}
+void moe_combine_acc(const float* acc, const float* shared, const float* sg, float* bo, int64_t T, void* stream) {
+    if (((reinterpret_cast<uintptr_t>(acc) | reinterpret_cast<uintptr_t>(shared) | reinterpret_cast<uintptr_t>(bo)) & 15) != 0) {
+        std::fprintf(stderr, "moe_combine_acc: the rows are not 16-byte aligned\n");
+        std::exit(1);
+    }
+    moe_combine_acc4_kernel<<<blocks_for(T * (N / 4)), 256, 0, (cudaStream_t) stream>>>(
+        reinterpret_cast<const float4*>(acc), reinterpret_cast<const float4*>(shared), sg, reinterpret_cast<float4*>(bo), T);
+    check("moe_combine_acc");
 }
 void rms_rows(float* x, const float* w, int64_t rows, int64_t cols, int64_t ld, float eps, void* stream) {
     if (rows <= 0) return;
