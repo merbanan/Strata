@@ -11107,19 +11107,6 @@ int main(int argc, char** argv) {
                 return 0;
             };
             if (mtp_room_open && room_close("left open") != 0) return 1;
-            if (mtp_room_slots > 0 && room_path != nullptr && (int64_t) n >= mtp_room_min && mtp.experts_resident()) {
-                const auto room_t0 = Clock::now();
-                if (!mtp.experts_lend(err)) {
-                    std::fprintf(stderr, "strata serve: prompt room: %s: this prompt reads as it always did\n", err.c_str());
-                } else {
-                    room_path->set_ring_room_active(true);   // before the loan: a relayout re-carves with the room
-                    mtp_room_open = true;
-                    std::fprintf(stderr, "strata serve: prompt room: %lld tokens, the prompt path's ring is the drafter's "
-                                         "%llu MiB (%d slots past its own, lent in %.1f ms)\n", (long long) n,
-                                 (unsigned long long) (mtp.experts_bytes() >> 20), mtp_room_slots,
-                                 std::chrono::duration<double, std::milli>(Clock::now() - room_t0).count());
-                }
-            }
             if (o.prefill_head_alias && native_head.loaded()) {
                 const auto head_t0 = Clock::now();
                 native_head.unload();
@@ -11453,6 +11440,21 @@ int main(int argc, char** argv) {
             tr("request", n, geni ? 1 : 0);
             if (use_mtp) mtp.set_prompt_len(n);
             const int64_t read_from = reread_to > 0 ? 0 : resume;
+            // STRATA_MTP_ROOM_MIN: opened here, once the reused prefix is known - the threshold counts the tokens this
+            // request reads (an agent turn on a long conversation reads a few hundred and gains nothing from the room)
+            if (mtp_room_slots > 0 && room_path != nullptr && n - read_from >= mtp_room_min && mtp.experts_resident()) {
+                const auto room_t0 = Clock::now();
+                if (!mtp.experts_lend(err)) {
+                    std::fprintf(stderr, "strata serve: prompt room: %s: this prompt reads as it always did\n", err.c_str());
+                } else {
+                    room_path->set_ring_room_active(true);   // before the loan: a relayout re-carves with the room
+                    mtp_room_open = true;
+                    std::fprintf(stderr, "strata serve: prompt room: %lld tokens to read, the prompt path's ring is the drafter's "
+                                         "%llu MiB (%d slots past its own, lent in %.1f ms)\n", (long long) (n - read_from),
+                                 (unsigned long long) (mtp.experts_bytes() >> 20), mtp_room_slots,
+                                 std::chrono::duration<double, std::milli>(Clock::now() - room_t0).count());
+                }
+            }
             conversations.limit_reuse(read_from);
             pp_total = n;
             pp_from = read_from;
