@@ -1033,7 +1033,9 @@ unsigned blocks(int64_t n, int per) { return (unsigned) ((n + per - 1) / per); }
 struct DevInfo {
     bool done = false, ok = false;
     bool w12 = false;   // gfx12 (RDNA4): the native kernels only - the Q2_0 pack's (moe_fused.cu) are not ported there
-    bool t75 = false;   // Turing (STRATA_PF_FUSED_SM75): the Q2_0 / Q2_0 layers only (what was set up and checked there)
+    bool t75 = false;   // Turing (STRATA_PF_FUSED_SM75): the Q2_0 / Q2_0 layers (what was set up and checked there)
+    bool t75_iq = false;   // Turing + STRATA_PF_FUSED_SM75_IQ=1: the codebook formats too (gate/up IQ2/IQ3, down IQ4_NL)
+    uint64_t ww4 = ~0ull;  // per ggml type id: the 4-warps-a-row kernel fits (Turing's 64 KB: not IQ2_S's 8 KB grid)
     int sms = 0, occ = 1;
 };
 std::mutex g_mu;
@@ -1066,6 +1068,13 @@ template <int T, bool GU, int WW> bool setup_ww(int& occ) {
     return true;
 }
 template <int T, bool GU> bool setup_one(int& occ) { return setup_ww<T, GU, 4>(occ) && setup_ww<T, GU, 2>(occ); }
+// Turing (STRATA_PF_FUSED_SM75_IQ): two warps a row always, four where its shared memory fits 64 KB (bit T of `ww4`)
+template <int T, bool GU> bool setup_one_t75(int& occ, uint64_t& ww4) {
+    if (!setup_ww<T, GU, 2>(occ)) return false;
+    int o4 = occ;
+    if (!setup_ww<T, GU, 4>(o4)) { ww4 &= ~(1ull << T); cudaGetLastError(); } else occ = o4;
+    return true;
+}
 #endif
 
 #if defined(__HIPCC__)
@@ -1144,6 +1153,20 @@ const DevInfo& dev_info() {
     if (major < 8) {   // Turing: the canonical Q2_0 pack's kernels (the codebook formats' do not fit 64 KB at 4 warps a row)
         d.t75 = true;
         d.ok = setup_one<T_Q2_0, true>(occ) && setup_one<T_Q2_0, false>(occ);
+        // STRATA_PF_FUSED_SM75_IQ=1 (opt-in): the native IQ packs' formats too, two warps a row where four do not fit
+        static const bool sm75_iq = [] { const char* v = std::getenv("STRATA_PF_FUSED_SM75_IQ"); return v != nullptr && v[0] == '1'; }();
+        if (d.ok && sm75_iq) {
+            int oi = occ;
+            uint64_t m = ~0ull;
+            d.t75_iq = setup_one_t75<T_IQ2_XXS, true>(oi, m) && setup_one_t75<T_IQ2_XS, true>(oi, m) &&
+                       setup_one_t75<T_IQ2_S, true>(oi, m) && setup_one_t75<T_IQ3_XXS, true>(oi, m) &&
+                       setup_one_t75<T_IQ3_S, true>(oi, m) && setup_one_t75<T_IQ4_XS, true>(oi, m) &&
+                       setup_one_t75<T_IQ4_NL, false>(oi, m);
+            if (d.t75_iq) { occ = oi; d.ww4 = m; }
+            std::fprintf(stderr, "strata prefill fused (Turing IQ): %s, occupancy %d, 4 warps a row %s\n",
+                         d.t75_iq ? "on" : "could not be set up", occ,
+                         (m & (1ull << T_IQ2_S)) ? "for every format" : "except IQ2_S (two warps)");
+        }
         d.occ = d.ok ? occ : 1;
         cudaGetLastError();
         return d;
@@ -1230,7 +1253,7 @@ bool native_supported(int gu_type, int d_type) {
 #endif
     if (env < 0 && gu_type != T_IQ3_S && gu_type != T_IQ3_XXS) return false;   // default: only these two
     const DevInfo& d = dev_info();
-    if (d.t75 && (gu_type != T_Q2_0 || d_type != T_Q2_0)) return false;
+    if (d.t75 && (gu_type != T_Q2_0 || d_type != T_Q2_0) && !d.t75_iq) return false;
     if (env < 0) return d.ok && d.w12;
     return d.ok && (requested() || d.w12);
 }
@@ -1297,7 +1320,9 @@ void experts_native(const Batch& b, const NativeGeom& g, int n_expert, int64_t n
         return;
     }
 #endif
-    const int ww = pick_ww(n, n_expert);
+    int ww = pick_ww(n, n_expert);
+    // Turing: two warps a row where the four-warp kernel did not fit (both launches of the layer use one width)
+    if (d.t75 && ww == 4 && (!(d.ww4 & (1ull << g.gu_type)) || !(d.ww4 & (1ull << g.d_type)))) ww = 2;
     // the most 64-row tiles the batch can have (every row in it, plus a partial tile per expert) - the items of the
     // ones inside a larger item end at once
     const int64_t tiles = (n + kTileRows - 1) / kTileRows + (b.e1 - b.e0);
