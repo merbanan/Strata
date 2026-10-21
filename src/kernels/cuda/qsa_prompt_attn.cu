@@ -775,6 +775,10 @@ bool launch_i8(const float* q, const QsaAttnPools& pools, const int32_t* ids, co
     return true;
 }
 
+#if !defined(__HIPCC__)
+#include "qsa_prompt_k8v4_stage.cuh"
+#endif
+
 template <int KV_MODE>
 bool launch(const float* q, const QsaAttnPools& pools, const int32_t* ids, const int32_t* steps, int64_t cap,
             const QsaShapes& s, float* attn, int64_t n_q, cudaStream_t st) {
@@ -1609,6 +1613,13 @@ bool qsa_prompt_attn_batch(const float* q, const QsaAttnPools& pools, const int3
     if (pools.k_q != nullptr && pools.v_q4 != nullptr) {   // hybrid K8V4: int8 K + dequantized-q4 V
         if (!pools.k_scale) return false;
         if (volta) return launch70<3>(q, pools, ids, steps, cap, s, attn, n_q, st);
+#if !defined(__HIPCC__)
+        static const bool k8v4_stage = [] {
+            const char* e = std::getenv("STRATA_PA_K8V4_STAGE");
+            return e != nullptr && std::strcmp(e, "1") == 0;
+        }();
+        if (turing && k8v4_stage && launch_k8v4_stage(q, pools, ids, steps, cap, s, attn, n_q, st)) return true;
+#endif
         return launch<3>(q, pools, ids, steps, cap, s, attn, n_q, st);
     }
     if (pools.k_q != nullptr) {

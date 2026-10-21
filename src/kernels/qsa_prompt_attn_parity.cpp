@@ -10,7 +10,10 @@
 // HIP builds (S6): the same checks for the RDNA4 matrix-core kernel (STRATA_HIP_WMMA), skipped (77) off gfx11 / gfx12.
 //   4. (HIP, with STRATA_PA_FAST=1) the gated epilogue (qsa_prompt_attn_batch_gated) writes the same FP16 bits as the
 //      attention followed by the prompt path's gate_attn, for random gates.
-// Usage: qsa_prompt_attn_parity [context=32768] [queries=2048] [reps=5]
+// Hybrid K8V4 coverage includes the existing Q4-to-half rounding boundary.
+// QA_GRAPH=1 replays with changed queries and poisoned output; QA_EMPTY=1 includes
+// a zero-width selection. QA_OUTPUT writes output floats for cross-process A/B.
+// Usage: qsa_prompt_attn_parity [context=32768] [queries=2048] [reps=5] [format=all|3]
 #include "strata/kernels/qsa.hpp"
 #include "strata/kernels/qsa_decode_attn.hpp"
 #include "strata/kernels/qsa_prompt_attn.hpp"
@@ -45,7 +48,7 @@ template <typename T> T* up(const std::vector<T>& h) {
 float h2f(uint16_t b) { __half h; *reinterpret_cast<uint16_t*>(&h) = b; return __half2float(h); }
 uint16_t f2h(float f) { __half h = __float2half(f); return *reinterpret_cast<uint16_t*>(&h); }
 
-int run(int fmt, int64_t ctx, int64_t nq, int reps) {   // fmt 1 int8, 0 fp16, 2 q4_0
+int run(int fmt, int64_t ctx, int64_t nq, int reps) {   // fmt 1 int8, 0 fp16, 2 q4_0, 3 k8v4
 #if !defined(__HIPCC__) && !defined(STRATA_USE_HIP)
     if (fmt == 2) {   // mode 4 (Q4_0 KV) runs on sm_80 and newer only: below that the dispatcher keeps the old kernel
         int dev = 0, major = 0;
@@ -70,7 +73,7 @@ int run(int fmt, int64_t ctx, int64_t nq, int reps) {   // fmt 1 int8, 0 fp16, 2
     std::vector<uint16_t> ks, vs, kh, vh;
     std::vector<uint8_t> k4, v4;   // q4_0: 8 blocks of {fp16 d, 16 code bytes} per row (kv_q4.hpp)
     constexpr int64_t B4 = 18, ROW4 = 8 * B4;
-    if (fmt == 2) {
+    if (fmt == 2 || fmt == 3) {
         std::uniform_int_distribution<int> byte(0, 255);
         // the scales as a q4_0 pool holds them: signed (ggml's d = max / -8) and spread over two decades, so a chunk's
         // cells mix signs and magnitudes (a positive-only bound on them overflowed FP16 on real K/V)
@@ -83,6 +86,11 @@ int run(int fmt, int64_t ctx, int64_t nq, int reps) {   // fmt 1 int8, 0 fp16, 2
                 std::memcpy(pool->data() + b * B4, &d, 2);
                 for (int j = 0; j < 16; ++j) (*pool)[b * B4 + 2 + j] = (uint8_t) byte(rng);
             }
+        if (fmt == 3) {
+            kq.resize(rows * HD); ks.resize(rows * 4);
+            for (auto& x : kq) x = (int8_t) code(rng);
+            for (auto& x : ks) x = f2h(sc(rng));
+        }
     } else if (fmt == 1) {
         kq.resize(rows * HD); vq.resize(rows * HD); ks.resize(rows * 4); vs.resize(rows * 4);
         for (auto& x : kq) x = (int8_t) code(rng);
@@ -186,8 +194,10 @@ int run(int fmt, int64_t ctx, int64_t nq, int reps) {   // fmt 1 int8, 0 fp16, 2
                         su * grp / sw, 100.0 * su / sw, grp);
         }
     }
+    if (std::getenv("QA_EMPTY")) steps[k::kStepWidth] = 0;
     k::QsaAttnPools pl;
-    if (fmt == 2) { pl.k_q4 = up(k4); pl.v_q4 = up(v4); }
+    if (fmt == 3) { pl.k_q = up(kq); pl.k_scale = up(ks); pl.v_q4 = up(v4); }
+    else if (fmt == 2) { pl.k_q4 = up(k4); pl.v_q4 = up(v4); }
     else if (fmt == 1) { pl.k_q = up(kq); pl.v_q = up(vq); pl.k_scale = up(ks); pl.v_scale = up(vs); }
     else { pl.k_pool = up(kh); pl.v_pool = up(vh); }
     // a q4_0 value: block d / 32 of the row, element j = d % 32 in the low nibble of byte j (j < 16), else the high
@@ -223,6 +233,28 @@ int run(int fmt, int64_t ctx, int64_t nq, int reps) {   // fmt 1 int8, 0 fp16, 2
     old_run();
     new_run();
     ck(cudaDeviceSynchronize(), "run");
+    if (std::getenv("QA_GRAPH")) {
+        cudaStream_t stream;
+        ck(cudaStreamCreate(&stream), "graph stream");
+        ck(cudaStreamBeginCapture(stream, cudaStreamCaptureModeGlobal), "capture begin");
+        if (!k::qsa_prompt_attn_batch(d_q, pl, d_ids, d_steps, cap, s, d_new, nq, stream)) std::exit(2);
+        cudaGraph_t graph;
+        cudaGraphExec_t exec;
+        ck(cudaStreamEndCapture(stream, &graph), "capture end");
+        ck(cudaGraphInstantiate(&exec, graph, nullptr, nullptr, 0), "instantiate");
+        for (int replay = 0; replay < 3; ++replay) {
+            for (auto& x : q) x = -x * 0.9375f;
+            ck(cudaMemcpy((void*) d_q, q.data(), q.size() * sizeof(float), cudaMemcpyHostToDevice), "changed queries");
+            ck(cudaMemsetAsync(d_new, 0xff, nq * NH * HD * sizeof(float), stream), "poison output");
+            ck(cudaGraphLaunch(exec, stream), "graph replay");
+            ck(cudaStreamSynchronize(stream), "graph sync");
+        }
+        old_run();
+        ck(cudaDeviceSynchronize(), "changed reference");
+        ck(cudaGraphExecDestroy(exec), "destroy exec");
+        ck(cudaGraphDestroy(graph), "destroy graph");
+        ck(cudaStreamDestroy(stream), "destroy stream");
+    }
     std::vector<float> o((size_t) (nq * NH * HD)), nw(o.size());
     ck(cudaMemcpy(o.data(), d_old, o.size() * 4, cudaMemcpyDeviceToHost), "down");
     ck(cudaMemcpy(nw.data(), d_new, nw.size() * 4, cudaMemcpyDeviceToHost), "down");
@@ -230,6 +262,11 @@ int run(int fmt, int64_t ctx, int64_t nq, int reps) {   // fmt 1 int8, 0 fp16, 2
         uint64_t hh = 1469598103934665603ull;
         for (float x : nw) { uint32_t u; std::memcpy(&u, &x, 4); hh = (hh ^ u) * 1099511628211ull; }
         std::printf("NEWHASH %016llx\n", (unsigned long long) hh);
+    }
+    if (const char* path = std::getenv("QA_OUTPUT")) {
+        std::FILE* f = std::fopen(path, "wb");
+        if (!f || std::fwrite(nw.data(), sizeof(float), nw.size(), f) != nw.size()) std::exit(2);
+        if (std::fclose(f)) std::exit(2);
     }
     // 1. FP64 reference on a sample of queries
     double err_old = 0, err_new = 0, ref_scale = 0;
@@ -245,7 +282,7 @@ int run(int fmt, int64_t ctx, int64_t nq, int reps) {   // fmt 1 int8, 0 fp16, 2
                 double a = 0;
                 for (int64_t d = 0; d < HD; ++d) {
                     const double kv = fmt == 2 ? q4v(k4, row, d)
-                                      : fmt == 1 ? (double) kq[row * HD + d] * h2f(ks[row * 4 + d / 64]) : h2f(kh[row * HD + d]);
+                                      : (fmt == 1 || fmt == 3) ? (double) kq[row * HD + d] * h2f(ks[row * 4 + d / 64]) : h2f(kh[row * HD + d]);
                     a += (double) q[(i * NH + h) * HD + d] * kv;
                 }
                 sco[c] = a / 16.0;
@@ -257,11 +294,12 @@ int run(int fmt, int64_t ctx, int64_t nq, int reps) {   // fmt 1 int8, 0 fp16, 2
                 double a = 0;
                 for (int64_t c = 0; c < w; ++c) {
                     const int64_t cell = sel[c], row = ((int64_t) table[cell / PS] * NKV + kvh) * PS + cell % PS;
-                    const double vv = fmt == 2 ? q4v(v4, row, d)
+                    const double vv = fmt == 3 ? h2f(f2h((float) q4v(v4, row, d)))
+                                      : fmt == 2 ? q4v(v4, row, d)
                                       : fmt == 1 ? (double) vq[row * HD + d] * h2f(vs[row * 4 + d / 64]) : h2f(vh[row * HD + d]);
                     a += sco[c] * vv;
                 }
-                const double r = a / l;
+                const double r = l > 0 ? a / l : 0;
                 const size_t at = (size_t) ((i * NH + h) * HD + d);
                 ref_scale = std::max(ref_scale, std::fabs(r));
                 err_old = std::max(err_old, std::fabs(o[at] - r));
@@ -271,7 +309,9 @@ int run(int fmt, int64_t ctx, int64_t nq, int reps) {   // fmt 1 int8, 0 fp16, 2
     }
     // 2. new vs old everywhere
     double diff = 0, scale = 0;
+    bool finite = true;
     for (size_t i = 0; i < o.size(); ++i) {
+        finite = finite && std::isfinite(o[i]) && std::isfinite(nw[i]);
         diff = std::max(diff, (double) std::fabs(o[i] - nw[i]));
         scale = std::max(scale, (double) std::fabs(o[i]));
     }
@@ -318,14 +358,20 @@ int run(int fmt, int64_t ctx, int64_t nq, int reps) {   // fmt 1 int8, 0 fp16, 2
     cudaEventRecord(e1);
     ck(cudaEventSynchronize(e1), "time");
     cudaEventElapsedTime(&ms_new, e0, e1);
-    const bool ok1 = err_new <= std::max(4.0 * err_old, 1e-6 * ref_scale);
-    const bool ok2 = diff <= 1e-4 * scale;
+    // Hybrid prompt V rounds to FP16; the decode kernel keeps the product in
+    // FP32. Bound the prompt result tightly against the rounded FP64 oracle,
+    // while allowing that existing storage-boundary difference against decode.
+    const bool ok1 = finite && (fmt == 3 ? err_new <= 1e-5 * ref_scale
+                                      : err_new <= std::max(4.0 * err_old, 1e-6 * ref_scale));
+    const bool ok2 = finite && diff <= (fmt == 3 ? 1e-3 : 1e-4) * scale;
     std::printf("%s %s ctx %lld, %lld queries: vs FP64 old %.3g new %.3g (output scale %.3g); new vs old %.3g (%.2g of "
                 "scale); %.3f -> %.3f ms per chunk (%.2fx)\n",
-                ok1 && ok2 ? "PASS" : "FAIL", fmt == 2 ? "q4_0" : fmt == 1 ? "int8" : "fp16", (long long) ctx, (long long) nq, err_old,
+                ok1 && ok2 ? "PASS" : "FAIL", fmt == 3 ? "k8v4" : fmt == 2 ? "q4_0" : fmt == 1 ? "int8" : "fp16", (long long) ctx, (long long) nq, err_old,
                 err_new, ref_scale, diff, diff / scale, ms_old / reps, ms_new / reps, ms_old / ms_new);
     cudaFree((void*) d_ids); cudaFree((void*) d_steps); cudaFree((void*) d_q); cudaFree(d_old); cudaFree(d_new);
     cudaFree(scratch);
+    ck(cudaEventDestroy(e0), "event destroy");
+    ck(cudaEventDestroy(e1), "event destroy");
     cudaFree((void*) pl.k_q); cudaFree((void*) pl.v_q); cudaFree((void*) pl.k_scale); cudaFree((void*) pl.v_scale);
     cudaFree((void*) pl.k_pool); cudaFree((void*) pl.v_pool); cudaFree((void*) pl.page_table);
     cudaFree((void*) pl.k_q4); cudaFree((void*) pl.v_q4);
@@ -354,9 +400,23 @@ int main(int argc, char** argv) {
     const int64_t ctx = argc > 1 ? std::atoll(argv[1]) : 32768;
     const int64_t nq = argc > 2 ? std::atoll(argv[2]) : 2048;
     const int reps = argc > 3 ? std::atoi(argv[3]) : 5;
+    if (ctx <= 0 || nq <= 0 || nq > ctx || reps <= 0) {
+        std::fprintf(stderr, "require context >= queries > 0 and reps > 0\n");
+        return 2;
+    }
+    if (argc > 4) {
+        if (std::strcmp(argv[4], "3")) return 2;
+        return run(3, ctx, nq, reps);
+    }
+    if (std::getenv("QA_OUTPUT")) {
+        std::fprintf(stderr, "QA_OUTPUT requires a single format (fourth argument 3)\n");
+        return 2;
+    }
     int fails = 0;
     fails += run(1, ctx, nq, reps);
 #if !defined(__HIP_PLATFORM_AMD__)
+    fails += run(3, ctx, nq, reps);
+    fails += run(3, 33, std::min<int64_t>(nq, 33), reps); // chunk and ragged tails
     fails += run(0, ctx, nq, reps);   // FP16 KV: the RDNA4 kernel takes int8 KV only
     fails += run(2, ctx, nq, reps);   // Q4_0 KV (mode 4)
     fails += run(2, 1500, std::min<int64_t>(nq, 1500), reps);
