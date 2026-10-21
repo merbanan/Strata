@@ -750,8 +750,10 @@ bool Verifier::init(const WeightTable& wt, const ModelGeometry& g, SessionState&
         mixed_ = b.take<float>(T * N); bo_ = b.take<float>(T * N);
         inj_ = b.take<float>(T * HC); inj2_ = b.take<float>(T * HC);
         lo_ = b.take<float>(T * (uint64_t) g.hc_lr); rs_ = b.take<float>(T * HC); xn_ = b.take<float>(T * HC * N);
-        xq_ = b.take<uint8_t>(strata::kernels::native_q8_1_bytes(max_in, (int) T));
-        sh_xq_ = b.take<uint8_t>(strata::kernels::native_q8_1_bytes(max_in, (int) T));
+        // the q8_1 activations of one token group (or one column chunk of the head): at most kVerifyMaxT columns
+        const int qcols = (int) std::min<uint64_t>(T, (uint64_t) strata::kernels::kVerifyMaxT);
+        xq_ = b.take<uint8_t>(strata::kernels::native_q8_1_bytes(max_in, qcols));
+        sh_xq_ = b.take<uint8_t>(strata::kernels::native_q8_1_bytes(max_in, qcols));
         xil_ = b.take<uint8_t>(strata::kernels::native_q8_1_il_bytes(max_in, 4));
         qkv_L_ = b.take<float>(nG * T * C); h_L_ = b.take<float>(nG * T * C);
         gate_L_ = b.take<float>(nG * T * HV); beta_L_ = b.take<float>(nG * T * HV);
