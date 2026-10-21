@@ -13,7 +13,7 @@
 // Hybrid K8V4 coverage includes the existing Q4-to-half rounding boundary.
 // QA_GRAPH=1 replays with changed queries and poisoned output; QA_EMPTY=1 includes
 // a zero-width selection. QA_OUTPUT writes output floats for cross-process A/B.
-// Usage: qsa_prompt_attn_parity [context=32768] [queries=2048] [reps=5] [format=all|3]
+// Usage: qsa_prompt_attn_parity [context=32768] [queries=2048] [reps=5] [format=1|3; default all]
 #include "strata/kernels/qsa.hpp"
 #include "strata/kernels/qsa_decode_attn.hpp"
 #include "strata/kernels/qsa_prompt_attn.hpp"
@@ -405,11 +405,11 @@ int main(int argc, char** argv) {
         return 2;
     }
     if (argc > 4) {
-        if (std::strcmp(argv[4], "3")) return 2;
-        return run(3, ctx, nq, reps);
+        if (std::strcmp(argv[4], "1") && std::strcmp(argv[4], "3")) return 2;
+        return run(std::atoi(argv[4]), ctx, nq, reps);
     }
     if (std::getenv("QA_OUTPUT")) {
-        std::fprintf(stderr, "QA_OUTPUT requires a single format (fourth argument 3)\n");
+        std::fprintf(stderr, "QA_OUTPUT requires a single format (fourth argument 1 or 3)\n");
         return 2;
     }
     int fails = 0;

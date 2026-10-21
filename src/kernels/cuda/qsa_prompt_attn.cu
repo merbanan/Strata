@@ -716,6 +716,11 @@ __global__ void __launch_bounds__(THREADS) prompt_attn_i8_kernel(const float* __
                 acc[j][3] = fmaf(acc[j][3], a1, tmp[j][3] * vdown);
             }
         }
+#if !STRATA_PA_SM80
+        // Turing reuses the current V/scale stage. All lanes must finish its
+        // p.v reads before any lane stores the next tile (independent scheduling).
+        __syncwarp();
+#endif
         if (more) {
             S.sc[nst][warp][0][lane] = ksn;
             S.sc[nst][warp][1][lane] = vsn;
