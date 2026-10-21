@@ -79,6 +79,9 @@ public:
     /// blob it stages overwrites an expert.  `experts_lend` copies the block into pinned host memory first (taken
     /// once, so the `experts_reclaim` after the prompt is a DMA and not another read of experts.bin); `reclaim`
     /// copies it back IN PLACE.
+    /// STRATA_MTP_EXPERT_SNAPSHOT=1 reuses the first successful host snapshot on
+    /// subsequent loans: expert weights are immutable, and reclaim restores the
+    /// snapshot. A load attempt invalidates it. Default: copy on every loan.
     /// THE BLOCK IS NEVER FREED, NEVER REALLOCATED AND NEVER MOVES: the round and step graphs were captured with its
     /// address as the MoE kernel's argument, and lending it in place is what keeps them valid - nothing is dropped
     /// and no round pays a re-capture.
@@ -278,6 +281,7 @@ private:
     // (the block itself stays where it is - see experts_lend)
     void* experts_host_ = nullptr;
     uint64_t experts_host_bytes_ = 0;
+    bool experts_host_valid_ = false;
     bool experts_lent_ = false;
     // Slot drafters borrow immutable weights and head; each still owns its state and scratch.
     bool owns_weights_ = true;

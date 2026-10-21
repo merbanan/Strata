@@ -76,6 +76,13 @@ bool mtp_catchup_all() {
     }();
     return on;
 }
+bool mtp_expert_snapshot_reuse() {
+    static const bool on = [] {
+        const char* v = std::getenv("STRATA_MTP_EXPERT_SNAPSHOT");
+        return v != nullptr && std::strcmp(v, "1") == 0;
+    }();
+    return on;
+}
 constexpr int GGML_Q8_0 = 8;
 constexpr int GGML_Q4_0 = 2;
 using Clock = std::chrono::steady_clock;
@@ -249,6 +256,8 @@ bool MtpDrafter::make_q4_head(std::string& err) {
 
 bool MtpDrafter::load(const std::string& rt_dir, const ModelGeometry& g, SessionState& ss, int max_t, std::string& err,
                       int64_t window, const MtpDrafter* shared) {
+    // A load attempt invalidates the old weight identity, even if loading fails.
+    experts_host_valid_ = false;
 #if defined(STRATA_GPU_METAL)
     (void) window; (void) shared;
     g_ = &g;
@@ -560,12 +569,23 @@ bool MtpDrafter::experts_lend(std::string& err) {
         }
         experts_host_bytes_ = bytes;
     }
+    if (experts_host_bytes_ != bytes) {
+        err = "mtp: the pinned expert snapshot has a different size";
+        return false;
+    }
     // The block stays in VRAM, where it is: the prompt path's room slots ARE these bytes (set_ring_room_base), so
     // this snapshot is what they are worth again once the prompt has read over them.
-    if (cudaMemcpy(experts_host_, experts_, (size_t) bytes, cudaMemcpyDeviceToHost) != cudaSuccess) {
-        (void) cudaGetLastError();
-        err = "mtp: copying the 512 experts to host memory failed (they stay the decode's)";
-        return false;
+    // Weights are immutable between load and destruction. Reclaim restores this
+    // same snapshot in place; a later loan may reuse it only after a full copy
+    // succeeded. Unset keeps the original D2H copy on every loan.
+    if (!mtp_expert_snapshot_reuse() || !experts_host_valid_) {
+        experts_host_valid_ = false;
+        if (cudaMemcpy(experts_host_, experts_, (size_t) bytes, cudaMemcpyDeviceToHost) != cudaSuccess) {
+            (void) cudaGetLastError();
+            err = "mtp: copying the 512 experts to host memory failed (they stay the decode's)";
+            return false;
+        }
+        experts_host_valid_ = true;
     }
     experts_lent_ = true;
     return true;
