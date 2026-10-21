@@ -1,15 +1,15 @@
 # Reusing the MTP expert snapshot
 
 Validated on RTX 2060 SUPER / IQ3_XXS, 2026-10-22. GPU lifecycle, full-model
-quality and matched serving ABBA pass. Eligible for local opt-in adoption; the
-global default remains off.
+quality and matched serving ABBA pass. Committed as `6e4f8498` and adopted
+locally with a passing installed-release smoke; the global default remains off.
 
 `STRATA_MTP_EXPERT_SNAPSHOT=1` retains the first successfully copied host
 snapshot across prompt-room loans. Unset or zero still copies GPU to host on
 every loan. No extra host or device allocation is introduced: the existing
 pinned 675 MiB buffer was already retained until drafter destruction. The
-first loan still allocates and copies it. Eager startup allocation is a separate
-pending experiment, not part of this change.
+first loan still allocates and copies it. Eager startup allocation was tested
+separately and not adopted; see [the experiment report](mtp-expert-snapshot-eager.md).
 
 ## Writer and lifetime audit
 
@@ -108,15 +108,13 @@ The reproducible test-build helper also passes its cached-path memcheck run.
 
 ## Separate eager-allocation follow-up
 
-A possible second switch can prime the snapshot after startup memory budgets
-are chosen but before the engine emits READY (`generate.cpp`). That would move
-the first pinned allocation out of the first request without changing graph
-addresses. It must report added startup time and 675 MiB of pinned host bytes,
-and preserve a working lazy fallback on allocation failure. Compare process
-start-to-first-answer as well as ready-to-first-token; moving a stall alone is
-not a total-latency gain. The existing lazy snapshot prototype does not perform
-this priming. Any implementation must retain the same room/batch admission and
-not mark the experts lent while the engine is advertised as ready.
+The separate prototype primed the snapshot after startup memory budgets were
+chosen but before READY, preserving resident state, graph addresses, room
+admission and lazy fallback. Lifecycle tests and exact-token ABBA passed.
+It moved the first pinned allocation out of the request, but total process-
+start-to-answer improved in only one of the two pairs. The prototype and raw
+evidence are archived; lazy startup remains the adopted path. The linked eager
+report records startup costs, the earlier 675 MiB pinned allocation and limits.
 
 The initial timing template placed a short marker at the end of the records.
 Its baseline 4K response summarized the records and hit the 64-token cap, so

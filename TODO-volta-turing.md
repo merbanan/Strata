@@ -159,8 +159,10 @@ are in bench/volta-turing/k8v4-stage.md.
   the HDD bottleneck reported in issue #2239.
 - [ ] Use alternating A/B/B/A runs with same-day baseline, matching memory/chunks,
   editing, fresh-code and prose prompts, plus short/4k/16k/32k context lengths.
-  Completed: mode-8 4K/16K and wide edit/code/prose ABBA. Short/32K and broader
-  quality-controlled comparisons remain pending.
+  Completed: mode-8 4K/16K, wide edit/code/prose and attention 1K/4K/16K/32K
+  ABBA. Attention has separate exact retrieval/logit qualification; the wide
+  edit workload still needs successful-task qualification. Repeat matched
+  comparisons for each new feature.
 - [ ] Record accepted tokens/s, TTFT, prefill, graph memory, cache slots/chunks and
   variance. Reject speedups caused by changed acceptance or incorrect output.
 - [ ] Run bitwise tests where expected; otherwise teacher-forced KL and quality
@@ -253,6 +255,18 @@ on four V100s are hypotheses for our single RTX 2060 SUPER, not local gains.
   Preserve the current full-softmax normalization before top-k: winner-only
   exponentials can change rounded ties/weights despite algebraic cancellation.
   Measure launch cost and exact route/quantizer bytes before changing selection.
+  Further integration audit: `--native` enables the native router. In
+  `VerifyWindow::record` the n>1 path calls the multi-token router directly,
+  whereas n=1 goes through `moe_route`; cover both if integrating a fused launch.
+  The CPU doorbell is published after routing and before expert quantization.
+  Moving quantization into routing may delay CPU-expert work even when one GPU
+  launch is removed: measure doorbell latency and complete windows, not just
+  combined kernel time. First isolate launch fusion with the original top-k
+  arithmetic; test sorted lists and winner-only exponentials independently.
+  Keep Q8 work parallel across blocks rather than serializing 80 input blocks
+  behind the route warp; no global completion counter is needed for independent
+  route/Q8 outputs. Preserve the existing QFUSE/QDEDUP skip rules and skip the
+  later expert quantizer only after the fused producer actually succeeds.
 - [ ] C03 — Audit remaining gate/up-to-down conversions and repeated activation
   quantization after the existing mode-8 fusion. Investigate only uncovered
   format/shape paths, including packed-byte DP4A/LUT readers
@@ -406,7 +420,7 @@ on four V100s are hypotheses for our single RTX 2060 SUPER, not local gains.
 
 ### Additional leads from local measurements
 
-- [ ] L01 — Reuse the immutable MTP expert host snapshot across prompt-room
+- [x] L01 — Reuse the immutable MTP expert host snapshot across prompt-room
   loans, after auditing every writer and invalidation path. In
   `src/core/mtp.cpp`, `experts_lend` retains its pinned allocation but copies
   all 675 MiB from GPU to host on every loan; `experts_reclaim` restores those
@@ -431,6 +445,20 @@ Ownership/idle/chain guards and in-place reclaim remain. Load attempts invalidat
 the snapshot; failed D2H never marks it valid. CUDA memcheck passes unset/0/1
 with injected allocation/copy/idle failures, shared-owner rejection, size checks,
 and five destructive loan/reclaim cycles followed by graph replay with exact
-bytes. Full-model quality ABBA is running; timing and adoption are pending.
-Eager startup allocation remains a separate unimplemented experiment. Evidence:
-`Strata-data/bench/2026-10-21-volta-turing/mtp-expert-snapshot/`.
+bytes. Full-model ABBA passes all 16 tasks and byte-identical first-token
+logits against the adopted reference at every context. A new timing prompt
+failed on baseline (summary/cap instead of marker); preserve that failure.
+Corrected timing uses the qualified audit-marker template with cold prefixes.
+All 24 requests pass; both ABBA pairs improve repeated TTFT by 2.10–2.96%
+at 2K and 1.08–1.59% at 4K, with lower complete-request latency. Memory
+budgets match. Committed as `6e4f8498` and adopted locally with
+`STRATA_MTP_EXPERT_SNAPSHOT=1`; the installed release passed first/repeated
+loan requests with exact answers (955.1 ms then below 0.1 ms loan time).
+The separate eager-startup prototype built and passed lifecycle/memcheck
+unset/0/1. Its full ABBA returns identical output tokens and budgets. Ready-to-
+first-token improves 45.70–49.31%, but total start-to-answer improves 10.71%
+in one pair and regresses 16.49% in the other. It moves an allocation stall;
+no repeatable overall gain is demonstrated. Do not adopt eager priming locally.
+Exact prototype and results are retained; eager-only source edits are restored.
+See `bench/volta-turing/mtp-expert-snapshot-eager.md` and
+`Strata-data/bench/2026-10-21-volta-turing/mtp-expert-snapshot-eager/`.
