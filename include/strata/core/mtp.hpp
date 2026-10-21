@@ -119,6 +119,12 @@ public:
     bool draft(int T, const int32_t* tokens, int64_t p, int a, int32_t* drafts, std::string& err,
                float* probs = nullptr, float min_p = 0.0f, int* n_drafts = nullptr);
 
+    /// --lookup-max-t: draft() for a window of up to kVerifyLongT rows (T may pass max_t()).  When the last accepted
+    /// row is past max_t() rows, rows 0..a-1 are caught up as prefill() does and row a runs as a one-row round, so the
+    /// drafter's K/V holds every accepted cell and its graphs keep max_t() rows.
+    bool draft_long(int T, const int32_t* tokens, int64_t p, int a, int32_t* drafts, std::string& err,
+                    float* probs = nullptr, float min_p = 0.0f, int* n_drafts = nullptr);
+
     /// The first round: one cell (`cell`) from `R_row` (device) and `token` -> T-1 drafts.
     bool draft_first(int T, const float* R_row, int32_t token, int64_t cell, int32_t* drafts, std::string& err,
                      float* probs = nullptr, float min_p = 0.0f, int* n_drafts = nullptr);
