@@ -3,8 +3,9 @@
 Status, 2026-10-22: both the isolated mode-8 proposal and its extension to
 Turing's normal mode 4 pass GPU correctness, sanitizers and reviewed repeated
 kernel timings. The clean engine build is complete; disabled logits match the
-installed reference. Enabled/disabled model checks are running. Neither
-proposal is installed or adopted.
+installed reference. All 16 enabled/disabled retrieval requests also pass
+with exact logits. Their allocation audit lacked request traces; a corrected
+traced run is in progress. Neither proposal is installed or adopted.
 
 ## Measured reason to investigate
 
@@ -165,8 +166,20 @@ budgets must match. The local installed configuration remains unchanged;
 performance/continuation qualification and adoption are separate later steps.
 
 The clean build completed and all four disabled first-logit vectors match the
-installed reference byte for byte. The retrieval ABBA is running.
-`iq2xs-workload-v1` queues continuation checks behind that exact process and
+installed reference byte for byte. The initial retrieval ABBA completed:
+16/16 marker responses pass, with all first-logit bytes identical to the
+installed reference. `iq2xs-engine-v1/quality-review.json` independently checks
+raw responses, all 20 finite vectors (248320 values each), configuration
+isolation and the original audit. Allocation qualification remains incomplete:
+the configurations set `STRATA_PF_TRACE` but omitted `STRATA_TRACE`, so all four
+logs lack per-request loan records. Matching startup budgets alone cannot pass.
+The failed audit and stopped dependent queues are preserved.
+
+`iq2xs-engine-trace-v1` repeats the same retrieval ABBA with `STRATA_TRACE=1`
+in both arms. Actual request/loan records are now present. It rechecks the
+preserved disabled controls before running and retains the same exact-logit
+and strict allocation gates. It does not rebuild or change the candidate.
+`iq2xs-workload-v1/run-queue-resume1.py` queues continuation checks behind that exact process and
 requires all 16 reference matches plus a strict allocation audit. Its prepared
 19 cases are byte-identical to the earlier workload (SHA256
 `7262da4ecbd575c22755d08f91faabe91a77ff564d7b21da650e5fb3c1adc36a`):
@@ -175,3 +188,19 @@ requests across ABBA. Only `STRATA_IQ2XS_GU_FUSED=0/1` differs. Memory budgets
 must match; no diagnostic relaxation is enabled. Existing task failures remain
 failures even if continuations are identical. Full-model performance and
 adoption remain pending.
+
+`iq2xs-performance-v1/run-queue-resume1.py` then waits for the continuation
+job. It requires all 18 non-warmup tasks to retain identical emitted tokens
+and prefix reuse across ABBA, plus matching memory budgets. The timing runner
+uses the unchanged historical 256-token benchmark at 1K/4K/16K/32K, records
+host/GPU telemetry, and requires matching requests, response text, generation
+counts and finish reasons. Eleven host checks cover changed outputs, prefix
+reuse, missing records, invalid timings and configuration drift. These are
+host checks, not new performance results. Timing budgets still require final
+independent review; capped output throughput does not imply task success.
+
+The workload reviewer now checks the declared experiment and configuration
+isolation. It retains fused-prefill coverage requirements for that experiment,
+without imposing those unrelated kernels on IQ2_XS. Replaying all 76 earlier
+fused-prefill records retains the same four warmup passes and 72 task failures.
+IQ2_XS launch coverage is a separate gate, not inferred from prefill traces.

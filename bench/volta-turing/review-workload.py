@@ -2,8 +2,9 @@
 """Audit saved task records and traces without executing generated code.
 
 Partial reports describe completed requests only. Manual fresh-code/prose
-reviews apply only to the identical output bytes and task type. They do not
-turn this diagnostic workload into a performance comparison.
+reviews apply only to the identical output bytes and task type. Supports the
+fused-prefill diagnostic and the IQ2_XS experiment with matching budgets.
+Task qualification and performance qualification remain separate.
 """
 import argparse
 import ast
@@ -91,6 +92,11 @@ def main():
     assert not args.output.exists(), 'preserve earlier review reports'
     raw_cases = read(args.workload/'cases.json')
     assert raw_cases == read(args.prepared_cases)
+    manifest = json.loads(read(args.workload/'manifest.json'))
+    feature = manifest['feature_env']
+    assert feature in ('STRATA_PF_FUSED', 'STRATA_IQ2XS_GU_FUSED'), 'unsupported experiment'
+    assert manifest['base_value'] == '0' and manifest['candidate_value'] == '1'
+    diagnostic = manifest['diagnostic_budgets']
     cases = json.loads(raw_cases)
     assert len(cases) == 19 and len({c['name'] for c in cases}) == 19
     arms = ('base', 'candidate', 'candidate', 'base')
@@ -105,7 +111,10 @@ def main():
     if not args.partial:
         assert len(rows) == len(expected)
         summary = json.loads(read(args.workload/'summary.json'))
-        assert summary['diagnostic_budgets'] and not summary['timing_comparisons_enabled']
+        assert summary['diagnostic_budgets'] == diagnostic
+        assert summary['timing_comparisons_enabled'] == (not diagnostic)
+        if not diagnostic:
+            assert summary['budgets_equal'], 'strict run has unequal memory budgets'
     source = read(args.workload/'src_edit.py').decode()
     tokenizer_path = Path(__file__).resolve().parents[2]/'tools/strata_tokenizer.py'
     read(tokenizer_path)
@@ -129,6 +138,7 @@ def main():
             if key in reviews: assert reviews[key]['qualified'] == review['qualified'], 'conflicting reviews'
             reviews[key] = {'qualified': review['qualified'], 'review': str(path.resolve()), 'review_sha256': digest(path.read_bytes())}
     traces = {}
+    normalized_configs = {}
     results = []
     for row, (leg, arm, case) in zip(rows, expected):
         assert (row['leg'], row['arm'], row['name']) == (leg, arm, case['name'])
@@ -140,7 +150,12 @@ def main():
         ids = row['tokens']
         assert tokenizer.decode(ids[:-1] if ids and ids[-1] in eos else ids) == text, 'saved text differs from emitted tokens'
         if leg not in traces:
-            assert json.loads(read(directory/'config.json'))['tokenizer'] == str(tokenizer_dir)
+            cfg = json.loads(read(directory/'config.json'))
+            assert cfg['tokenizer'] == str(tokenizer_dir)
+            assert cfg['env'].pop(feature) == ('0' if arm == 'base' else '1')
+            cfg.pop('log', None)
+            normalized_configs[leg] = cfg
+            assert all(c == normalized_configs[leg] for c in normalized_configs.values()), 'configuration drift beyond feature switch'
             traces[leg] = completed_traces(read(directory/'engine.log'))
         index = cases.index(case)
         trace = traces[leg][index]
@@ -160,7 +175,7 @@ def main():
         # Kernel coverage is separate from task correctness. Original short
         # cases cannot qualify a fused-prefill numerical change.
         exercised_fused = any(t >= 3072 and cap == 0 for t, cap in trace['caps'])
-        if 'context_target' in case and arm == 'candidate':
+        if feature == 'STRATA_PF_FUSED' and 'context_target' in case and arm == 'candidate':
             assert exercised_fused, 'long-context candidate did not exercise fused prefill'
         results.append({'leg': leg, 'arm': arm, 'name': case['name'], 'output_sha256': digest(text_bytes),
                         'finish': row['done'][5], 'qualified': finished and review['qualified'],
@@ -174,12 +189,13 @@ def main():
     report = {'status': 'partial_review' if args.partial else
               ('independent_reviews_pending' if pending else 'completed_workload_review'),
               'requests_reviewed': len(results), 'planned_requests': len(expected),
+              'feature_env': feature, 'diagnostic_budgets': diagnostic,
               'records_complete': records_complete, 'pending_independent_reviews': pending,
               'saved_text_matches_emitted_tokens': True,
               'complete': records_complete and not pending, 'adopted': False,
               'counts': dict(Counter(f"{r['arm']}:{'qualified' if r['qualified'] else 'unqualified'}" for r in results)),
               'results': results, 'inputs': inputs,
-              'limits': 'Incomplete or unreviewed tasks remain unqualified. Raw response/protocol and prefill coverage are checked; diagnostic budgets forbid timing comparisons. No model-wide quality or adoption claim.'}
+              'limits': 'Incomplete or unreviewed tasks remain unqualified. Raw response/protocol and applicable fused-prefill coverage are checked. Diagnostic budgets forbid timing comparisons; equal budgets alone do not qualify performance. IQ2_XS launch coverage requires separate evidence. No model-wide quality or adoption claim.'}
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(report, indent=2)+'\n')
     print(json.dumps({k:v for k,v in report.items() if k not in ('results','inputs')}, indent=2))

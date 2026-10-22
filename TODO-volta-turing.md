@@ -442,9 +442,13 @@ on four V100s are hypotheses for our single RTX 2060 SUPER, not local gains.
   balanced VRAM calls are 1.23–1.34x faster at T=1/4 and 1.78–2.59x at T=8/16;
   synthetic kernel results only, with unchanged controls exposing clock drift.
   Clean engine build complete; all four disabled first-logit vectors match the
-  installed reference. Strict enabled/disabled retrieval checks are running.
-  The same 19-case continuation suite is queued behind exact-logit and matching-
-  allocation gates, without diagnostic budget relaxation. No adoption;
+  installed reference. All 16 enabled/disabled retrieval responses pass with
+  exact first logits. The allocation audit correctly declined missing request
+  traces (STRATA_TRACE was omitted); its failed run is preserved. A corrected
+  traced ABBA is running. The same 19-case continuation suite is requeued behind
+  exact-logit and matching-allocation gates, without diagnostic relaxation.
+  The historical 256-token context benchmark is prepared and queued behind
+  exact continuation/prefix parity; host validation passes. No adoption;
   see [IQ2_XS notes](bench/volta-turing/iq2xs-gu.md).
 - [ ] C04 — Exploratory: screen the revised arithmetic-compatible IQ2 nibble
   layout, preserving decoded weights, FP16 SiLU boundaries and reduction order.
