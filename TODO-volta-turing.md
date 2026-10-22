@@ -460,6 +460,13 @@ on four V100s are hypotheses for our single RTX 2060 SUPER, not local gains.
   Charge expanded bytes against cache residency and measure acceptance; the
   first acceptance-changing revision stays rejected
   ([#1011](https://github.com/1CatAI/1Cat-vLLM/pull/1011)).
+  CPU source/history/storage audit complete: the upstream corrected FP16
+  projection arithmetic differs from Strata's current integer DP4A path.
+  Expanding all 29 IQ2 gate/up layers would add 12.34 GiB across the full
+  512-expert/layer set; this is not measured resident memory. No weight
+  conversion or GPU adoption. Selective storage/runtime screening remains
+  open. A related compact-codebook prototype keeps original packed weights;
+  see C25 and [IQ2 layout notes](bench/volta-turing/iq2-layouts.md).
 - [ ] C05 — Profile narrower padded grouped-MoE prefill tactics and selective
   Q5_K/Q6_K dequantize-plus-cuBLAS for large routed M. Admit only measured physical
   layouts, threshold neighbors and available scratch; retain small-M fallbacks
@@ -567,6 +574,13 @@ on four V100s are hypotheses for our single RTX 2060 SUPER, not local gains.
   ([#742](https://github.com/1CatAI/1Cat-vLLM/pull/742),
   [#848](https://github.com/1CatAI/1Cat-vLLM/pull/848),
   [#959](https://github.com/1CatAI/1Cat-vLLM/pull/959)).
+  A first IQ2_XS compact-table prototype now builds for sm70/sm75, with
+  unchanged packed weights and dot arithmetic. CPU tests cover 6561 ternary
+  vectors, 65536 signed grid combinations and 131072 scaled integer sub-dots.
+  Compiler static shared memory drops 5120 -> 2048 bytes; registers rise
+  62 -> 63, with zero spills. GPU correctness/sanitizer and v2-enabled versus
+  compact-enabled timing are queued after the current campaign. No occupancy,
+  inference or V100 runtime claim; direct register-fragment work remains open.
 - [ ] C26 — Future checkpoint support only: evaluate FP8/NVFP4/MXFP4 native
   packed linear/MoE dispatch separately on sm70 and sm75. Preserve scale precision
   and fallbacks; do not requantize the current IQ GGUF benchmark to claim a win
