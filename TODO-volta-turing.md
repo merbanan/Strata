@@ -394,6 +394,17 @@ on four V100s are hypotheses for our single RTX 2060 SUPER, not local gains.
   format/shape paths, including packed-byte DP4A/LUT readers
   ([#982](https://github.com/1CatAI/1Cat-vLLM/pull/982),
   [#970](https://github.com/1CatAI/1Cat-vLLM/pull/970)).
+  Native grouped-decode source audit complete; runtime route costs remain
+  pending. Default CUDA already fuses SwiGLU/Q8 and restricts it to the call's
+  entry interval (`e7a5fd30`); the old two-pass path requires GROUPED_V1.
+  Mode 8 additionally fuses gate/up into Q8 for IQ2_XXS/IQ3_XXS/IQ3_S/IQ2_S/
+  IQ4_XS. Turing's default mode 4 retains the combined epilogue launch. Verify
+  PCIe calls use grid_groups=4 with cap=n*10 and force mode 0 (`f6330507`),
+  even under a mode-8 override. VRAM/PCIe calls share the same input Q8 buffer;
+  shared-expert quantization is the separate C02/QDEDUP lead. Profile those
+  remaining epilogues/routes before a new kernel; do not duplicate existing
+  standalone fusion. Source hashes, exact branches, format inventory and scope
+  are in `expert-conversion-audit-v1/source-audit.json` in campaign artifacts.
 - [ ] C04 — Exploratory: screen the revised arithmetic-compatible IQ2 nibble
   layout, preserving decoded weights, FP16 SiLU boundaries and reduction order.
   Charge expanded bytes against cache residency and measure acceptance; the
