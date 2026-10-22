@@ -107,7 +107,7 @@ Previous lists had 110 implementation entries and 31 benchmark entries, includin
 
 13. **Further attention tuning — C08/C09**
 
-   1. **Pending:** Compare register-resident PV accumulation and launch-bound relaxation separately and together for Strata's D256 attention.
+   1. **Pending:** Profile the remaining p.v loads/scales and launch bounds on D256 attention. The adopted K8V4 kernel already keeps its p.v accumulator in registers (`acc[8][4]`); any further register use must preserve measured occupancy and exact numerics.
    2. **Pending:** Audit register pressure/spills where shared memory already limits occupancy; avoid global launch-cap changes.
    3. **Pending:** Validate separate sm70/sm75 accumulator maps, grouped heads, strides, ragged/shuffled pages, device scratch admission and compiled-kernel fallback.
    4. **Conditional:** Treat direct Q4 code/scale arithmetic as a separate numerical experiment; preserve the adopted exact-rounding path.

@@ -446,7 +446,7 @@
       "subtasks": [
         {
           "status": "Pending",
-          "text": "Compare register-resident PV accumulation and launch-bound relaxation separately and together for Strata's D256 attention."
+          "text": "Profile the remaining p.v loads/scales and launch bounds on D256 attention. The adopted K8V4 kernel already keeps its p.v accumulator in registers (`acc[8][4]`); any further register use must preserve measured occupancy and exact numerics."
         },
         {
           "status": "Pending",

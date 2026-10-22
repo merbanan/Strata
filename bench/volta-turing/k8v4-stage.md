@@ -76,7 +76,7 @@ broad model quality or full-continuation teacher-forced KL. The isolated kv1188
 probe also passes its counting and colors checks.
 
 Compiled candidate resources: 168 registers, no stack/spills, 29,968 shared
-bytes per block. `k8v4-stage/occupancy-runtime.log` reports CUDA occupancy API
+bytes per block. The current stage kernel already keeps its p.v output accumulator in register array `acc[8][4]` (source `qsa_prompt_k8v4_stage.cuh`). Future C08 work must first profile the remaining p.v loads/scales or launch-bound constraints; adding another register accumulator is not a new operation and may reduce the measured two-block occupancy. `k8v4-stage/occupancy-runtime.log` reports CUDA occupancy API
 capacity increasing from one to two blocks per SM (12.5% → 25% theoretical
 occupancy). Nsight Compute could not access counters (`ERR_NVGPUCTRPERM`).
 Nsight Systems exited without a usable report; its raw stream is retained.
