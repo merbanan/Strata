@@ -96,3 +96,20 @@ Evidence: `graph-retention-v1/matrix/run.json`, `summary.json` and per-process
 JSON logs contain commands, hashes, phase measurements and exact-output checks.
 The initial three-process trial is also retained. No sanitizer claim is made
 for this standalone retention probe.
+
+
+## Whole-graph update feasibility
+
+The rebuilt default-path diagnostic confirms different top-level node counts
+for every observed solo window: T=1/2/3/8/16 has 2300/4300/4307/4346/4440 nodes.
+All 20 ordered pairs differ. CUDA 12.4 documents a topology-change failure
+when the updating graph and executable have different top-level node counts.
+Therefore direct `cudaGraphExecUpdate` replacement between these five existing
+shapes cannot remove the recreation cost. This is an inference from measured
+counts and the [CUDA 12.4 update contract](https://docs.nvidia.com/cuda/archive/12.4.0/cuda-runtime-api/group__CUDART__GRAPH.html),
+not a mutating experiment on the running model.
+
+A common padded topology would need a separate redesign and state/padding
+qualification. Same-size recaptures, batch layouts and individual-node updates
+are not ruled out by this result. Evidence:
+`solo-graph-limit-v1/graph-update-topology-audit.json`.

@@ -123,6 +123,13 @@ are in bench/volta-turing/k8v4-stage.md.
 ## 4. Revisit fused IQ prefill on the current stack
 
 - [ ] Port the v14 sm_75 IQ candidate (540953d7) behind its opt-in switch.
+  Prepared a detached current-source port; the original patch applies without
+  offsets or fuzz. Compile, Q2 disabled-path byte comparison, all 11 format
+  references, sanitizers and repeated 2048/6400/8192 layer timing are queued
+  after the graph-cache full-model comparison. Production source is unchanged.
+  See [IQ prefill notes](bench/volta-turing/fused-iq-sm75.md). The old first-token
+  KL of 0.35 remains an unresolved numerical result; kernel error comparable to
+  MMQ is not model-quality qualification.
 - [ ] Compare against MMQ with identical chunk size, ring and expert residency.
 - [ ] Profile per-format/routed-M performance and use selective dispatch.
 - [ ] Check scratch/grouping interactions; PF_DM_GROUP changes combine order.
@@ -150,7 +157,40 @@ are in bench/volta-turing/k8v4-stage.md.
   recovery. Cap 2 saves 76 MiB synthetically, at more instantiations; test an
   opt-in engine cap before adoption.
 - [ ] Prototype a budgeted solo-graph LRU beyond the existing OOM-only eviction.
+  `STRATA_VERIFY_SOLO_GRAPHS=N` prototype builds; default 0 retains all graphs.
+  Actual Verifier policy probe passes plain/memcheck/synccheck: resident versus
+  doorbell recency, pipeline guards, in-flight refusal, 37 graph creations and
+  35 changed-input checks. Both original seven-request diagnostic legs completed:
+  peak solo graphs 5 -> 2, minimum observed free VRAM 25.125 -> 105.125 MiB,
+  unchanged 1403 slots/6400-token chunks/39.60 GiB pinned RAM/128.8 MiB arena.
+  Candidate has 174 graph lifetimes and 172 evictions. Every graph is destroyed,
+  no recorded API errors, but all six long continuations differ. Retrieval/logit
+  ABBA passes all 16 tasks and raw adopted-reference logits. Full controlled
+  decode (swaps/deferred CPU off) finishes 28 requests but still varies within
+  baseline repeats. Matched prose wall time regresses 5.07%/5.14% with cap 2;
+  cap 2 is not selected for adoption. Cap 3 diagnostic completes: 53 lifetimes,
+  50 evictions, 75.125 MiB minimum free (+50 MiB), at the same budgets.
+  Fixed draft-cost full-workload diagnostic completed: all 28 requests stop
+  naturally with identical tokens and work counts across all four legs (11,593
+  tokens per leg); each candidate has 149 captures and 147 evictions across all
+  five window sizes. This is controlled continuation parity, not broad task
+  quality: independent review retains all six long-task failures. See
+  `fixed-policy/qualification.json` and its hash-pinned reviews.
+  The full 28-request cap-0/3 ABBA with original adaptation, deferred CPU work
+  and learned costs is now running (`cap3-timing/`).
+  Its configurations pass preflight; the binary, inputs and predecessor process
+  identity are pinned. Timing results and long-state qualification remain;
+  not committed or adopted. Reports/tools committed separately as `a9b0d7e5`.
 - [ ] Explore graph-exec parameter updates where topology permits safe reuse.
+  Measured solo T=1/2/3/8/16 has 2300/4300/4307/4346/4440 nodes. All 20
+  cross-size pairs violate CUDA 12.4's equal-node-count update requirement;
+  direct whole-graph replacement cannot avoid these recaptures. See the
+  graph-memory report and `graph-update-topology-audit.json`. Common padded
+  topology, same-size recaptures and batch layouts remain separate leads.
+- [ ] Account for recurring lookup preparation cost when evaluating a bounded
+  graph cache: `graph_fits()` prepares before `round0`, so current learned
+  lookup round cost excludes recapture; MTP misses inside `run()` are timed.
+  Source-audited lead only; measure its effect before changing policy/defaults.
 - [ ] Preserve CPU/GDN/KV state for padded rows; test graph eviction/recreation.
 - [ ] Target lookup-16 without shrinking prompt chunks or increasing reserve;
   75–100 MiB savings is a hypothesis, not a measured result.
