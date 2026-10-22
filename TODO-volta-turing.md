@@ -157,8 +157,14 @@ are in bench/volta-turing/k8v4-stage.md.
   All 60 original/unset/zero/one GPU boundary requests pass; all first-logit
   bytes match the original. Actual fixed-4K loans fall 956 -> 844 slots (112
   fewer displaced mappings). Chunk/cap reset traces and independent audit pass.
-  Full-engine memcheck is running. Validate original tasks and auto planner
-  behavior before adoption; no global VRAM-byte or speed claim yet.
+  Full-engine memcheck remains pending: the first two attempts ran out of
+  memory before READY; a third selected 2048-token MMQ chunks and was stopped
+  as wrong coverage. The fourth uses sanitizer-only context/reserve/cache-floor
+  settings and has entered the required 4096-token fused layout. Exact 3071-tail
+  coverage, clean exit and zero sanitizer errors remain required. Retrieval,
+  full-task and tile queues were restored behind this gate; failed queues and
+  logs are retained. Validate original tasks and auto planner behavior before
+  adoption; no global VRAM-byte or speed claim yet.
 - [ ] Profile per-format/routed-M performance and use selective dispatch.
   Static audit maps all 19 compiler entries: IQ3_XXS/IQ4_NL use 124/125
   registers without spills. Spill entries belong to IQ2_S/IQ2_XS/Q2_0 GU.

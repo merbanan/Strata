@@ -194,8 +194,9 @@ independent raw-vector/config/trace audit confirms finite 248,320-entry logits
 and all 60 request shapes. Observed loans are 956 slots for original/unset/zero
 and 844 with the switch on, at the same fixed 4096-token chunk: 112 fewer
 resident mappings displaced. This is not a global VRAM-byte or speed result.
-Full-engine memcheck is running; full model/automatic-planner task qualification
-remains pending. Evidence: `boundary-audit.json` and `boundaries/summary.json`.
+Full-engine memcheck and full model/automatic-planner task qualification remain
+pending. The sanitizer attempts and restored queues are recorded below.
+Evidence: `boundary-audit.json` and `boundaries/summary.json`.
 
 ## Compiler resource audit
 
@@ -273,3 +274,39 @@ without another barrier. A one-stage variant needs explicit synchronization
 and updated host/device accounting before any numerical or sanitizer tests.
 Neither smaller-block variant is implemented. See `smaller-block-audit.json`;
 benchmark the existing tile controls before changing the kernel mapping.
+
+## Full-engine sanitizer setup and queue recovery
+
+The 60 normal-runtime boundary controls above passed with their original
+context and memory settings. Full-engine memcheck has not yet passed:
+
+- At 575 MiB reserve, cuBLAS library loading failed with CUDA out of memory
+  before READY. At 1000 MiB, cuBLAS loaded, but only 53 MiB remained for the
+  128 MiB verifier arena; that attempt also failed before READY.
+- At context 16384 and reserve 1536 MiB, initialization succeeded, but the
+  788-slot cache could not fund the requested chunk. The engine reduced 4096
+  to 2048, below the 3072 fusion threshold. After confirming two MMQ chunks,
+  that process was explicitly stopped. It is not a boundary or sanitizer pass.
+- The fourth attempt uses context 8192, resident-KV argument 8192, reserve
+  1408 MiB, and prefill keep/KV-grow floor 16, solely for instrumentation.
+  KV is fully resident at this context (INFO reports kv_resident=0); the
+  implementation clamps streamed residency to at least 20480 cells. It has
+  initialized with 925 expert slots and borrowed 786 for a 4096-token chunk.
+  The trace confirms `fused group tail T 4096 cap 0`. Completion must still
+  verify the 3071-token tail, all finite logits, clean exit and zero memcheck
+  errors. These settings do not change the installed configuration.
+
+The fourth runner now rejects startup chunk reduction before issuing a
+request; it retains the post-request exact chunk/cap and fused-route checks.
+All attempts use the same prototype binary and 7168-token request, with MTP,
+K8V4, a 96-slot base ring and streaming threshold 3072. The smaller context
+does not establish long-context sanitizer coverage. No API error is suppressed.
+Artifacts: `fused-iq-group-tail-v1/memcheck-*-state.json`, corresponding logs,
+`memcheck-context16k-stop.json`, and `memcheck-fit8k-prepared.json`.
+
+The original workload and tile queues declined their failed prerequisites;
+they did not run their GPU suites. New `queue-resume2` manifests/scripts pin
+the verified predecessor process identities and unchanged inputs. Workload
+resumption requires the fourth sanitizer attempt to complete successfully,
+plus the independent boundary audit. Tile tests wait for completion of the
+retrieval and full-task suite. Both retain independent review/adoption gates.
