@@ -132,6 +132,11 @@ are in bench/volta-turing/k8v4-stage.md.
   See [IQ prefill notes](bench/volta-turing/fused-iq-sm75.md). The old first-token
   KL of 0.35 remains an unresolved numerical result; kernel error comparable to
   MMQ is not model-quality qualification.
+  v1 builds and passes all 11 format references plus exact Q2 output controls,
+  but memcheck reports two CUDA API errors from its oversized IQ2_S four-warp
+  shared-memory probe. v2 checks device capacity before that call; all 11
+  references/Q2 controls pass again and memcheck reports zero errors. Racecheck
+  is running; the clean engine build remains gated on all microchecks.
 - [ ] Compare against MMQ with identical chunk size, ring and expert residency.
   Added an observed-allocation audit for startup budgets and per-request loans.
   Nine negative/positive checks pass; missing traces and reduced chunks cannot
@@ -161,7 +166,7 @@ are in bench/volta-turing/k8v4-stage.md.
   cap 1/2/3/5 uses 28/60/90/136 MiB; metadata is reused without global free
   recovery. Cap 2 saves 76 MiB synthetically, at more instantiations; test an
   opt-in engine cap before adoption.
-- [ ] Prototype a budgeted solo-graph LRU beyond the existing OOM-only eviction.
+- [x] Prototype a budgeted solo-graph LRU beyond the existing OOM-only eviction.
   `STRATA_VERIFY_SOLO_GRAPHS=N` prototype builds; default 0 retains all graphs.
   Actual Verifier policy probe passes plain/memcheck/synccheck: resident versus
   doorbell recency, pipeline guards, in-flight refusal, 37 graph creations and
@@ -181,11 +186,13 @@ are in bench/volta-turing/k8v4-stage.md.
   five window sizes. This is controlled continuation parity, not broad task
   quality: independent review retains all six long-task failures. See
   `fixed-policy/qualification.json` and its hash-pinned reviews.
-  The full 28-request cap-0/3 ABBA with original adaptation, deferred CPU work
-  and learned costs is now running (`cap3-timing/`).
-  Its configurations pass preflight; the binary, inputs and predecessor process
-  identity are pinned. Timing results and long-state qualification remain;
-  not committed or adopted. Reports/tools committed separately as `a9b0d7e5`.
+  The original-config cap-0/3 ABBA also finished all 28 requests (27 natural
+  stops; one candidate edit hit 4096 tokens). Both arms vary between repeats;
+  no long pair matches both output and acceptance. Minimum logged free VRAM
+  is 29/75 MiB; cap 3 has 37/25 evictions. No qualified speedup established.
+  Prototype not selected for adoption; source restored. The complete patch and
+  probes are archived and replay-verified under `engine/proposal-complete.patch`.
+  Future promotion requires a demonstrated benefit and remaining quality gates.
 - [ ] Explore graph-exec parameter updates where topology permits safe reuse.
   Measured solo T=1/2/3/8/16 has 2300/4300/4307/4346/4440 nodes. All 20
   cross-size pairs violate CUDA 12.4's equal-node-count update requirement;

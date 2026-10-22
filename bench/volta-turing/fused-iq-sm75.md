@@ -1,7 +1,6 @@
 # Native IQ prefill on Turing
 
-Experimental port, prepared 2026-10-22. Not built, measured or adopted on the
-current stack yet. Target: RTX 2060 SUPER, CUDA 12.4, IQ3_XXS.
+Experimental port, 2026-10-22. Kernel validation in progress; not adopted. Target: RTX 2060 SUPER, CUDA 12.4, IQ3_XXS.
 
 The v14 change `540953d7ac292af48f5749473099b54bf55eada3` applies to the current
 `src/prefill/moe_fused_iq.cu` without offsets or fuzz. A detached source copy and
@@ -22,10 +21,21 @@ also changed prompt chunks from 6656 to 6400 tokens. Its first-token KL of
 pass. Fused and MMQ activation quantization/accumulation differ; their outputs
 are not expected to be byte-identical.
 
-## Queued validation
+## Validation
 
-Compilation and GPU work wait for the graph-cache full-model timing run to
-finish. The queue pins its predecessor's PID/start time and requires all 28
+The graph-cache full-model timing run finished before compilation/GPU work
+began. v1 builds and passes all 11 independent format references. Q2 output
+bytes match the original library with the new switch unset, zero and one.
+Memcheck then reports two CUDA API errors from probing IQ2_S's oversized
+four-warp shared-memory request; the reference calculation itself passes. The
+engine build correctly declined that failed gate.
+
+v2 adds a device-capacity check, including static shared memory, before calling
+`cudaFuncSetAttribute`. It keeps the kernel arithmetic and two-warp fallback.
+The corrected source and rerun are under `fused-iq-sm75-v2/`; all v1 evidence
+is retained. v2 passes all 11 references and exact Q2 controls again; memcheck
+reports zero errors. Racecheck is running, and the isolated engine build waits
+for all remaining microchecks to pass. The queue pins its predecessor's PID/start time and requires all 28
 requests plus an idle GPU. It does not stop or replace that run.
 
 - Compile the detached native IQ object and the existing independent reference

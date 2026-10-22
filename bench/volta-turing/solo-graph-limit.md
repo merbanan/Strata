@@ -1,6 +1,6 @@
 # Solo verifier graph limit
 
-Experimental, RTX 2060 SUPER, CUDA 12.4, 2026-10-22. Not adopted.
+Archived experiment, RTX 2060 SUPER, CUDA 12.4, 2026-10-22. Not selected for adoption.
 
 `STRATA_VERIFY_SOLO_GRAPHS=N` limits retained solo verifier executables for a
 non-pipelined single stage. The default `0` keeps the existing behavior. The
@@ -25,7 +25,10 @@ shared-expert streams, and propagates synchronization/destruction errors.
 The sm75 engine builds. `solo-graph-limit-probe.cpp` links the actual Verifier
 implementation, using the compiler's `-fno-access-control` for test access.
 It does not require production test hooks or implement another cache policy.
-Example:
+Apply the archived `engine/proposal-complete.patch` in an isolated checkout
+and build that engine before reproducing the policy probe. The patch includes
+the two production files and both probe tools; replay verification matches all
+four source hashes. Example after applying it:
 
 ```sh
 python3 bench/volta-turing/build-solo-graph-limit-probe.py BUILD /tmp/solo-probe
@@ -116,18 +119,27 @@ The prose misstates fast recovery. Reviews/diffs are under `fixed-policy/reviews
 they apply only to matching output hashes. These diagnostic timings cannot be
 reported as successful-task throughput.
 
-A full cap-0/3 ABBA started after that diagnostic under `cap3-timing/`.
-It restores the original adaptive swapping, deferred CPU work and learned
-window costs in both arms. It uses the archived production candidate, not the
-fixed-cost diagnostic binary. The only arm difference is the graph count limit;
-all seven tasks and four legs are retained. Configuration preflight passes;
-input hashes and predecessor process identity are saved. The queue checks that
-the preceding diagnostic completed all 28 requests and that the GPU is idle
-before starting. It retains a failed parity result for review rather than
-promoting it to a correctness pass.
+The full original-config cap-0/3 ABBA under `cap3-timing/` completed all 28
+requests: 27 natural stops and one candidate instruction-first rename reaching
+its 4096-token cap. Both baseline legs vary on five of the six long outputs;
+both candidate legs vary on all six. The only cross-arm long-output match is
+one instruction-first rename pair, whose acceptance differs and wall time is
+1.48% longer. No long pair matches both output and acceptance, and no qualified
+throughput improvement is established.
 
-Production-config timing results and model-state/quality qualification remain
-necessary before adoption. HIP, SYCL, V100 and multi-GPU runtime coverage have
+At unchanged 1403 slots, 6400-token chunks, 39.60 GiB pinned RAM and 128.8 MiB
+arena, baseline minimum logged free VRAM is 29 MiB in both legs; cap 3 is 75 MiB
+in both. Candidate capture/eviction counts are 40/37 and 28/25, versus five
+captures and no evictions in each baseline. These coarse observations complement
+the earlier lifecycle-instrumented memory measurements; they are not allocation
+ownership measurements.
+
+The count-limit prototype is not selected for adoption. Production source has
+been restored, and its patch, binaries, probes, logs and outcomes remain under
+`solo-graph-limit-v1/`; `disposition.json` records the decision. A future retry
+needs a workload where the saved memory produces a measured benefit, plus the
+remaining model-state/quality qualification. The graph preparation timing and
+batch/arena ownership leads remain open. HIP, SYCL, V100 and multi-GPU runtime coverage have
 not been performed.
 
 Evidence: `Strata-data/bench/2026-10-21-volta-turing/solo-graph-limit-v1/`.
