@@ -26,7 +26,7 @@
         },
         {
           "status": "Queued",
-          "text": "Reproduce the original wrong-storage result and verify eight original/fallback/corrected control arms."
+          "text": "Reproduce the original defect and compare eight original/fallback/corrected controls. The production source is corrected and builds for sm70/sm75; GPU qualification remains pending."
         },
         {
           "status": "Queued",
@@ -103,8 +103,8 @@
           "text": "Independently verify model dispatch: 640 fused submissions through graph replay when enabled, zero when disabled; all eight retrieval outputs/reference logits match. Counts do not establish timing or active groups."
         },
         {
-          "status": "Queued",
-          "text": "Test original/v2/compact kernels with weights from 30 real experts across ten IQ2_XS layers; activations remain synthetic."
+          "status": "Complete",
+          "text": "Independently review original/v2/compact kernel parity with weights from 30 real experts: all 6000 comparisons pass; activations remain synthetic."
         },
         {
           "status": "Queued",
@@ -141,8 +141,8 @@
           "text": "Implement the lossless compact IQ2_XS codebook with original packed weights; CPU exhaustive checks and sm70/sm75 builds pass."
         },
         {
-          "status": "Queued",
-          "text": "Finish GPU parity, changed-input graphs, sanitizers and compact-versus-v2 timing."
+          "status": "Complete",
+          "text": "GPU parity, changed-input graphs and sanitizers pass; compact-versus-v2 ABBA timing is reviewed. Populated VRAM calls lose at T=1/4/8; do not integrate this prototype."
         },
         {
           "status": "Pending",

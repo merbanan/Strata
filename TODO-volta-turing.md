@@ -2,6 +2,8 @@
 
 Updated 2026-10-22. This is the authoritative task list, sorted by correctness, current RTX 2060 SUPER work, measured opportunity, and hardware dependencies. Parent order is research priority, not the order of already-running jobs. No running test was cancelled or reprioritized by this edit.
 
+**Current requested execution scope:** complete tasks 1 → 2 → 3 → 13, then stop. Preserve all other leads in this backlog without starting new work on them. Already-running support tests are allowed to finish; their results may inform the named tasks. Local RTX 2060 SUPER validation comes first; V100/T4 hardware work remains separate.
+
 Status: **Built** = host/compiler checks only; **Queued/Running** = GPU work outstanding; **Partial/Pending** = incomplete; **Held** = current candidate failed promotion gates; **Conditional/Hardware/Future/Deferred** = retained scope with an explicit prerequisite; **Complete** = stated investigation finished; **Adopted** = qualified and locally enabled. Ongoing requirements apply to every new candidate.
 
 Previous lists had 110 implementation entries and 31 benchmark entries, including duplicates and stale statuses. Every entry is mapped in [the migration index](bench/volta-turing/todo-index.json). Detailed evidence, source links and historical caveats remain in [implementation history](TODO-volta-turing-history-20261022.md) and [benchmark history](../Strata-data/bench/2026-10-21-volta-turing/TODO-history-20261022.md). The [execution queue](../Strata-data/bench/2026-10-21-volta-turing/TODO.md) tracks running/queued work. Existing C01–C28/D01–D04/L01 references remain valid through the index and histories.
@@ -29,7 +31,7 @@ Previous lists had 110 implementation entries and 31 benchmark entries, includin
    2. **Complete:** Build opt-in mode-8 and normal-mode-4 variants; synthetic parity, changed-input graphs, sanitizers and repeated kernel timings pass.
    3. **Complete:** Review 16 model retrieval requests, first logits and corrected allocation traces; these pass.
    4. **Complete:** Independently verify model dispatch: 640 fused submissions through graph replay when enabled, zero when disabled; all eight retrieval outputs/reference logits match. Counts do not establish timing or active groups.
-   5. **Queued:** Test original/v2/compact kernels with weights from 30 real experts across ten IQ2_XS layers; activations remain synthetic.
+   5. **Complete:** Independently review original/v2/compact kernel parity with weights from 30 real experts: all 6000 comparisons pass; activations remain synthetic.
    6. **Queued:** Run the blocking-adaptation/fixed-PCIe diagnostic; retain its remaining draft-policy/deferred-CPU confounds.
    7. **Held:** The original full-workload timing gate declined because continuations differ. Requalify under the corrected baseline before a new performance comparison.
    8. **Pending:** Adopt fusion only after controlled full-model quality, matched budgets and repeatable accepted-token throughput pass.
@@ -38,7 +40,7 @@ Previous lists had 110 implementation entries and 31 benchmark entries, includin
 
    1. **Complete:** Audit revised upstream IQ2 arithmetic and storage expansion; expanding the entire set adds about 12.34 GiB, not a measured resident allocation.
    2. **Built:** Implement the lossless compact IQ2_XS codebook with original packed weights; CPU exhaustive checks and sm70/sm75 builds pass.
-   3. **Queued:** Finish GPU parity, changed-input graphs, sanitizers and compact-versus-v2 timing.
+   3. **Complete:** GPU parity, changed-input graphs and sanitizers pass; compact-versus-v2 ABBA timing is reviewed. Populated VRAM calls lose at T=1/4/8; do not integrate this prototype.
    4. **Pending:** If the compact table wins, integrate separately and measure cache residency, full inference and acceptance.
    5. **Pending:** Screen the revised compatible IQ2 nibble layout selectively; preserve decoded weights, scale/SiLU boundaries and reduction order. Keep the first incompatible revision deferred.
 

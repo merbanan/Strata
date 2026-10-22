@@ -92,3 +92,24 @@ Evidence under `Strata-data/bench/2026-10-21-volta-turing/`:
 Compilation ran at lower CPU priority during continuation qualification.
 Those workload timings are not used to claim a gain; the dedicated timing
 queue remains separate.
+
+
+## Compact-table GPU result (RTX 2060 SUPER, 2026-10-22)
+
+`iq2xs-gu-compact-v1/results-review.json` independently reviews 6000 exact
+parity comparisons, 120 changed-input graphs/720 replays, three clean
+sanitizers and 115,200 ABBA timing samples. The populated VRAM whole-call
+shape loses at T=1, T=4 and T=8 in both format pairs and both ABBA pairs;
+T=16 is mixed. For IQ2_XS gate/up with type-20 down, T=1 v2/compact speed
+ratios are 0.882/0.916 in the two pairs, and T=4 ratios are 0.888/0.927.
+A ratio below 1 means the compact table is slower. The unchanged mode-0 and
+down-path controls are retained in the report. This prototype is not selected
+for engine integration despite its lower static shared-memory use. These are
+synthetic-weight timings, so they do not prove a model speed result.
+
+`iq2xs-realweights-v1/results-review.json` checks all 47,769,600 copied bytes
+against 90 GGUF/index slices from 30 experts in ten IQ2_XS layers, then reviews
+five arms and 6000 exact active Q8/output/guard comparisons in four modes.
+Activations are synthetic; there is no real activation replay or engine timing.
+The real-weight result strengthens correctness coverage of the v2 fusion but
+does not override failed continuation/task-quality gates.

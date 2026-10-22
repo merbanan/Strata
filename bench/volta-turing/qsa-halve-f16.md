@@ -116,3 +116,12 @@ passes. Each arm includes the existing 60-graph/180-replay parity matrix plus
 score-plus-selection timings produce 19,200 samples across the eight arms.
 Outputs and guards are checked again after timing. This is stationary synthetic
 CUDA-event timing, not inference throughput; model promotion remains separate.
+
+
+The production CUDA source now contains the same storage-aware correction as
+the isolated candidate, with formatting-only differences. A separate
+production-source compile succeeds for sm70 and sm75; the corrected halving
+instances have no spills. The only reported spill is the pre-existing
+33-wide register top-k instance, not the changed scorer. The production edit
+remains uncommitted and uninstalled until GPU regression/model review finishes.
+Evidence: `qsa-halve-f16-v1/production-source-validation/build.json`.
