@@ -124,13 +124,60 @@ Retain short/4K/16K/32K prompts and the full editing, code and prose workload.
 Measure first-token and teacher-forced numerics plus task quality before treating
 any timing as an adoption result. A kernel win alone is insufficient.
 
-## Scratch lead retained for the next experiment
+## Grouped scratch for fused layouts' short tails
 
-`moe_bufs` reserves ungrouped MMQ fallback rows for `stream_all_min()-1` even
-with group scratch enabled. The larger fused layout retains `m.group_cap=0`
-for its final short chunk; `run_impl` does not recarve on every chunk. Reducing
-the reserved bytes alone would therefore be unsafe. Any proposed reduction
-must also select bounded group scratch for those small MMQ tails, restore zero
-for fused chunks, and preserve all bounds/unsupported-layer checks. Test every
-tail boundary and the multi-chunk transition before any engine comparison.
-This is a source lead, not an implemented or measured memory saving.
+A detached prototype is built under
+`Strata-data/bench/2026-10-21-volta-turing/fused-iq-group-tail-v1/`.
+`STRATA_PF_FUSED_GROUP_TAIL=1` requires existing group scratch support. It
+reserves grouped GU/H/Hq fallback rows, keeps the full quantized input rows,
+and sets the per-chunk group cap only when a fused layout runs a short MMQ
+tail. Every later fused chunk resets that cap to zero. Unsupported-layer and
+buffer bounds guards remain. Production source and the installed engine are
+unchanged. The complete patch replays to the archived source byte-for-byte.
+
+The source investigation found why an accounting-only change would be unsafe:
+`run_impl` reuses the fused layout for its final small chunk; it does not
+recarve it. The original layout retains `m.group_cap=0` there. Both reservation
+and execution therefore need the new switch.
+
+The prototype compiles without warnings (CUDA build's host translation unit).
+Binary SHA-256:
+`d7f49dc1a1c94456fd592efab464f03f882a50c94110860f838a82e285d981e7`.
+Host probes use the extracted original/proposed allocation functions and
+actual linked MMQ/fused byte calculators. Each of six runs checks 1,179,648
+layout combinations (T=1..32768; thresholds 1024/3072/4096; 64/128/512 experts;
+grouped and fused modes). Unset/zero controls preserve the original sizes;
+enabled runs check 24,567 short-tail capacities each. Tests also cover cap
+reset across full/short/full chunks and a forced group cap of 5120.
+
+At T=6400, threshold=3072, 512 experts and the normal group-cap rule, the four
+MoE buffers calculate to 359,712,384 -> 177,012,608 bytes (343.0 -> 168.8 MiB).
+This is buffer arithmetic, not observed VRAM savings: the enclosing arena is
+the maximum of attention, MoE and other scratch requirements.
+
+GPU validation is queued behind the existing teacher-forced sweep, pinning
+its process identity and all test inputs. It compares the original engine and
+the new binary with unset/zero/one flags, fixed 4096-token chunks, CPU share
+off and an explicit 3072 streaming threshold. Fifteen tail cases include
+1/63/64/65, 511, 1023/1024/1025, 2047/2048/2049, 3071/3072/3073, then a full
+chunk to test reset. Exact chunk and group-cap traces are required, and unset
+and zero first logits must match the original engine byte-for-byte. A separate
+full-engine memcheck covers the 3071-token tail. Model numerics, actual budget
+changes, original task quality and speed remain pending; the prototype is not
+adopted. See `queue.json` and `allocation-probe-results.json`.
+
+## Compiler resource audit
+
+`fused-iq-sm75-v2/compiler-resource-audit.json` maps all 19 ptxas entries to
+format, projection and warp layout. IQ3_XXS gate/up uses 124 registers and
+IQ4_NL down uses 125, with zero stack or spills in either layout. The six
+spilling entries are IQ2_S and IQ2_XS gate/up (16-byte stack, 16-byte spill
+stores/24-byte loads each) and Q2_0 gate/up (8 bytes each), two layouts each.
+These are compiler counts, not runtime traffic or per-format occupancy.
+
+Retain two tuning leads: compare the existing `STRATA_PF_FUSED_TILE=64|128`
+controls by routed rows, and investigate a smaller block/tile mapping for the
+512-thread, register-heavy IQ3 kernels. The latter requires consistent tile
+coverage/group-list changes and independent numerical checks; a block-size
+constant change alone is insufficient. Spills in other formats do not explain
+this model's IQ3_XXS/IQ4_NL layer timing.

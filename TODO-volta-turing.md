@@ -140,11 +140,20 @@ are in bench/volta-turing/k8v4-stage.md.
   test passes exact prefix/tail coverage. Five segments at 1K/4K/16K/32K
   are now running in ABBA (80 requests, 10,240 score positions). Target NLL/top-1
   diagnostics do not substitute for full-distribution KL or task qualification.
-- [ ] Investigate fused fallback scratch under `STRATA_PF_GROUP_SCRATCH`:
-  `moe_bufs` reserves full MMQ rows for the final short chunk although the
-  non-fused grouped path reserves one group's rows. Prove all tail sizes and
-  relayout/fallback bounds before reducing it; do not just lower baseline chunks.
+- [ ] Reduce fused fallback scratch under `STRATA_PF_GROUP_SCRATCH`.
+  Detached opt-in `STRATA_PF_FUSED_GROUP_TAIL` prototype builds; it changes
+  both buffer reservations and per-chunk group-cap selection/reset. Host size,
+  capacity and disabled-path probes pass. Calculated four-buffer size at
+  T=6400/threshold3072 is 343.0 -> 168.8 MiB; actual arena/VRAM savings unmeasured.
+  Original/unset/zero/one GPU boundary controls plus full-engine memcheck are
+  queued behind the current teacher sweep. Validate original tasks and auto
+  planner behavior before adoption; do not just lower baseline chunks.
 - [ ] Profile per-format/routed-M performance and use selective dispatch.
+  Static audit maps all 19 compiler entries: IQ3_XXS/IQ4_NL use 124/125
+  registers without spills. Spill entries belong to IQ2_S/IQ2_XS/Q2_0 GU.
+  Compare existing TILE=64/128 first. Investigate smaller blocks only with
+  consistent tile/group coverage; do not assume other formats' spills explain
+  current-model performance.
 - [ ] Check scratch/grouping interactions; PF_DM_GROUP changes combine order.
 - [ ] Require a full-engine win: the old isolated-kernel win did not improve prefill.
 
