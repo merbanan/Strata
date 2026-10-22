@@ -287,14 +287,22 @@ context and memory settings. Full-engine memcheck has not yet passed:
   788-slot cache could not fund the requested chunk. The engine reduced 4096
   to 2048, below the 3072 fusion threshold. After confirming two MMQ chunks,
   that process was explicitly stopped. It is not a boundary or sanitizer pass.
-- The fourth attempt uses context 8192, resident-KV argument 8192, reserve
+- The fourth attempt used context 8192, resident-KV argument 8192, reserve
   1408 MiB, and prefill keep/KV-grow floor 16, solely for instrumentation.
   KV is fully resident at this context (INFO reports kv_resident=0); the
-  implementation clamps streamed residency to at least 20480 cells. It has
+  implementation clamps streamed residency to at least 20480 cells. It
   initialized with 925 expert slots and borrowed 786 for a 4096-token chunk.
-  The trace confirms `fused group tail T 4096 cap 0`. Completion must still
-  verify the 3071-token tail, all finite logits, clean exit and zero memcheck
-  errors. These settings do not change the installed configuration.
+  The trace confirms `fused group tail T 4096 cap 0`. However, the sanitizer
+  then exhausted tracking memory and reported missed launches (1459 messages
+  at the explicit stop). This is incomplete checking, not a pass. The settings
+  do not change the installed configuration.
+- The fifth attempt keeps that engine configuration and request, adding only
+  `--force-synchronization-limit 16` to Compute Sanitizer. This bounds launches
+  between forced stream synchronizations, a documented way to reduce tracking
+  memory. It changes instrumented scheduling, so it cannot establish a race
+  or throughput result. See NVIDIA's
+  [Compute Sanitizer manual](https://docs.nvidia.com/compute-sanitizer/ComputeSanitizer/index.html)
+  and the archived installed-tool `compute-sanitizer-help.txt`.
 
 The fourth runner now rejects startup chunk reduction before issuing a
 request; it retains the post-request exact chunk/cap and fused-route checks.
@@ -302,11 +310,20 @@ All attempts use the same prototype binary and 7168-token request, with MTP,
 K8V4, a 96-slot base ring and streaming threshold 3072. The smaller context
 does not establish long-context sanitizer coverage. No API error is suppressed.
 Artifacts: `fused-iq-group-tail-v1/memcheck-*-state.json`, corresponding logs,
-`memcheck-context16k-stop.json`, and `memcheck-fit8k-prepared.json`.
+`memcheck-context16k-stop.json`, `memcheck-fit8k-stop.json`, and
+`memcheck-sync16-prepared.json`.
 
-The original workload and tile queues declined their failed prerequisites;
-they did not run their GPU suites. New `queue-resume2` manifests/scripts pin
-the verified predecessor process identities and unchanged inputs. Workload
-resumption requires the fourth sanitizer attempt to complete successfully,
-plus the independent boundary audit. Tile tests wait for completion of the
-retrieval and full-task suite. Both retain independent review/adoption gates.
+`audit-memcheck.py` now requires a clean process exit, error summaries with
+zero counts, and no error/warning/incomplete-tracking diagnostics. It accepts
+the archived clean microbenchmark report and rejects the actual internal-error
+report, that report with an appended zero-error summary, a missing summary,
+a nonzero exit and two nonzero-summary cases. The seventh check ensures a
+zero summary cannot hide another summary with errors. These are report checks;
+exact chunks, real fused/cap traces and finite outputs remain separate gates.
+Evidence: `memcheck-report-gate-validation.json`.
+
+The original and `queue-resume2` workload/tile queues declined their failed
+prerequisites without running their GPU suites. Workload resumption requires
+a successful sanitizer result plus the independent boundary audit. Tile tests
+follow the retrieval and full-task suite. All stages retain independent
+review/adoption gates; no failed queue or log has been overwritten.

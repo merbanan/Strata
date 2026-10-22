@@ -159,12 +159,15 @@ are in bench/volta-turing/k8v4-stage.md.
   fewer displaced mappings). Chunk/cap reset traces and independent audit pass.
   Full-engine memcheck remains pending: the first two attempts ran out of
   memory before READY; a third selected 2048-token MMQ chunks and was stopped
-  as wrong coverage. The fourth uses sanitizer-only context/reserve/cache-floor
-  settings and has entered the required 4096-token fused layout. Exact 3071-tail
-  coverage, clean exit and zero sanitizer errors remain required. Retrieval,
-  full-task and tile queues were restored behind this gate; failed queues and
-  logs are retained. Validate original tasks and auto planner behavior before
-  adoption; no global VRAM-byte or speed claim yet.
+  as wrong coverage. The fourth reached the required fused layout but exhausted
+  sanitizer tracking memory and missed launches; it was stopped, not passed.
+  The fifth keeps that engine configuration with sanitizer synchronization
+  limit 16. A new report gate rejects internal errors/untracked launches even
+  with a zero-error summary; seven host checks pass. Exact 3071-tail coverage,
+  clean exit and complete checking remain required. Dependent queues declined
+  the failed fourth attempt and must resume after a valid sanitizer result.
+  Validate original tasks and auto planner behavior before adoption; no global
+  VRAM-byte or speed claim yet.
 - [ ] Profile per-format/routed-M performance and use selective dispatch.
   Static audit maps all 19 compiler entries: IQ3_XXS/IQ4_NL use 124/125
   registers without spills. Spill entries belong to IQ2_S/IQ2_XS/Q2_0 GU.
