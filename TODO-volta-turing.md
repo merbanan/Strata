@@ -123,24 +123,27 @@ are in bench/volta-turing/k8v4-stage.md.
 ## 4. Revisit fused IQ prefill on the current stack
 
 - [ ] Port the v14 sm_75 IQ candidate (540953d7) behind its opt-in switch.
-  Prepared a detached current-source port; the original patch applies without
-  offsets or fuzz. A clean checkout based on `5e4d56b7` excludes the graph-cache
-  prototype; its full sm75 engine build waits for the microchecks to pass.
-  Compile, Q2 disabled-path byte comparison, all 11 format
-  references, sanitizers and repeated 2048/6400/8192 layer timing are queued
-  after the graph-cache full-model comparison. Production source is unchanged.
-  See [IQ prefill notes](bench/volta-turing/fused-iq-sm75.md). The old first-token
-  KL of 0.35 remains an unresolved numerical result; kernel error comparable to
-  MMQ is not model-quality qualification.
-  v1 builds and passes all 11 format references plus exact Q2 output controls,
-  but memcheck reports two CUDA API errors from its oversized IQ2_S four-warp
-  shared-memory probe. v2 checks device capacity before that call; all 11
-  references/Q2 controls pass again and memcheck reports zero errors. Racecheck
-  is running; the clean engine build remains gated on all microchecks.
+  Detached port plus IQ2_S shared-memory admission fix built successfully.
+  All 11 format references, exact Q2 controls and three sanitizers pass.
+  Isolated layer speedups repeat at 1.63x/1.31x/1.22x for 2K/6.4K/8K.
+  Production source/release remain unchanged pending model qualification.
+  See [IQ prefill notes](bench/volta-turing/fused-iq-sm75.md).
+  All 16 original-planner retrieval requests pass, within-arm first logits
+  repeat exactly, and baseline matches the installed reference. Fused first-token
+  KL is 0/0.00404/0.01728/0.10865 at 1K/4K/16K/32K; broad quality remains open.
 - [ ] Compare against MMQ with identical chunk size, ring and expert residency.
-  Added an observed-allocation audit for startup budgets and per-request loans.
-  Nine negative/positive checks pass; missing traces and reduced chunks cannot
-  qualify. Actual traced fused/MMQ comparison is pending the engine build.
+  Observed-allocation audit detects real differences: chunks 6400/6144,
+  max loans 1185/1192, pinned RAM 39.60/39.57 GiB; 4K and 16K loans also differ.
+  Equal configuration or startup rings do not qualify allocation parity.
+- [ ] Score fixed continuations after batched prefill, then retain the full
+  original editing/code/prose workload. Added `prefill-teacher.py`; the 4K smoke
+  test passes exact prefix/tail coverage. Five segments at 1K/4K/16K/32K
+  are now running in ABBA (80 requests, 10,240 score positions). Target NLL/top-1
+  diagnostics do not substitute for full-distribution KL or task qualification.
+- [ ] Investigate fused fallback scratch under `STRATA_PF_GROUP_SCRATCH`:
+  `moe_bufs` reserves full MMQ rows for the final short chunk although the
+  non-fused grouped path reserves one group's rows. Prove all tail sizes and
+  relayout/fallback bounds before reducing it; do not just lower baseline chunks.
 - [ ] Profile per-format/routed-M performance and use selective dispatch.
 - [ ] Check scratch/grouping interactions; PF_DM_GROUP changes combine order.
 - [ ] Require a full-engine win: the old isolated-kernel win did not improve prefill.
