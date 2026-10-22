@@ -232,3 +232,27 @@ matching output tokens and installed-reference logits while checking that
 IQ2_XS fused kernels are submitted only when enabled. These remain pending
 GPU checks. Full-process kernel counts include startup; launch capacities do
 not reveal active routed groups. No timing or occupancy is inferred.
+
+
+## Partial continuation divergence (2026-10-22)
+
+The first 28 of 76 requests have completed and passed saved-text/token/protocol
+review. All 19 baseline tasks are reviewed: one warmup pass and 18 substantive
+task failures. The first nine candidate requests contain one warmup pass and
+eight substantive failures. No independent response reviews remain pending
+within this snapshot (`iq2xs-workload-v1/reviews/progress-5.json`).
+
+Seven of the eight completed substantive baseline/candidate pairs have
+different emitted token sequences; all have zero prefix reuse in both arms.
+First differences occur at zero-based output indices 30 through 2344, depending
+on the task. The instruction-first rename output matches exactly. Evidence:
+`iq2xs-workload-v1/reviews/divergence-progress-1.json`, which pins the raw
+record prefix and lists lengths, first differing tokens and finish reasons.
+
+Both repeated arms are still pending. These observations fail the exact-output
+requirement but do not yet distinguish feature effects from run-to-run
+variation. Keep the ABBA run intact, compare repeated arms when complete, and
+then isolate any reproducible difference. Retrieval parity and synthetic
+kernel tests do not override continuation failures. The performance queue
+must decline this run if the exact-continuation requirement remains failed;
+no new inference throughput or adoption is qualified.

@@ -448,6 +448,10 @@ on four V100s are hypotheses for our single RTX 2060 SUPER, not local gains.
   traced ABBA passes independent raw-response/logit/allocation review: all 16
   responses and logits match, and startup plus per-request loan records agree.
   The same 19-case continuation suite is now running without diagnostic relaxation.
+  Partial review now finds differing continuations in seven of eight completed
+  substantive baseline/candidate pairs (28/76 total requests); their prefix
+  reuse is zero in both arms. Repeated arms are still pending, so causation
+  remains unresolved. Exact-output adoption/timing qualification does not pass.
   The historical 256-token context benchmark is prepared and queued behind
   exact continuation/prefix parity; host validation passes. An expert-launch
   tracer builds and passes eleven host parser checks; its graph-parity and
