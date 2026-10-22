@@ -60,6 +60,6 @@ engine started loading, so early first-leg samples are missing.
 Keep the tested prototype for a future explicit readiness-policy requirement,
 but do not adopt it as an inference-speed improvement. The four eager-only
 production/test edits were restored to `6e4f8498` after verifying their exact
-archived hashes. The temporary build still contains the eager experiment;
-the installed immutable snapshot-reuse release is unchanged. No HIP, SYCL or
+archived hashes. The temporary build was subsequently reused for other experiments; the
+installed immutable snapshot-reuse release is unchanged. No HIP, SYCL or
 Volta runtime validation was performed for this prototype.

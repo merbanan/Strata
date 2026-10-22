@@ -136,6 +136,19 @@ are in bench/volta-turing/k8v4-stage.md.
   The current ABBA baseline captures T=8/3/1/2 and reports 67 MiB free before
   its 4K request. Instrument those retained graphs and prompt-read size choice
   before assuming a new solo cache policy can save 75–100 MiB.
+  The C02 longer-decode baseline subsequently reached 26–30 MiB free VRAM
+  at the same 575 MiB reserve. Keep its telemetry and graph captures as another
+  workload for this investigation; no mid-run budget changes.
+  Completed diagnostic on the installed snapshot release: 21 executable
+  lifetimes, peak 21 retained, 8,544 successful host submissions, all destroyed.
+  Five verifier graphs (T=3/1/16/2/8) coincide with 144 MiB less free VRAM
+  during instantiation; every destruction shows zero immediate free increase.
+  These are observed deltas, not owned bytes. See
+  [graph memory notes](bench/volta-turing/graph-memory.md). Batch/arena coverage
+  remains open. Standalone recreation matrix passes 960 changed-input cases:
+  cap 1/2/3/5 uses 28/60/90/136 MiB; metadata is reused without global free
+  recovery. Cap 2 saves 76 MiB synthetically, at more instantiations; test an
+  opt-in engine cap before adoption.
 - [ ] Prototype a budgeted solo-graph LRU beyond the existing OOM-only eviction.
 - [ ] Explore graph-exec parameter updates where topology permits safe reuse.
 - [ ] Preserve CPU/GDN/KV state for padded rows; test graph eviction/recreation.
@@ -267,6 +280,26 @@ on four V100s are hypotheses for our single RTX 2060 SUPER, not local gains.
   behind the route warp; no global completion counter is needed for independent
   route/Q8 outputs. Preserve the existing QFUSE/QDEDUP skip rules and skip the
   later expert quantizer only after the fused producer actually succeeds.
+  First three prototypes evaluated; none adopted. Original-selection fusion
+  passes 468 kernel/sanitizer cases (expanded exact controls later pass 624),
+  16 retrieval requests with byte-identical adopted-reference logits, and
+  recorded 480 fused captures. Both async and synchronous full-workload ABBAs
+  completed 28 requests with matched budgets, but outputs/acceptance vary within
+  arms and no successful-task end-to-end gain is established. All first-baseline
+  edits failed; original tasks and failures are retained. Async residency,
+  timing-based draft windows and deferred CPU behavior remain quality/control
+  questions. The QFUSE/QDEDUP queue did not run after its parity gate failed.
+  Sorted lists pass exact output and sanitizers, but are 31–37% slower than
+  original fusion at the observed 1/2/8-row shapes in a same-run comparison.
+  Winner-only exponentials change expert IDs in 78/624 cases and weight bytes
+  in 308/624; Q8/guards and nonfinite fallback match, sanitizers report no errors.
+  Its roughly 0–4% kernel gain does not justify the unguarded routing change.
+  Exact source, complete reproducible patch, experimental executable and all
+  results are archived. Production source is restored to the adopted baseline;
+  the temporary build must be rebuilt before new engine work. C02's remaining
+  qualification gates are still open for any future variant; move current work
+  to measuring and reducing retained graph memory.
+  See `bench/volta-turing/router-q8-fusion.md` for measured scope and limits.
 - [ ] C03 — Audit remaining gate/up-to-down conversions and repeated activation
   quantization after the existing mode-8 fusion. Investigate only uncovered
   format/shape paths, including packed-byte DP4A/LUT readers
