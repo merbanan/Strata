@@ -140,6 +140,12 @@ are in bench/volta-turing/k8v4-stage.md.
   test passes exact prefix/tail coverage. Five segments at 1K/4K/16K/32K
   are now running in ABBA (80 requests, 10,240 score positions). Target NLL/top-1
   diagnostics do not substitute for full-distribution KL or task qualification.
+  Coverage audit: all original task prompts are below the 3072-token fusion
+  threshold. A detached 76-request task suite retains all seven original cases
+  exactly and adds four task types at 4K/16K/32K with labelled background records.
+  Default budget equality remains strict; diagnostic mode records mismatches
+  and suppresses timing comparisons. Host gates/configuration preflight pass.
+  It is queued behind group-tail GPU gates and a fresh retrieval/allocation ABBA.
 - [ ] Reduce fused fallback scratch under `STRATA_PF_GROUP_SCRATCH`.
   Detached opt-in `STRATA_PF_FUSED_GROUP_TAIL` prototype builds; it changes
   both buffer reservations and per-chunk group-cap selection/reset. Host size,

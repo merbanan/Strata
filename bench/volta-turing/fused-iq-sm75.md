@@ -181,3 +181,30 @@ controls by routed rows, and investigate a smaller block/tile mapping for the
 coverage/group-list changes and independent numerical checks; a block-size
 constant change alone is insufficient. Spills in other formats do not explain
 this model's IQ3_XXS/IQ4_NL layer timing.
+
+## Full task coverage beyond the fusion threshold
+
+The existing seven-case workload has 45/46-token prose/code prompts,
+2442/2452-token edits and a 1024-token warmup. With this configuration's
+3072-token streaming threshold, those prompts do not exercise fused prefill.
+They remain useful default/decode controls and are retained exactly.
+
+`fused-iq-workload-v1/` prepares 12 additional cases: the original rename,
+logging, fresh-code and prose requests at each of 4K/16K/32K. Explicitly labelled
+synthetic background records precede the unchanged task. This is extra
+long-context coverage, not a replacement corpus or a claim about real agent
+traffic. `case-audit.json` verifies all seven original bodies/IDs/hashes are
+identical and all 12 additions retain their original request and token cap.
+The four-leg suite has 76 requests, with independent review still required.
+
+A detached harness adds diagnostic budget handling: missing budget evidence
+still fails; the default still requires equal budgets. Diagnostic mode retains
+actual allocations and task failures while suppressing timing comparisons.
+Host gate tests and configuration preflight pass. The original repository
+harness remains frozen for its active users; the proposal patch is archived.
+
+The queue waits for the grouped-tail prototype's default controls and memcheck.
+It then runs a 16-request retrieval/allocation ABBA with the new binary, requires
+both baseline legs to match the adopted-release logits and all retrieval tasks
+to pass, and only then runs the 76-request task suite. Neither stage adopts the
+feature automatically. See `fused-iq-workload-v1/queue-prepared.json`.
