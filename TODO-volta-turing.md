@@ -157,23 +157,13 @@ are in bench/volta-turing/k8v4-stage.md.
   All 60 original/unset/zero/one GPU boundary requests pass; all first-logit
   bytes match the original. Actual fixed-4K loans fall 956 -> 844 slots (112
   fewer displaced mappings). Chunk/cap reset traces and independent audit pass.
-  Full-engine memcheck remains pending: the first two attempts ran out of
-  memory before READY; a third selected 2048-token MMQ chunks and was stopped
-  as wrong coverage. The fourth reached the required fused layout but exhausted
-  sanitizer tracking memory and missed launches; it was stopped, not passed.
-  With synchronization limit 16, the fifth completed exact 4096+3071 prefill
-  but failed during the verifier graph (553 tracking errors, watchdog release).
-  The runner omitted the existing documented ASYNC_LAUNCH instrumentation
-  option. With it enabled, the separate one-token graph smoke passed: clean
-  exit, zero sanitizer errors/diagnostics and 248,320 finite logits. The full
-  request also generated a token, but tracking errors remained at 165 MiB free
-  before graph capture. The seventh attempt raises only its reserve to 1536
-  MiB: 383 MiB free at READY, 849 slots, 784 lent for the exact 4096 chunk.
-  The 3071 tail has started; completion remains pending. A new report gate rejects internal
-  errors/untracked launches even with a zero-error summary; seven host checks
-  pass. Clean exit and complete boundary checking remain required. The
-  resume5 quality/tile queues wait behind independent baseline route timings
-  and still require the full sanitizer gate.
+  Full-engine boundary memcheck now passes: exact 4096+3071 chunks, caps
+  0/5952, 248,320 finite logits, clean exit and zero errors/diagnostics.
+  Instrumentation-only context8192/reserve1536/keep16 plus async host launch
+  and synchronization limit16 were required; this is not long-context or race
+  qualification. Six prior failures and the clean graph smoke are retained.
+  See `full-engine-memcheck-review.json`. Independent baseline route timings
+  are running; resume5 retrieval/full quality and tile controls follow.
   Validate original tasks and auto planner behavior before adoption; no global
   VRAM-byte or speed claim yet.
 - [ ] Profile per-format/routed-M performance and use selective dispatch.

@@ -194,8 +194,8 @@ independent raw-vector/config/trace audit confirms finite 248,320-entry logits
 and all 60 request shapes. Observed loans are 956 slots for original/unset/zero
 and 844 with the switch on, at the same fixed 4096-token chunk: 112 fewer
 resident mappings displaced. This is not a global VRAM-byte or speed result.
-Full-engine memcheck and full model/automatic-planner task qualification remain
-pending. The sanitizer attempts and restored queues are recorded below.
+Full-engine boundary memcheck now passes under the instrumentation settings
+below. Full model/automatic-planner task qualification remains pending.
 Evidence: `boundary-audit.json` and `boundaries/summary.json`.
 
 ## Compiler resource audit
@@ -278,7 +278,8 @@ benchmark the existing tile controls before changing the kernel mapping.
 ## Full-engine sanitizer setup and queue recovery
 
 The 60 normal-runtime boundary controls above passed with their original
-context and memory settings. Full-engine memcheck has not yet passed:
+context and memory settings. The seventh full-engine memcheck attempt passed;
+the failed attempts are retained to distinguish incomplete checking:
 
 - At 575 MiB reserve, cuBLAS library loading failed with CUDA out of memory
   before READY. At 1000 MiB, cuBLAS loaded, but only 53 MiB remained for the
@@ -322,11 +323,16 @@ context and memory settings. Full-engine memcheck has not yet passed:
   in the clean smoke. The CPU-service failure is resolved for that request;
   complete memory checking is not. See `memcheck-async-failure-audit.json`.
 - The seventh attempt raises only the sixth's reserve from 1408 to 1536 MiB.
-  It initializes with 383 MiB free and 849 cache slots; the exact 4096-token
-  chunk borrows 784, and the 3071-token tail has started. Async launch,
+  It initialized with 383 MiB free and 849 cache slots; the exact 4096-token
+  chunk borrowed 784, followed by the 3071-token tail. Async launch,
   synchronization limit 16, context, floor, input and binary are unchanged.
-  No repeated short smoke substitutes for the full request. Final result
-  pending; inputs and commands are in `memcheck-reserve1536-async-prepared.json`.
+  No repeated short smoke substitutes for the full request. The complete
+  request and one-token decode passed: clean exit, zero sanitizer errors and
+  diagnostics, all 248,320 first logits finite. Independent inspection checks
+  config/source hashes, exact chunks, caps 0/5952 and the real fused route.
+  Evidence: `full-engine-memcheck-review.json`; inputs and commands are in
+  `memcheck-reserve1536-async-prepared.json`. The graph had 293 MiB free at
+  capture. This does not qualify production long-context scheduling or speed.
 
 The fourth runner now rejects startup chunk reduction before issuing a
 request; it retains the post-request exact chunk/cap and fused-route checks.
