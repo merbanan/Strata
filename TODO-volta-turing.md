@@ -28,7 +28,7 @@ Previous lists had 110 implementation entries and 31 benchmark entries, includin
    1. **Complete:** Audit missing format/shape paths, real pack formats, existing SwiGLU/Q8 fusion and VRAM/PCIe dispatch.
    2. **Complete:** Build opt-in mode-8 and normal-mode-4 variants; synthetic parity, changed-input graphs, sanitizers and repeated kernel timings pass.
    3. **Complete:** Review 16 model retrieval requests, first logits and corrected allocation traces; these pass.
-   4. **Running:** Verify actual model launches and graph replays, separating capture counts from execution counts and active groups.
+   4. **Complete:** Independently verify model dispatch: 640 fused submissions through graph replay when enabled, zero when disabled; all eight retrieval outputs/reference logits match. Counts do not establish timing or active groups.
    5. **Queued:** Test original/v2/compact kernels with weights from 30 real experts across ten IQ2_XS layers; activations remain synthetic.
    6. **Queued:** Run the blocking-adaptation/fixed-PCIe diagnostic; retain its remaining draft-policy/deferred-CPU confounds.
    7. **Held:** The original full-workload timing gate declined because continuations differ. Requalify under the corrected baseline before a new performance comparison.

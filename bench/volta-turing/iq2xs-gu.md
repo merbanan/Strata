@@ -326,3 +326,28 @@ The historical timing runner declined the exact-continuation/prefix gate at
 `run-performance-resume1.py:95`; its trace is preserved. There is no new
 qualified full-model timing or adoption result. The launch diagnostic is now
 running; real-weight, compact-table and controlled execution tests remain queued.
+
+
+## Model dispatch and full-workload allocations reviewed
+
+The independent launch review reconciles all raw traces, graph controls, saved
+model tokens and finite 248,320-value logits. Disabled/enabled runs submit
+18,432/17,792 expert kernels in total, including startup. The enabled run
+captures 50 IQ2_XS fused nodes and submits 640 through replay; disabled submits
+none. All eight retrieval responses and first logits match their references.
+These are submission counts, not per-request active groups or GPU timing.
+Evidence: `expert-launch-trace-v1/results-review.json`.
+
+The complete 76-request continuation allocation audit now matches startup
+budgets and all observed per-request borrowed mappings across the four legs.
+Requests 4/5 in each leg read entirely through verifier windows, so no prompt
+buffer loan is expected: complete read counts, prefix position and refill
+completion prove this. The original strict retrieval auditor is unchanged.
+Eight host positive/negative controls pass. Evidence:
+`iq2xs-workload-v1/reviews/allocation.json`. Matching allocation counts do not
+prove equal expert identities and do not resolve the failed task/token gates.
+
+The real-weight probe's 90 recorded slices were independently compared against
+the GGUF and native-expert index: all 47,769,600 copied bytes match across 30
+experts in ten layers. `iq2xs-realweights-v1/provenance-review.json` covers only
+those slices; actual GPU parity is still pending and activations are synthetic.

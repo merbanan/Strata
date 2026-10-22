@@ -99,8 +99,8 @@
           "text": "Review 16 model retrieval requests, first logits and corrected allocation traces; these pass."
         },
         {
-          "status": "Running",
-          "text": "Verify actual model launches and graph replays, separating capture counts from execution counts and active groups."
+          "status": "Complete",
+          "text": "Independently verify model dispatch: 640 fused submissions through graph replay when enabled, zero when disabled; all eight retrieval outputs/reference logits match. Counts do not establish timing or active groups."
         },
         {
           "status": "Queued",
