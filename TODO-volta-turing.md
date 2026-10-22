@@ -161,11 +161,14 @@ are in bench/volta-turing/k8v4-stage.md.
   memory before READY; a third selected 2048-token MMQ chunks and was stopped
   as wrong coverage. The fourth reached the required fused layout but exhausted
   sanitizer tracking memory and missed launches; it was stopped, not passed.
-  The fifth keeps that engine configuration with sanitizer synchronization
-  limit 16. A new report gate rejects internal errors/untracked launches even
-  with a zero-error summary; seven host checks pass. Exact 3071-tail coverage,
-  clean exit and complete checking remain required. Dependent queues declined
-  the failed fourth attempt and must resume after a valid sanitizer result.
+  With synchronization limit 16, the fifth completed exact 4096+3071 prefill
+  but failed during the verifier graph (553 tracking errors, watchdog release).
+  The runner omitted the existing documented ASYNC_LAUNCH instrumentation
+  option. The sixth enables it, requiring a separate one-token graph smoke
+  before the unchanged boundary request. A new report gate rejects internal
+  errors/untracked launches even with a zero-error summary; seven host checks
+  pass. Clean exit and complete checking remain required. Dependent queues
+  declined failed gates and must resume after a valid sanitizer result.
   Validate original tasks and auto planner behavior before adoption; no global
   VRAM-byte or speed claim yet.
 - [ ] Profile per-format/routed-M performance and use selective dispatch.

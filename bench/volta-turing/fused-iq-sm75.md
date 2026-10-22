@@ -303,6 +303,18 @@ context and memory settings. Full-engine memcheck has not yet passed:
   or throughput result. See NVIDIA's
   [Compute Sanitizer manual](https://docs.nvidia.com/compute-sanitizer/ComputeSanitizer/index.html)
   and the archived installed-tool `compute-sanitizer-help.txt`.
+  It completed exact chunks 4096+3071 with caps 0/5952 and returned the lent
+  buffers, but then failed in the verifier graph: exit 97, 553 internal tracking
+  errors and watchdog release of the GPU waits. It is not a sanitizer pass.
+- The sixth attempt adds the existing `STRATA_VERIFY_ASYNC_LAUNCH=1` option.
+  The earlier runner omitted this documented requirement for instrumented
+  blocking graph launches. It launches the same graph from a host thread so
+  the caller can service CPU doorbells; see `docs/DETAILS.md` and upstream
+  commit `d8684360`. The option is present in the frozen prototype binary.
+  A separate one-token graph smoke process must pass before repeating the
+  full boundary process. No graph, request or kernel coverage is removed from
+  that boundary test. Both stages retain the synchronization limit and strict
+  report checks. The final result remains pending.
 
 The fourth runner now rejects startup chunk reduction before issuing a
 request; it retains the post-request exact chunk/cap and fused-route checks.
@@ -311,7 +323,9 @@ K8V4, a 96-slot base ring and streaming threshold 3072. The smaller context
 does not establish long-context sanitizer coverage. No API error is suppressed.
 Artifacts: `fused-iq-group-tail-v1/memcheck-*-state.json`, corresponding logs,
 `memcheck-context16k-stop.json`, `memcheck-fit8k-stop.json`, and
-`memcheck-sync16-prepared.json`.
+`memcheck-sync16-prepared.json`. The fifth failure is independently classified
+in `memcheck-sync16-failure-audit.json`; the sixth inputs/commands are pinned
+by `memcheck-async-prepared.json` and its runner.
 
 `audit-memcheck.py` now requires a clean process exit, error summaries with
 zero counts, and no error/warning/incomplete-tracking diagnostics. It accepts
@@ -322,7 +336,7 @@ zero summary cannot hide another summary with errors. These are report checks;
 exact chunks, real fused/cap traces and finite outputs remain separate gates.
 Evidence: `memcheck-report-gate-validation.json`.
 
-The original and `queue-resume2` workload/tile queues declined their failed
+The original, `queue-resume2` and `queue-resume3` workload/tile queues declined their failed
 prerequisites without running their GPU suites. Workload resumption requires
 a successful sanitizer result plus the independent boundary audit. Tile tests
 follow the retrieval and full-task suite. All stages retain independent
