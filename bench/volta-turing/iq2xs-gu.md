@@ -5,8 +5,9 @@ Turing's normal mode 4 pass GPU correctness, sanitizers and reviewed repeated
 kernel timings. The clean engine build is complete; disabled logits match the
 installed reference. All 16 enabled/disabled retrieval requests also pass
 with exact logits. A corrected traced run now also passes independent
-retrieval/allocation review; full continuations are running. Neither proposal
-is installed or adopted.
+retrieval/allocation review. All 76 continuation requests are now independently
+reviewed: four warmups qualify and all 72 substantive task responses fail.
+Exact-continuation timing qualification declined. Neither proposal is adopted.
 
 ## Measured reason to investigate
 
@@ -302,3 +303,26 @@ The first baseline and first candidate task reviews are complete. At the
 pending independent reviews, three warmups pass and 37 substantive responses
 fail the requested tasks (`reviews/progress-7.json`). These failures do not
 establish a candidate-specific regression. No feature has been adopted.
+
+
+## Completed continuation review (2026-10-22)
+
+`iq2xs-workload-v1/reviews/qualification.json` verifies all 76 original requests,
+raw emitted tokens, saved responses and applicable protocol/prefill traces.
+There are no pending manual reviews. Each arm has two passing warmups and
+36 failed substantive responses. Invalid/incomplete code and background-only
+answers remain failures; the original cache modules also fail the independent
+expiration-boundary check.
+
+`reviews/divergence-complete.json` compares the complete saved token vectors:
+no substantive task is identical across all four legs. Baseline repeats match
+on 4/18 tasks, candidate repeats on 1/18, and the two cross-arm pairs match on
+2/18 and 3/18. Prefix reuse matches across all four legs for all 18 tasks.
+This does not isolate a fusion defect: asynchronous placement, measured draft
+costs and deferred CPU decisions remain uncontrolled in this original run.
+The baseline QSA FP16 storage issue is separately under investigation.
+
+The historical timing runner declined the exact-continuation/prefix gate at
+`run-performance-resume1.py:95`; its trace is preserved. There is no new
+qualified full-model timing or adoption result. The launch diagnostic is now
+running; real-weight, compact-table and controlled execution tests remain queued.

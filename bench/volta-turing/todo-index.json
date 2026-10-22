@@ -1,0 +1,850 @@
+{
+  "updated": "2026-10-22",
+  "implementation_archive": "TODO-volta-turing-history-20261022.md",
+  "implementation_sha256": "c81c3509f923e54cc04b686df418e401342e4173ade0aa5e1194507371bbdc6b",
+  "benchmark_archive": "../Strata-data/bench/2026-10-21-volta-turing/TODO-history-20261022.md",
+  "benchmark_sha256": "4d23d39596ae67e5d6f3d7cc251dae3f7d79ee3d10f799cee81e0508e65df68b",
+  "original_implementation_entries": 110,
+  "original_benchmark_entries": 31,
+  "numbered_tasks": 22,
+  "numbered_subtasks": 122,
+  "groups": [
+    {
+      "title": "QSA FP16 correctness \u2014 highest priority",
+      "source_items": [
+        1,
+        70,
+        83
+      ],
+      "benchmark_items": [
+        18
+      ],
+      "subtasks": [
+        {
+          "status": "Built",
+          "text": "Correct the halving scorer's pooled-key reads; preserve FP32 behavior and FP32 tail keys. CUDA sm70/sm75 builds pass; HIP remains untested."
+        },
+        {
+          "status": "Queued",
+          "text": "Reproduce the original wrong-storage result and verify eight original/fallback/corrected control arms."
+        },
+        {
+          "status": "Queued",
+          "text": "Check exact scores/top-k IDs, causal tails, guards, changed-input graph replay and memcheck/racecheck/synccheck."
+        },
+        {
+          "status": "Queued",
+          "text": "Compare corrected halving against the FP16-aware fallback on all 76 original task requests, with fixed draft costs and controlled adaptation."
+        },
+        {
+          "status": "Queued",
+          "text": "Measure scorer-only and scorer-plus-selection timing in FP32/FP16 ABBA; the harness builds and seven host parser checks pass."
+        },
+        {
+          "status": "Pending",
+          "text": "Review task quality, per-request allocations and production-policy performance before committing and adopting the correction."
+        }
+      ]
+    },
+    {
+      "title": "Reliable baseline and task qualification",
+      "source_items": [
+        58
+      ],
+      "benchmark_items": [
+        6
+      ],
+      "subtasks": [
+        {
+          "status": "Complete",
+          "text": "Review the IQ2 continuation run: all 76 requests reviewed; four warmups pass, all 72 substantive responses fail qualification."
+        },
+        {
+          "status": "Pending",
+          "text": "Diagnose failed edits, incomplete code and ignored instructions in both baseline and candidate; preserve the original prompts, caps and failures."
+        },
+        {
+          "status": "Pending",
+          "text": "Distinguish the QSA storage defect from asynchronous residency, learned draft costs and deferred CPU decisions."
+        },
+        {
+          "status": "Pending",
+          "text": "Establish repeatable tokens, prefix reuse, acceptance and work counts under controlled execution; then test normal serving behavior separately."
+        },
+        {
+          "status": "Pending",
+          "text": "Qualify baseline and candidate independently before reporting successful-task throughput; retain meaningful independent tests, not only generated tests."
+        }
+      ]
+    },
+    {
+      "title": "IQ2_XS gate/up fusion qualification \u2014 C03",
+      "source_items": [
+        80
+      ],
+      "benchmark_items": [
+        13
+      ],
+      "subtasks": [
+        {
+          "status": "Complete",
+          "text": "Audit missing format/shape paths, real pack formats, existing SwiGLU/Q8 fusion and VRAM/PCIe dispatch."
+        },
+        {
+          "status": "Complete",
+          "text": "Build opt-in mode-8 and normal-mode-4 variants; synthetic parity, changed-input graphs, sanitizers and repeated kernel timings pass."
+        },
+        {
+          "status": "Complete",
+          "text": "Review 16 model retrieval requests, first logits and corrected allocation traces; these pass."
+        },
+        {
+          "status": "Running",
+          "text": "Verify actual model launches and graph replays, separating capture counts from execution counts and active groups."
+        },
+        {
+          "status": "Queued",
+          "text": "Test original/v2/compact kernels with weights from 30 real experts across ten IQ2_XS layers; activations remain synthetic."
+        },
+        {
+          "status": "Queued",
+          "text": "Run the blocking-adaptation/fixed-PCIe diagnostic; retain its remaining draft-policy/deferred-CPU confounds."
+        },
+        {
+          "status": "Held",
+          "text": "The original full-workload timing gate declined because continuations differ. Requalify under the corrected baseline before a new performance comparison."
+        },
+        {
+          "status": "Pending",
+          "text": "Adopt fusion only after controlled full-model quality, matched budgets and repeatable accepted-token throughput pass."
+        }
+      ]
+    },
+    {
+      "title": "Compact IQ2 storage and compatible layouts \u2014 C04/C25",
+      "source_items": [
+        49,
+        81,
+        102
+      ],
+      "benchmark_items": [
+        13,
+        16
+      ],
+      "subtasks": [
+        {
+          "status": "Complete",
+          "text": "Audit revised upstream IQ2 arithmetic and storage expansion; expanding the entire set adds about 12.34 GiB, not a measured resident allocation."
+        },
+        {
+          "status": "Built",
+          "text": "Implement the lossless compact IQ2_XS codebook with original packed weights; CPU exhaustive checks and sm70/sm75 builds pass."
+        },
+        {
+          "status": "Queued",
+          "text": "Finish GPU parity, changed-input graphs, sanitizers and compact-versus-v2 timing."
+        },
+        {
+          "status": "Pending",
+          "text": "If the compact table wins, integrate separately and measure cache residency, full inference and acceptance."
+        },
+        {
+          "status": "Pending",
+          "text": "Screen the revised compatible IQ2 nibble layout selectively; preserve decoded weights, scale/SiLU boundaries and reduction order. Keep the first incompatible revision deferred."
+        }
+      ]
+    },
+    {
+      "title": "Measurement and correctness requirements \u2014 apply to every candidate",
+      "source_items": [
+        52,
+        53,
+        55,
+        56,
+        57,
+        59,
+        76,
+        98,
+        100,
+        101
+      ],
+      "benchmark_items": [
+        8,
+        9,
+        10,
+        25,
+        27
+      ],
+      "subtasks": [
+        {
+          "status": "Pending",
+          "text": "Evaluate per-window acceptance/dispatch tracing from Strata #3631 and pinned-stage per-stream fences from #3483."
+        },
+        {
+          "status": "Ongoing",
+          "text": "Use same-day ABBA comparisons at short/4K/16K/32K with identical model, chunks, ring, residency, memory budgets and prefix state."
+        },
+        {
+          "status": "Ongoing",
+          "text": "Record accepted tokens/s, prefill/TTFT, draft/verify time, acceptance, PCIe traffic, graph/temporary bytes, cache slots, clocks and variance; separate profiling from serving timing."
+        },
+        {
+          "status": "Ongoing",
+          "text": "Check exact bytes where expected; otherwise teacher-forced scores/KL and task quality. Run kv1188 and appropriate CUDA sanitizers."
+        },
+        {
+          "status": "Pending",
+          "text": "Extend coverage to real activation outliers, FP64 scale references, FP32 attention accumulation, fixed reduction order, accepted recurrent-state tails and request-local sampling."
+        },
+        {
+          "status": "Ongoing",
+          "text": "Test expert IDs above 255, empty/ragged groups, owner/version changes, counter wrap, WMMA alignment, poisoned scratch, shuffled pages and changing-input replay."
+        },
+        {
+          "status": "Ongoing",
+          "text": "Distinguish cold/warm prefixes, inspect logit margins, preserve natural EOS and test threshold/chunk/capacity boundaries."
+        },
+        {
+          "status": "Ongoing",
+          "text": "Build touched CUDA/HIP/SYCL backends where available; explicitly record unavailable runtime/compiler coverage."
+        },
+        {
+          "status": "Ongoing",
+          "text": "Commit and locally opt in only qualified improvements, smoke-test the installed release and retain rollback/evidence. A rejected experiment is a completed investigation, not an adopted optimization."
+        }
+      ]
+    },
+    {
+      "title": "Expert dispatch by format and shape",
+      "source_items": [
+        6,
+        29,
+        30,
+        31,
+        32
+      ],
+      "benchmark_items": [
+        4,
+        7,
+        13
+      ],
+      "subtasks": [
+        {
+          "status": "Complete",
+          "text": "Run the 90-case mode-0/4/8 screen and mode-8 engine ABBA; no consistent overall decode gain was established."
+        },
+        {
+          "status": "Pending",
+          "text": "Finish the v19 default-versus-explicit-0/4/8 comparison, including mode 4's missing large-down fallback; investigate the anomalous 4K prefill result."
+        },
+        {
+          "status": "Pending",
+          "text": "Use measured production route frequencies and full-call costs to select opt-in format/shape cells; include GU/epilogue/down and input conversion costs."
+        },
+        {
+          "status": "Pending",
+          "text": "Validate numerics, teacher-forced output, acceptance and accepted tokens/s before promotion."
+        }
+      ]
+    },
+    {
+      "title": "Host transfers and KV copy work \u2014 C11\u2013C13",
+      "source_items": [
+        73,
+        88,
+        89,
+        90
+      ],
+      "benchmark_items": [
+        20
+      ],
+      "subtasks": [
+        {
+          "status": "Pending",
+          "text": "Compare mapped-host expert reads with bounded DMA during concurrent compute, including small decode misses and expert-cache displacement."
+        },
+        {
+          "status": "Pending",
+          "text": "Measure occupied-range cold-expert and QSA DMA for large contiguous runs; retain mapped gathers for fragmented/small selections and calibrate local thresholds."
+        },
+        {
+          "status": "Pending",
+          "text": "Increase small-miss copy-plan parallelism only where complete cache-resolution time improves."
+        },
+        {
+          "status": "Pending",
+          "text": "Skip KV value reads only when the values cannot be consumed; preserve alignment and unsupported-case fallbacks."
+        },
+        {
+          "status": "Pending",
+          "text": "Consider omitting host-KV zeroing only after proving reads follow writes across padding, reuse and graph replay."
+        },
+        {
+          "status": "Pending",
+          "text": "Audit pin registration, initialization, stream ownership and fences; reuse existing staged prefill and chunk balancing."
+        }
+      ]
+    },
+    {
+      "title": "KV cache policy and bounded history \u2014 C14/C15",
+      "source_items": [
+        74,
+        91,
+        92
+      ],
+      "benchmark_items": [
+        21,
+        22
+      ],
+      "subtasks": [
+        {
+          "status": "Pending",
+          "text": "Compare probe-LRU under shared-prefix reuse and disjoint-context churn while retaining K8V4 encoded storage."
+        },
+        {
+          "status": "Pending",
+          "text": "Compare independent draft/target hot-cache budgets at fixed total memory; measure hit rates, PCIe bytes, acceptance and expert displacement."
+        },
+        {
+          "status": "Pending",
+          "text": "Test bounded history staging with checked softmax/LSE merging, FP16 draft history and encoded target history, including window boundaries."
+        }
+      ]
+    },
+    {
+      "title": "PLE and temporary-memory lifetimes \u2014 C17",
+      "source_items": [
+        54,
+        94
+      ],
+      "benchmark_items": [
+        10,
+        23
+      ],
+      "subtasks": [
+        {
+          "status": "Pending",
+          "text": "Profile PLE separately; verify the actual bottleneck rather than assuming the HDD issue reported upstream."
+        },
+        {
+          "status": "Pending",
+          "text": "Test PLE convolution without padded history."
+        },
+        {
+          "status": "Pending",
+          "text": "Release HC projection temporaries after last use; measure recovered cache slots or larger usable prompt chunks."
+        },
+        {
+          "status": "Pending",
+          "text": "Verify SiLU, state commit, empty/null slots and graph lifetimes for both changes."
+        }
+      ]
+    },
+    {
+      "title": "Verifier and adaptive drafting \u2014 C19/C20/C22",
+      "source_items": [
+        64,
+        96,
+        97,
+        99
+      ],
+      "benchmark_items": [
+        24,
+        25,
+        31
+      ],
+      "subtasks": [
+        {
+          "status": "Pending",
+          "text": "Profile versioned per-layer QSA key reuse and bounded staging; existing multi-query reuse must not be duplicated."
+        },
+        {
+          "status": "Pending",
+          "text": "Measure compact recurrent state and bounded expert leases, including persistent bytes and ownership/version changes."
+        },
+        {
+          "status": "Pending",
+          "text": "Profile grouped expert projections and mixed dense fusion only where Strata has an uncovered operation."
+        },
+        {
+          "status": "Pending",
+          "text": "Screen grouped draft-output Q8 warps, whole-batch HC and reuse of canonical HC RMS statistics."
+        },
+        {
+          "status": "Pending",
+          "text": "Identify specific width/chain-policy gaps with per-window traces, structured outputs, changing context and accepted-token costs."
+        },
+        {
+          "status": "Pending",
+          "text": "Require complete verifier-round improvement, including target work, sampling and state commit; do not duplicate existing adaptive drafting."
+        }
+      ]
+    },
+    {
+      "title": "Dense weight reuse for T=9\u201316 \u2014 C01",
+      "source_items": [
+        66,
+        78
+      ],
+      "benchmark_items": [
+        11
+      ],
+      "subtasks": [
+        {
+          "status": "Conditional",
+          "text": "Proceed only if lookup profiling shows material T=9\u201316 work."
+        },
+        {
+          "status": "Pending",
+          "text": "Decode each packed weight once while preserving independent FP32 accumulators and each row's reduction order."
+        },
+        {
+          "status": "Pending",
+          "text": "Include quantization/interleave and complete pipeline costs in comparisons against group16; retain the slow large-Q5_K-head fallback."
+        },
+        {
+          "status": "Later",
+          "text": "Keep M=17\u201332 FP8/QPN8 reuse in the future-format work; do not expand verifier capacity merely to exercise a kernel."
+        }
+      ]
+    },
+    {
+      "title": "QSA prefill optimization \u2014 C06/C07",
+      "source_items": [
+        84
+      ],
+      "benchmark_items": [
+        18
+      ],
+      "subtasks": [
+        {
+          "status": "Pending",
+          "text": "After the storage correction, trace actual native scoring admission and distinguish prefill from verifier/decode routes."
+        },
+        {
+          "status": "Conditional",
+          "text": "Compare native scoring with cuBLAS plus exact top-k only on material large-prefill shapes; preserve ties and causal tails."
+        },
+        {
+          "status": "Pending",
+          "text": "Screen narrower pre-Ampere tiles and only uncovered 2\u20138-query shared-key reuse; account for corrected upstream performance attribution."
+        }
+      ]
+    },
+    {
+      "title": "Further attention tuning \u2014 C08/C09",
+      "source_items": [
+        27,
+        69,
+        71,
+        85,
+        86
+      ],
+      "benchmark_items": [
+        12
+      ],
+      "subtasks": [
+        {
+          "status": "Pending",
+          "text": "Compare register-resident PV accumulation and launch-bound relaxation separately and together for Strata's D256 attention."
+        },
+        {
+          "status": "Pending",
+          "text": "Audit register pressure/spills where shared memory already limits occupancy; avoid global launch-cap changes."
+        },
+        {
+          "status": "Pending",
+          "text": "Validate separate sm70/sm75 accumulator maps, grouped heads, strides, ragged/shuffled pages, device scratch admission and compiled-kernel fallback."
+        },
+        {
+          "status": "Conditional",
+          "text": "Treat direct Q4 code/scale arithmetic as a separate numerical experiment; preserve the adopted exact-rounding path."
+        }
+      ]
+    },
+    {
+      "title": "Chunked GDN shared-buffer design \u2014 C10",
+      "source_items": [
+        61,
+        68,
+        87
+      ],
+      "benchmark_items": [
+        19
+      ],
+      "subtasks": [
+        {
+          "status": "Pending",
+          "text": "Prototype native CUDA with no transposed-K copy, shared A/P lifetime reuse and loop-end synchronization, following the newer #1228 design."
+        },
+        {
+          "status": "Pending",
+          "text": "Verify final FP32 recurrent state across chunk boundaries and speculative commits."
+        },
+        {
+          "status": "Pending",
+          "text": "Admit by actual shared-memory capacity; test high-register variants only where occupancy is already constrained."
+        },
+        {
+          "status": "Pending",
+          "text": "Measure complete preparation, recurrence and output costs plus displaced expert-cache slots; prior 4\u20137x-slower kernels remain rejected."
+        }
+      ]
+    },
+    {
+      "title": "Graph memory and reuse \u2014 C18",
+      "source_items": [
+        41,
+        42,
+        43,
+        44,
+        45,
+        46,
+        95
+      ],
+      "benchmark_items": [
+        15
+      ],
+      "subtasks": [
+        {
+          "status": "Partial",
+          "text": "Extend measured solo-graph lifetimes/free-memory deltas to batch graphs and arena ownership; distinguish owned bytes from allocator deltas."
+        },
+        {
+          "status": "Complete",
+          "text": "Prototype and test bounded solo-graph LRU. Caps 2/3 were not adopted; archive their exact patches, quality results and regressions."
+        },
+        {
+          "status": "Pending",
+          "text": "Explore same-size updates, common padded topology and batch reuse; direct cross-size updates failed CUDA's equal-node-count requirement."
+        },
+        {
+          "status": "Pending",
+          "text": "Include recurring preparation/recapture cost in lookup-policy measurements."
+        },
+        {
+          "status": "Pending",
+          "text": "Test padded CPU/GDN/KV state, mixed prefill/decode, concurrency, eviction/recreation, changing inputs and low-memory fallback."
+        },
+        {
+          "status": "Pending",
+          "text": "Measure full rounds and graph-padding inflation separately from draft time."
+        },
+        {
+          "status": "Conditional",
+          "text": "Seek lookup-16 memory savings without shrinking prompt chunks or raising reserve; 75\u2013100 MiB remains a target, not an established production saving."
+        }
+      ]
+    },
+    {
+      "title": "Existing T=5\u20138 wide kernels \u2014 hold promotion",
+      "source_items": [
+        13,
+        14,
+        15,
+        16,
+        17,
+        18,
+        19,
+        20,
+        21
+      ],
+      "benchmark_items": [
+        3,
+        5,
+        11
+      ],
+      "subtasks": [
+        {
+          "status": "Complete",
+          "text": "Port wide kernels, fused quantization/interleave and scratch sizing; add opt-in sm70/sm75 overrides and host dispatch tests."
+        },
+        {
+          "status": "Complete",
+          "text": "Run 33-shape parity/sanitizer/timing and real dense/head profiling; select measured cells and retain slow-head fallbacks."
+        },
+        {
+          "status": "Complete",
+          "text": "Run lookup-8/16 and speculative full-engine ABBA; no repeatable overall gain was established."
+        },
+        {
+          "status": "Held",
+          "text": "Qualify group16-versus-wide arithmetic and successful edit/code/prose tasks before reopening promotion; preserve the isolated archived patch."
+        }
+      ]
+    },
+    {
+      "title": "Fused IQ prefill and scratch \u2014 hold promotion / C05",
+      "source_items": [
+        33,
+        34,
+        35,
+        36,
+        37,
+        38,
+        39,
+        40,
+        82
+      ],
+      "benchmark_items": [
+        14
+      ],
+      "subtasks": [
+        {
+          "status": "Complete",
+          "text": "Build the detached v14 port with the IQ2_S admission fix; kernel references and sanitizers pass, but this is not adopted."
+        },
+        {
+          "status": "Complete",
+          "text": "Review teacher-forced scoring and all 76 tasks; numerical differences and failed substantive tasks remain recorded."
+        },
+        {
+          "status": "Held",
+          "text": "Resolve model quality and match actual MMQ/fused chunks, ring, residency, per-request loans and prefix reuse before interpreting timing."
+        },
+        {
+          "status": "Partial",
+          "text": "Group-tail scratch prototype passes boundary logits and instrumented full-engine memcheck; qualify normal planner behavior, long contexts and race safety before adoption."
+        },
+        {
+          "status": "Partial",
+          "text": "Review existing auto/64/128 tile results; use measured per-format/routed-M dispatch rather than a global override."
+        },
+        {
+          "status": "Conditional",
+          "text": "Explore consistent smaller-block layouts and a one-stage barrier design; a THREADS-only edit does not cover all rows."
+        },
+        {
+          "status": "Pending",
+          "text": "Check PF_DM_GROUP combine order and scratch/grouping interactions."
+        },
+        {
+          "status": "Conditional",
+          "text": "Screen narrow padded tactics and large-M Q5_K/Q6_K dequantize-plus-cuBLAS, including physical layout, scratch limits and threshold neighbors."
+        },
+        {
+          "status": "Held",
+          "text": "Require a full-engine prefill win; isolated layer gains do not qualify promotion."
+        }
+      ]
+    },
+    {
+      "title": "Router/Q8 fusion \u2014 hold promotion / C02",
+      "source_items": [
+        67,
+        79
+      ],
+      "benchmark_items": [
+        17
+      ],
+      "subtasks": [
+        {
+          "status": "Complete",
+          "text": "Audit QFUSE/QFUSE_HC/QDEDUP and prototype exact original-selection fusion for single/multi-token routing with the correct expert Q8 buffer."
+        },
+        {
+          "status": "Complete",
+          "text": "Reject sorted-list selection for measured slowdown and winner-only exponentials for changed routes/weights; preserve full-softmax arithmetic."
+        },
+        {
+          "status": "Held",
+          "text": "Finish relevant QFUSE/QDEDUP interaction coverage only if a new variant warrants reopening; preserve skip rules, rounding and nonfinite/tie behavior."
+        },
+        {
+          "status": "Held",
+          "text": "Requalify task outputs and acceptance under controlled execution; measure CPU-doorbell delay and complete windows before another adoption attempt."
+        }
+      ]
+    },
+    {
+      "title": "V100/Volta qualification \u2014 requires hardware / C25",
+      "source_items": [
+        22,
+        47,
+        48,
+        50,
+        75
+      ],
+      "benchmark_items": [
+        16
+      ],
+      "subtasks": [
+        {
+          "status": "Hardware",
+          "text": "Run V100 separately before selecting sm70 defaults; also qualify T4 independently of the 2060 SUPER."
+        },
+        {
+          "status": "Pending",
+          "text": "Compare merbanan/v100 e24e2b2e, upstream PF_WMMA2 and QPN register-fragment scheduling as design references."
+        },
+        {
+          "status": "Pending",
+          "text": "Extend the Q2 approach to IQ4_NL down and IQ2_S gate/up, then IQ3 if useful; retain small-batch DP4A."
+        },
+        {
+          "status": "Pending",
+          "text": "Validate lossless prepacking/LUT permutations and inverse mappings while retaining original GGUF bytes and source licenses."
+        },
+        {
+          "status": "Hardware",
+          "text": "Measure registers, spills, parity/numerics, occupancy and full inference on V100; compilation alone is insufficient."
+        }
+      ]
+    },
+    {
+      "title": "Conditional long-context, format and multi-GPU work \u2014 C16/C26\u2013C28",
+      "source_items": [
+        72,
+        93,
+        103,
+        104,
+        105
+      ],
+      "benchmark_items": [
+        22,
+        26
+      ],
+      "subtasks": [
+        {
+          "status": "Conditional",
+          "text": "Beyond 256K, test partitioned exact top-k, draft/target RoPE/capacity agreement and speculation at boundaries; do not raise capacity inside a speed A/B."
+        },
+        {
+          "status": "Future formats",
+          "text": "Evaluate native packed FP8/NVFP4/MXFP4 linear/MoE independently on sm70/sm75 with scale precision and fallbacks preserved; do not requantize this benchmark to claim a win."
+        },
+        {
+          "status": "Future formats",
+          "text": "Evaluate M=17\u201332 FP8/QPN8 reuse only for an appropriate checkpoint/workload."
+        },
+        {
+          "status": "Multi-GPU",
+          "text": "Test shared pinned KV for replicated heads, query-row partitioning and compact-index all-gather."
+        },
+        {
+          "status": "Multi-GPU",
+          "text": "Test root-only/banked index staging and lossless FP16 peer-partial packing, including ownership, epochs, mixed-request fallback and collective costs."
+        },
+        {
+          "status": "Future attention",
+          "text": "Independently build/load/test worker-selected sm75 FA2 and sm70 counterparts with capability-aware fallback; this does not replace current quantized sparse attention."
+        }
+      ]
+    },
+    {
+      "title": "Deferred research \u2014 reopen only with new evidence / D01\u2013D04",
+      "source_items": [
+        51,
+        60,
+        62,
+        63,
+        77,
+        106,
+        107,
+        108,
+        109
+      ],
+      "benchmark_items": [
+        29,
+        30,
+        31
+      ],
+      "subtasks": [
+        {
+          "status": "Deferred",
+          "text": "Resident producer/consumer expert pools, including smaller worker pools; explain how to overcome the measured slowdown."
+        },
+        {
+          "status": "Deferred",
+          "text": "Expanded IQ3 register-pair packets with 43% more weight traffic, and the acceptance-changing first IQ2 expansion."
+        },
+        {
+          "status": "Deferred",
+          "text": "The losing IQ3 pair-reader without a new measured reason."
+        },
+        {
+          "status": "Deferred",
+          "text": "Deeper dense prefetch, byte-expanded weights and uniform format specialization; lower registers alone are insufficient."
+        },
+        {
+          "status": "Deferred",
+          "text": "HC tile/row partition with transport, the rejected fused indexer, larger custom all-reduce buffers and OOM-prone chunks."
+        },
+        {
+          "status": "Deferred",
+          "text": "Layer-major prefill rewrites until new copy-wait profiles justify them; reconcile historical T4 percentages with exact runs."
+        },
+        {
+          "status": "Deferred",
+          "text": "Generic BF16 tensor-core caching because of memory cost."
+        },
+        {
+          "status": "Deferred",
+          "text": "Lossy routing/tail skipping; inspect the near-full-cache regression before reconsideration."
+        }
+      ]
+    },
+    {
+      "title": "Completed foundation and adopted improvements",
+      "source_items": [
+        2,
+        3,
+        4,
+        5,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12,
+        23,
+        24,
+        25,
+        26,
+        28,
+        65,
+        110
+      ],
+      "benchmark_items": [
+        1,
+        2,
+        12,
+        28
+      ],
+      "subtasks": [
+        {
+          "status": "Complete",
+          "text": "Investigate Strata and 1Cat code/history plus open/closed PRs/issues; retain source snapshots, discussions and relevant open diffs."
+        },
+        {
+          "status": "Complete",
+          "text": "Create the isolated v20 worktree, resolve GPU access and record hardware/clocks/model/configuration/revisions."
+        },
+        {
+          "status": "Complete",
+          "text": "Establish the same-day RTX 2060 SUPER baseline and retain raw evidence, build/resource logs and validation reports."
+        },
+        {
+          "status": "Complete",
+          "text": "Build sm75 engine/matvec tests, compile the changed matvec unit for sm70, pass dispatch/invalid-TMAX tests and prepare GPU runners."
+        },
+        {
+          "status": "Adopted",
+          "text": "Exact-rounding K8V4 register staging, including parity, graph/sanitizer, retrieval/logit, full-engine timing and installed-release smoke checks; local opt-in remains enabled."
+        },
+        {
+          "status": "Complete",
+          "text": "Fix the INT8 V2T warp race; validate both switch states, all-format regression and sm70/sm75/sm80 compilation. V2T remains opt-in without a claimed engine speedup."
+        },
+        {
+          "status": "Adopted",
+          "text": "Immutable MTP expert-snapshot reuse with ownership/reload/failure checks, exact restoration/graphs, retrieval/logit ABBA, matched-budget timing and installed-release smoke checks."
+        },
+        {
+          "status": "Complete",
+          "text": "Test separate eager snapshot allocation; reject local adoption because end-to-end startup gains did not repeat. Preserve the patch and results."
+        }
+      ]
+    }
+  ]
+}

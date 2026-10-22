@@ -1,689 +1,195 @@
-# Volta and Turing inference work
+# Volta and Turing inference: numbered backlog
 
-Original comparison baseline: v19 `e3a32c9c`. Adopted local attention release:
-`703eab3d` with `STRATA_PA_K8V4_STAGE=1`; INT8 race fix committed `fd6fa044`.
-Worktree: Strata-v20, branch v20. Start on the
-RTX 2060 SUPER (sm_75, 8 GiB); test T4 and V100 separately later. Keep new
-paths opt-in until correctness and same-day end-to-end measurements pass.
+Updated 2026-10-22. This is the authoritative task list, sorted by correctness, current RTX 2060 SUPER work, measured opportunity, and hardware dependencies. Parent order is research priority, not the order of already-running jobs. No running test was cancelled or reprioritized by this edit.
 
-This is the implementation backlog. The matching [benchmark TODO](../Strata-data/bench/2026-10-21-volta-turing/TODO.md)
-tracks execution and evidence; the [optimization ledger](../Strata-data/bench/optimizations_tests.md)
-indexes both. Unchecked items include conditional investigations, not promises
-that every proposed port will help. Deferred ideas require new evidence first.
+Status: **Built** = host/compiler checks only; **Queued/Running** = GPU work outstanding; **Partial/Pending** = incomplete; **Held** = current candidate failed promotion gates; **Conditional/Hardware/Future/Deferred** = retained scope with an explicit prerequisite; **Complete** = stated investigation finished; **Adopted** = qualified and locally enabled. Ongoing requirements apply to every new candidate.
 
-## Priority correctness follow-up
+Previous lists had 110 implementation entries and 31 benchmark entries, including duplicates and stale statuses. Every entry is mapped in [the migration index](bench/volta-turing/todo-index.json). Detailed evidence, source links and historical caveats remain in [implementation history](TODO-volta-turing-history-20261022.md) and [benchmark history](../Strata-data/bench/2026-10-21-volta-turing/TODO-history-20261022.md). The [execution queue](../Strata-data/bench/2026-10-21-volta-turing/TODO.md) tracks running/queued work. Existing C01–C28/D01–D04/L01 references remain valid through the index and histories.
 
-- [ ] Fix and qualify the Turing QSA halving scorer with FP16 pooled-key storage
-  before further promotion. The local IDX_F16 option writes half values, while
-  the default sm75 halving scorer reads float4. A CPU byte-layout witness
-  confirms the mismatch; the corrected storage-aware variant builds for sm70
-  and sm75 and links into a separate clean engine. Original/fallback/corrected
-  GPU controls, changed-input graph replay and sanitizers are queued. No
-  runtime quality recovery, speedup or adoption claim yet. See
-  [QSA FP16 investigation](bench/volta-turing/qsa-halve-f16.md).
-  Full 76-request qualification is prepared behind independent kernel review:
-  corrected halving versus the existing FP16-aware fallback, with fixed draft
-  costs, swaps/deferred CPU off and fixed PCIe fraction. All original tasks and
-  caps remain. Host policy/reviewer controls pass; model results remain pending.
+1. **QSA FP16 correctness — highest priority**
 
-## Execution status
+   1. **Built:** Correct the halving scorer's pooled-key reads; preserve FP32 behavior and FP32 tail keys. CUDA sm70/sm75 builds pass; HIP remains untested.
+   2. **Queued:** Reproduce the original wrong-storage result and verify eight original/fallback/corrected control arms.
+   3. **Queued:** Check exact scores/top-k IDs, causal tails, guards, changed-input graph replay and memcheck/racecheck/synccheck.
+   4. **Queued:** Compare corrected halving against the FP16-aware fallback on all 76 original task requests, with fixed draft costs and controlled adaptation.
+   5. **Queued:** Measure scorer-only and scorer-plus-selection timing in FP32/FP16 ABBA; the harness builds and seven host parser checks pass.
+   6. **Pending:** Review task quality, per-request allocations and production-policy performance before committing and adopting the correction.
 
-- [x] Investigate local code/history and upstream open/closed PRs and issues.
-- [x] Create an isolated v20 worktree and this complete work list.
-- [x] Resolve GPU access: host execution works after the user changed the setting.
-- [x] Establish a same-day RTX 2060 SUPER inference baseline (4K/16K ABBA).
-- [ ] Compare default expert dispatch with explicit modes 0, 4 and 8 on v19.
-  Explicit mode 4 disables the default large-down fallback: measure it separately.
-- [x] Record hardware, clocks, memory, build revision and exact configuration.
+2. **Reliable baseline and task qualification**
 
-First implementation validation, 2026-10-21:
+   1. **Complete:** Review the IQ2 continuation run: all 76 requests reviewed; four warmups pass, all 72 substantive responses fail qualification.
+   2. **Pending:** Diagnose failed edits, incomplete code and ignored instructions in both baseline and candidate; preserve the original prompts, caps and failures.
+   3. **Pending:** Distinguish the QSA storage defect from asynchronous residency, learned draft costs and deferred CPU decisions.
+   4. **Pending:** Establish repeatable tokens, prefix reuse, acceptance and work counts under controlled execution; then test normal serving behavior separately.
+   5. **Pending:** Qualify baseline and candidate independently before reporting successful-task throughput; retain meaningful independent tests, not only generated tests.
 
-- [x] Build the sm_75 engine and mmvq_il_parity with CUDA 12.4.
-- [x] Compile the changed native_mmvq translation unit for sm_70.
-- [x] Pass all three dispatch CTests and reject invalid TMAX values 0, 9 and text.
-- [x] Save configs, build logs, resource reports and validation.json under
-  Strata-data/bench/2026-10-21-volta-turing.
-- [x] Execute GPU parity, compute-sanitizer and repeated kernel timing on the
-  RTX 2060 SUPER: 33 shapes, T=1..8 pass; memcheck reports zero errors. Logs:
-  Strata-data/bench/2026-10-21-volta-turing/20261021-215005-micro.
-  Initial device-access failures are resolved. HIP/SYCL builds remain pending.
+3. **IQ2_XS gate/up fusion qualification — C03**
 
-To reproduce the archived wide experiment, apply its saved patch in an isolated
-worktree first, then use `run-2060.sh micro`, `modes` and `wide` as described in
-bench/volta-turing/README.md. Current attention validation commands and evidence
-are in bench/volta-turing/k8v4-stage.md.
+   1. **Complete:** Audit missing format/shape paths, real pack formats, existing SwiGLU/Q8 fusion and VRAM/PCIe dispatch.
+   2. **Complete:** Build opt-in mode-8 and normal-mode-4 variants; synthetic parity, changed-input graphs, sanitizers and repeated kernel timings pass.
+   3. **Complete:** Review 16 model retrieval requests, first logits and corrected allocation traces; these pass.
+   4. **Running:** Verify actual model launches and graph replays, separating capture counts from execution counts and active groups.
+   5. **Queued:** Test original/v2/compact kernels with weights from 30 real experts across ten IQ2_XS layers; activations remain synthetic.
+   6. **Queued:** Run the blocking-adaptation/fixed-PCIe diagnostic; retain its remaining draft-policy/deferred-CPU confounds.
+   7. **Held:** The original full-workload timing gate declined because continuations differ. Requalify under the corrected baseline before a new performance comparison.
+   8. **Pending:** Adopt fusion only after controlled full-model quality, matched budgets and repeatable accepted-token throughput pass.
 
-## 1. Interleaved dense matvecs at five through eight columns (first implementation)
+4. **Compact IQ2 storage and compatible layouts — C04/C25**
 
-- [x] Port upstream 75fabbd94152 wide kernels to v19, preserving default dispatch.
-- [x] Extend fused quantization, interleave validation and verifier scratch sizing.
-- [x] Allow opt-in wide row overrides for sm_70/sm_75; do not copy Blackwell tuning.
-- [x] Add device-free tests for default dispatch, wide overrides and their disable switch.
-- [x] Prepare GPU parity, pipeline timing, compute-sanitizer and engine A/B runners.
-- [x] Check bitwise parity for T=1..8, all supported formats, odd output rows,
-  and both fused quantization and standalone interleave.
-- [x] Benchmark real dense/head shapes, including interleave cost, and inspect
-  register usage/spills. Generate sm_75 tables from repeated measurements.
-  Two runs select 52/100 wide cells at a conservative 3% threshold against
-  group16; the Q5_K head stays off because it is slower. Selection is opt-in in
-  configs/wide-tuned.json, generated with bench/volta-turing/select-wide.py.
-  Compile inspection: 40 wide sm_75 instances have zero local/stack bytes;
-  one-row variants use 80–168 registers, two-row variants 116–248. This is not
-  a runtime measurement; high register use still needs occupancy/timing checks.
-- [x] Execute lookup windows 8/16 and normal speculative decode end to end:
-  16 requests in ABBA order, saved under wide-lookup-abba-2208. No repeatable
-  overall throughput win; leave the measured table opt-in.
-  The five modified wide source files and their patch are preserved under
-  `Strata-data/bench/2026-10-21-volta-turing/wide-experiment-preserved/`; the patch
-  applies cleanly to v19. They have been removed from the active v20 source so
-  attention can be built, benchmarked and committed independently.
-- [ ] Qualify model numerics and task quality before promoting wide kernels.
-  All eight edit responses across both arms omit the requested change. Candidate
-  fresh-code tests pass, but baseline/candidate outputs differ and this small
-  sample is not a quality qualification.
-  The baseline uses STRATA_MMVQ_GROUP=16 (different summation order); exact-layout
-  kernel parity alone cannot establish baseline engine equivalence. Microbench
-  timing now selects group16 separately from its exact-layout parity reference.
-- [ ] Measure V100 separately before adding sm_70 defaults.
+   1. **Complete:** Audit revised upstream IQ2 arithmetic and storage expansion; expanding the entire set adds about 12.34 GiB, not a measured resident allocation.
+   2. **Built:** Implement the lossless compact IQ2_XS codebook with original packed weights; CPU exhaustive checks and sm70/sm75 builds pass.
+   3. **Queued:** Finish GPU parity, changed-input graphs, sanitizers and compact-versus-v2 timing.
+   4. **Pending:** If the compact table wins, integrate separately and measure cache residency, full inference and acceptance.
+   5. **Pending:** Screen the revised compatible IQ2 nibble layout selectively; preserve decoded weights, scale/SiLU boundaries and reduction order. Keep the first incompatible revision deferred.
 
-## 2. K8V4 prompt attention with register staging
+5. **Measurement and correctness requirements — apply to every candidate**
 
-- [x] Extend the Turing register-staged INT8 attention path to K8V4.
-- [x] Preserve existing Q4-to-FP16 conversion/rounding for the first candidate.
-- [x] Make selection opt-in; check parity and run attention microbenchmarks.
-  `STRATA_PA_K8V4_STAGE=1` selects the new path on actual sm75 only. The
-  synthetic screen covers 33/1500/4096/16384/32768-token contexts, shuffled
-  pages, ragged/empty selections and changed-input graphs. A missing warp
-  barrier found by racecheck was fixed; corrected memcheck and racecheck pass
-  with zero errors/warnings. The first arithmetic prototype improved engine
-  prefill 4.0/6.8/8.1% at 4K/16K/32K but failed numerical qualification (32K
-  first-token KL 0.214). It is not adopted. A correction preserves the original
-  sequential scale FMAs: all ten initial synthetic comparisons have zero
-  numerical difference. The rebuilt correction passes all 12 byte-for-byte
-  comparisons against v19 and the disabled path, including full 4K-query prefill.
-  Memcheck/racecheck/synccheck pass at 4096/33 with graph replay and an empty
-  selection. Corrected model-quality ABBA passes all 16 retrieval tasks with
-  byte-identical first-token logits (248,320 values) across every arm and repeat
-  at 1K/4K/16K/32K; all KL values are zero. The isolated attention-only build passes the same logits and the completed
-  performance ABBA improves 16K/32K prefill by 6.46%/6.84%;
-  see [K8V4 notes](bench/volta-turing/k8v4-stage.md).
-- [x] Test short/4k/16k/32k prompts, occupancy and full-engine prefill/TTFT.
-  Short-context gains are inconclusive; first-loan stalls confound the initial
-  4K timing (L01). CUDA reports theoretical occupancy 12.5% → 25%; hardware
-  counters were unavailable. A completed real model request records 12 direct
-  candidate launches. Committed as `703eab3d`; locally adopted for IQ3_XXS
-  through `Strata/start-current.sh` → `start-v20.sh`, with the opt-in enabled.
-  The installed release passed a 4K retrieval smoke test. Global default is off.
-- [ ] Investigate direct code/scale arithmetic only as a separate numerical change.
-- [x] Run racecheck on the existing `STRATA_PA_V2T` INT8 pipeline. Reproduced
-  25 hazards at 65/33; a warp barrier fixes same-stage V/scales reuse. At
-  4096/33, racecheck/memcheck/synccheck now pass, including changed-input
-  graphs and empty selections. Default and V2T outputs each match their old
-  path byte-for-byte across three context/query cases. All-format regression
-  and sm70/sm75/sm80 compiles pass. V2T remains opt-in, without a model
-  speedup claim. See [race report](bench/volta-turing/int8-v2t-race.md).
+   1. **Pending:** Evaluate per-window acceptance/dispatch tracing from Strata #3631 and pinned-stage per-stream fences from #3483.
+   2. **Ongoing:** Use same-day ABBA comparisons at short/4K/16K/32K with identical model, chunks, ring, residency, memory budgets and prefix state.
+   3. **Ongoing:** Record accepted tokens/s, prefill/TTFT, draft/verify time, acceptance, PCIe traffic, graph/temporary bytes, cache slots, clocks and variance; separate profiling from serving timing.
+   4. **Ongoing:** Check exact bytes where expected; otherwise teacher-forced scores/KL and task quality. Run kv1188 and appropriate CUDA sanitizers.
+   5. **Pending:** Extend coverage to real activation outliers, FP64 scale references, FP32 attention accumulation, fixed reduction order, accepted recurrent-state tails and request-local sampling.
+   6. **Ongoing:** Test expert IDs above 255, empty/ragged groups, owner/version changes, counter wrap, WMMA alignment, poisoned scratch, shuffled pages and changing-input replay.
+   7. **Ongoing:** Distinguish cold/warm prefixes, inspect logit margins, preserve natural EOS and test threshold/chunk/capacity boundaries.
+   8. **Ongoing:** Build touched CUDA/HIP/SYCL backends where available; explicitly record unavailable runtime/compiler coverage.
+   9. **Ongoing:** Commit and locally opt in only qualified improvements, smoke-test the installed release and retain rollback/evidence. A rejected experiment is a completed investigation, not an adopted optimization.
 
-## 3. Expert dispatch by format, phase and shape
+6. **Expert dispatch by format and shape**
 
-- [x] Run the mode 0/4/8 kernel screen first; record routed entries and GU/down timings.
-  90 cases across 10 real GGUF format pairs and G16/T1, G16/T4, G40/T1:
-  all bitwise equal to default. Mode 8 reduces median kernel time by
-  17.2%, 58.0%, 18.9% respectively. Full mode-8 inference ABBA completed:
-  no consistent decode win; keep default dispatch. Both paired decode delta
-  ranges cross zero. The second 4K candidate prefill is an unexplained outlier.
-- [ ] Add opt-in format/shape dispatch only for measured winning cells.
-- [x] Recheck IQ formats with current mode-8 fused GU/SiLU/quantization kernels.
-- [ ] Validate numerical parity/teacher-forced output and accepted tokens/second.
+   1. **Complete:** Run the 90-case mode-0/4/8 screen and mode-8 engine ABBA; no consistent overall decode gain was established.
+   2. **Pending:** Finish the v19 default-versus-explicit-0/4/8 comparison, including mode 4's missing large-down fallback; investigate the anomalous 4K prefill result.
+   3. **Pending:** Use measured production route frequencies and full-call costs to select opt-in format/shape cells; include GU/epilogue/down and input conversion costs.
+   4. **Pending:** Validate numerics, teacher-forced output, acceptance and accepted tokens/s before promotion.
 
-## 4. Revisit fused IQ prefill on the current stack
+7. **Host transfers and KV copy work — C11–C13**
 
-- [ ] Port the v14 sm_75 IQ candidate (540953d7) behind its opt-in switch.
-  Detached port plus IQ2_S shared-memory admission fix built successfully.
-  All 11 format references, exact Q2 controls and three sanitizers pass.
-  Isolated layer speedups repeat at 1.63x/1.31x/1.22x for 2K/6.4K/8K.
-  Production source/release remain unchanged pending model qualification.
-  See [IQ prefill notes](bench/volta-turing/fused-iq-sm75.md).
-  All 16 original-planner retrieval requests pass, within-arm first logits
-  repeat exactly, and baseline matches the installed reference. Fused first-token
-  KL is 0/0.00404/0.01728/0.10865 at 1K/4K/16K/32K; broad quality remains open.
-- [ ] Compare against MMQ with identical chunk size, ring and expert residency.
-  Observed-allocation audit detects real differences: chunks 6400/6144,
-  max loans 1185/1192, pinned RAM 39.60/39.57 GiB; 4K and 16K loans also differ.
-  Equal configuration or startup rings do not qualify allocation parity.
-- [x] Score fixed continuations after batched prefill at 1K/4K/16K/32K.
-  All 80 requests/10,240 score positions complete; raw-score/target/read-path audit
-  passes and within-arm TSV bytes repeat exactly. Top-1 agreement is
-  100/98.44/92.19/88.91%; pooled perplexity ratio 1/0.9258/1.0233/0.9978.
-  Worst loss increase: 16K code, NLL +0.21054/perplexity 1.2343x. Scores are
-  rounded, allocations differ, and these probes do not qualify full tasks or KL.
-- [x] Retain and review the full original editing/code/prose workload, with
-  additional long-context coverage that actually exercises fused prefill.
-  Coverage audit: all original task prompts are below the 3072-token fusion
-  threshold. A detached 76-request task suite retains all seven original cases
-  exactly and adds four task types at 4K/16K/32K with labelled background records.
-  Default budget equality remains strict; diagnostic mode records mismatches
-  and suppresses timing comparisons. Host gates/configuration preflight pass.
-  Fresh retrieval ABBA passes 16/16; both baseline legs match installed-reference
-  logits exactly, and each arm repeats its logits. Full 76-request tasks are
-  complete and independently reviewed. Only four warmups qualify; none of the
-  72 editing/code/prose responses qualify in either arm. All four original
-  generated cache modules pass their own tests but fail the independent TTL
-  boundary check. Three 32K tasks reuse different prefixes: baseline 19200
-  versus candidate 19968 tokens. With group-tail, candidate auto chunk is 6912 versus
-  baseline 6400; maximum loans 1179/1185 and pinned RAM 39.57/39.60 GiB differ.
-  First-token KL is 0/0.00404/0.02331/0.16016 at 1K/4K/16K/32K, with equal
-  top-1. This is diagnostic evidence, not quality or allocation qualification;
-  see `fused-iq-workload-v1/retrieval-review.json` and `reviews/qualification-verified.json`.
-  The fused-IQ candidate is not selected for adoption on this evidence.
-- [ ] Reduce fused fallback scratch under `STRATA_PF_GROUP_SCRATCH`.
-  Detached opt-in `STRATA_PF_FUSED_GROUP_TAIL` prototype builds; it changes
-  both buffer reservations and per-chunk group-cap selection/reset. Host size,
-  capacity and disabled-path probes pass. Calculated four-buffer size at
-  T=6400/threshold3072 is 343.0 -> 168.8 MiB; actual arena/VRAM savings unmeasured.
-  All 60 original/unset/zero/one GPU boundary requests pass; all first-logit
-  bytes match the original. Actual fixed-4K loans fall 956 -> 844 slots (112
-  fewer displaced mappings). Chunk/cap reset traces and independent audit pass.
-  Full-engine boundary memcheck now passes: exact 4096+3071 chunks, caps
-  0/5952, 248,320 finite logits, clean exit and zero errors/diagnostics.
-  Instrumentation-only context8192/reserve1536/keep16 plus async host launch
-  and synchronization limit16 were required; this is not long-context or race
-  qualification. Six prior failures and the clean graph smoke are retained.
-  See `full-engine-memcheck-review.json`. Independent baseline route timings
-  are reviewed; resume5 full quality and tile controls are now complete.
-  Validate original tasks and auto planner behavior before adoption; no global
-  VRAM-byte or speed claim yet.
-- [ ] Profile per-format/routed-M performance and use selective dispatch.
-  Static audit maps all 19 compiler entries: IQ3_XXS/IQ4_NL use 124/125
-  registers without spills. Spill entries belong to IQ2_S/IQ2_XS/Q2_0 GU.
-  Existing auto/64/128 controls complete after full task quality: all 11
-  references, canonical IQ3 bytes, and 11 shapes including 2867/2868 and
-  5734/5735 threshold neighbors, in balanced six-leg order. All 33 reference
-  runs pass, all canonical IQ3 output bytes match, and every large-shape hash
-  agrees across layouts/repeats. The default switch at 2868 costs about 20%
-  versus tile64, but is below the engine fusion threshold; at 5735 tile128
-  is about 6% faster than auto. Other shapes differ; no global override or
-  model speedup is established. See `fused-iq-tiles-v1/results-review.json`.
-  The smaller-block audit rejects a THREADS-only edit (missing row coverage).
-  A consistent 256-thread WW2/TR64 layout still uses 36,096 shared bytes; a
-  one-stage 30,976-byte variant needs a new load/consumer barrier. Neither is
-  implemented. Keep these leads gated on measured tile results; other formats'
-  spills do not explain current-model performance.
-- [ ] Check scratch/grouping interactions; PF_DM_GROUP changes combine order.
-- [ ] Require a full-engine win: the old isolated-kernel win did not improve prefill.
+   1. **Pending:** Compare mapped-host expert reads with bounded DMA during concurrent compute, including small decode misses and expert-cache displacement.
+   2. **Pending:** Measure occupied-range cold-expert and QSA DMA for large contiguous runs; retain mapped gathers for fragmented/small selections and calibrate local thresholds.
+   3. **Pending:** Increase small-miss copy-plan parallelism only where complete cache-resolution time improves.
+   4. **Pending:** Skip KV value reads only when the values cannot be consumed; preserve alignment and unsupported-case fallbacks.
+   5. **Pending:** Consider omitting host-KV zeroing only after proving reads follow writes across padding, reuse and graph replay.
+   6. **Pending:** Audit pin registration, initialization, stream ownership and fences; reuse existing staged prefill and chunk balancing.
 
-## 5. Reduce long-lookup CUDA graph memory
+8. **KV cache policy and bounded history — C14/C15**
 
-- [ ] Measure live bytes and use counts for each solo/batch graph and the arena.
-  Source audit: `instantiate_evicting()` evicts only `exec_bm_`/`commit_bm_`
-  batch layouts on OOM; solo `exec_`/`exec_nr_` graphs remain until destruction.
-  The current ABBA baseline captures T=8/3/1/2 and reports 67 MiB free before
-  its 4K request. Instrument those retained graphs and prompt-read size choice
-  before assuming a new solo cache policy can save 75–100 MiB.
-  The C02 longer-decode baseline subsequently reached 26–30 MiB free VRAM
-  at the same 575 MiB reserve. Keep its telemetry and graph captures as another
-  workload for this investigation; no mid-run budget changes.
-  Completed diagnostic on the installed snapshot release: 21 executable
-  lifetimes, peak 21 retained, 8,544 successful host submissions, all destroyed.
-  Five verifier graphs (T=3/1/16/2/8) coincide with 144 MiB less free VRAM
-  during instantiation; every destruction shows zero immediate free increase.
-  These are observed deltas, not owned bytes. See
-  [graph memory notes](bench/volta-turing/graph-memory.md). Batch/arena coverage
-  remains open. Standalone recreation matrix passes 960 changed-input cases:
-  cap 1/2/3/5 uses 28/60/90/136 MiB; metadata is reused without global free
-  recovery. Cap 2 saves 76 MiB synthetically, at more instantiations; test an
-  opt-in engine cap before adoption.
-- [x] Prototype a budgeted solo-graph LRU beyond the existing OOM-only eviction.
-  `STRATA_VERIFY_SOLO_GRAPHS=N` prototype builds; default 0 retains all graphs.
-  Actual Verifier policy probe passes plain/memcheck/synccheck: resident versus
-  doorbell recency, pipeline guards, in-flight refusal, 37 graph creations and
-  35 changed-input checks. Both original seven-request diagnostic legs completed:
-  peak solo graphs 5 -> 2, minimum observed free VRAM 25.125 -> 105.125 MiB,
-  unchanged 1403 slots/6400-token chunks/39.60 GiB pinned RAM/128.8 MiB arena.
-  Candidate has 174 graph lifetimes and 172 evictions. Every graph is destroyed,
-  no recorded API errors, but all six long continuations differ. Retrieval/logit
-  ABBA passes all 16 tasks and raw adopted-reference logits. Full controlled
-  decode (swaps/deferred CPU off) finishes 28 requests but still varies within
-  baseline repeats. Matched prose wall time regresses 5.07%/5.14% with cap 2;
-  cap 2 is not selected for adoption. Cap 3 diagnostic completes: 53 lifetimes,
-  50 evictions, 75.125 MiB minimum free (+50 MiB), at the same budgets.
-  Fixed draft-cost full-workload diagnostic completed: all 28 requests stop
-  naturally with identical tokens and work counts across all four legs (11,593
-  tokens per leg); each candidate has 149 captures and 147 evictions across all
-  five window sizes. This is controlled continuation parity, not broad task
-  quality: independent review retains all six long-task failures. See
-  `fixed-policy/qualification.json` and its hash-pinned reviews.
-  The original-config cap-0/3 ABBA also finished all 28 requests (27 natural
-  stops; one candidate edit hit 4096 tokens). Both arms vary between repeats;
-  no long pair matches both output and acceptance. Minimum logged free VRAM
-  is 29/75 MiB; cap 3 has 37/25 evictions. No qualified speedup established.
-  Prototype not selected for adoption; source restored. The complete patch and
-  probes are archived and replay-verified under `engine/proposal-complete.patch`.
-  Future promotion requires a demonstrated benefit and remaining quality gates.
-- [ ] Explore graph-exec parameter updates where topology permits safe reuse.
-  Measured solo T=1/2/3/8/16 has 2300/4300/4307/4346/4440 nodes. All 20
-  cross-size pairs violate CUDA 12.4's equal-node-count update requirement;
-  direct whole-graph replacement cannot avoid these recaptures. See the
-  graph-memory report and `graph-update-topology-audit.json`. Common padded
-  topology, same-size recaptures and batch layouts remain separate leads.
-- [ ] Account for recurring lookup preparation cost when evaluating a bounded
-  graph cache: `graph_fits()` prepares before `round0`, so current learned
-  lookup round cost excludes recapture; MTP misses inside `run()` are timed.
-  Source-audited lead only; measure its effect before changing policy/defaults.
-- [ ] Preserve CPU/GDN/KV state for padded rows; test graph eviction/recreation.
-- [ ] Target lookup-16 without shrinking prompt chunks or increasing reserve;
-  75–100 MiB savings is a hypothesis, not a measured result.
+   1. **Pending:** Compare probe-LRU under shared-prefix reuse and disjoint-context churn while retaining K8V4 encoded storage.
+   2. **Pending:** Compare independent draft/target hot-cache budgets at fixed total memory; measure hit rates, PCIe bytes, acceptance and expert displacement.
+   3. **Pending:** Test bounded history staging with checked softmax/LSE merging, FP16 draft history and encoded target history, including window boundaries.
 
-## 6. Volta register-fragment IQ kernels (after RTX 2060 SUPER)
+9. **PLE and temporary-memory lifetimes — C17**
 
-- [ ] Start from merbanan/v100 e24e2b2e and compare upstream PF_WMMA2.
-- [ ] Extend the existing Q2 register-fragment approach to IQ4_NL down and IQ2_S
-  gate/up, then IQ3 if useful; keep DP4A for small routed batches.
-- [ ] Explore lossless compact prepacking/LUT layout without a global FP16 cache.
-- [ ] Measure register pressure, spills, bitwise/numerical parity and full inference.
-- [ ] Do not repeat the losing IQ3 pair-reader without a new measured reason.
+   1. **Pending:** Profile PLE separately; verify the actual bottleneck rather than assuming the HDD issue reported upstream.
+   2. **Pending:** Test PLE convolution without padded history.
+   3. **Pending:** Release HC projection temporaries after last use; measure recovered cache slots or larger usable prompt chunks.
+   4. **Pending:** Verify SiLU, state commit, empty/null slots and graph lifetimes for both changes.
 
-## Instrumentation, correctness and measurement
+10. **Verifier and adaptive drafting — C19/C20/C22**
 
-- [ ] Evaluate upstream PR #3631 per-window tracing for acceptance and dispatch cost.
-- [ ] Review PR #3483 pinned-stage per-stream fences before testing affected paths.
-- [ ] Profile PLE latency separately; existing local PLE measurements do not show
-  the HDD bottleneck reported in issue #2239.
-- [ ] Use alternating A/B/B/A runs with same-day baseline, matching memory/chunks,
-  editing, fresh-code and prose prompts, plus short/4k/16k/32k context lengths.
-  Completed: mode-8 4K/16K, wide edit/code/prose and attention 1K/4K/16K/32K
-  ABBA. Attention has separate exact retrieval/logit qualification; the wide
-  edit workload still needs successful-task qualification. Repeat matched
-  comparisons for each new feature.
-- [ ] Record accepted tokens/s, TTFT, prefill, graph memory, cache slots/chunks and
-  variance. Reject speedups caused by changed acceptance or incorrect output.
-- [ ] Run bitwise tests where expected; otherwise teacher-forced KL and quality
-  checks. Run kv1188 and compute-sanitizer for changed CUDA memory layouts.
-- [ ] Resolve the existing lookup workload's quality failures before using it as
-  successful editing throughput: the first baseline omitted both requested edits
-  and capped the fresh-code answer. Static AST/completeness checks are implemented
-  in bench/volta-turing/analyze-lookup.py; qualify baseline and candidate separately.
-- [ ] Build touched CUDA/HIP/SYCL backends where available; record untested targets.
+   1. **Pending:** Profile versioned per-layer QSA key reuse and bounded staging; existing multi-query reuse must not be duplicated.
+   2. **Pending:** Measure compact recurrent state and bounded expert leases, including persistent bytes and ownership/version changes.
+   3. **Pending:** Profile grouped expert projections and mixed dense fusion only where Strata has an uncovered operation.
+   4. **Pending:** Screen grouped draft-output Q8 warps, whole-batch HC and reuse of canonical HC RMS statistics.
+   5. **Pending:** Identify specific width/chain-policy gaps with per-window traces, structured outputs, changing context and accepted-token costs.
+   6. **Pending:** Require complete verifier-round improvement, including target work, sampling and state commit; do not duplicate existing adaptive drafting.
 
-## Lower-priority ideas retained from the investigation
+11. **Dense weight reuse for T=9–16 — C01**
 
-- [ ] Revisit layer-major prefill copies only if new profiles justify it (current
-  copy time about 8.2% on the 2060 SUPER and 4.1% on T4 at long prompts).
-- [ ] Revisit chunked GDN only with the new shared-buffer lifetime design in
-  1Cat PR #1228; prior Strata kernels were 4–7x slower and exceeded Turing's
-  practical shared-memory budget. See the new experiments below.
-- [ ] Keep generic BF16 tensor-core caching deferred because of memory cost.
-- [ ] Keep lossy routing/tail skipping deferred; check the prior near-full-cache
-  regression (#1884) before any reconsideration.
-- [ ] Avoid duplicating existing adaptive draft policy; use window measurements
-  to find specific missing decisions before revisiting closed generic MTP work.
+   1. **Conditional:** Proceed only if lookup profiling shows material T=9–16 work.
+   2. **Pending:** Decode each packed weight once while preserving independent FP32 accumulators and each row's reduction order.
+   3. **Pending:** Include quantization/interleave and complete pipeline costs in comparisons against group16; retain the slow large-Q5_K-head fallback.
+   4. **Later:** Keep M=17–32 FP8/QPN8 reuse in the future-format work; do not expand verifier capacity merely to exercise a kernel.
 
-Sources: upstream commit 75fabbd94152; issues #2197, #1884, #2239;
-PRs #2092, #2146, #2356, #2357, #3631, #3483, #1098, #2529;
-local Strata-data/bench/optimizations_tests.md and v14/v19/V100 history.
+12. **QSA prefill optimization — C06/C07**
 
-## 1Cat-vLLM follow-up, researched 2026-10-21
+   1. **Pending:** After the storage correction, trace actual native scoring admission and distinguish prefill from verifier/decode routes.
+   2. **Conditional:** Compare native scoring with cuBLAS plus exact top-k only on material large-prefill shapes; preserve ties and causal tails.
+   3. **Pending:** Screen narrower pre-Ampere tiles and only uncovered 2–8-query shared-key reuse; account for corrected upstream performance attribution.
 
-- [x] Inventory code/history and all open/closed PR and issue records; inspect
-  architecture-specific kernels, relevant discussions and eight open PR diffs.
-  See [the investigation](bench/volta-turing/1cat-investigation.md) for source
-  commits, measured scope, existing Strata overlap and rejected experiments.
-- [ ] Extend weight reuse to T=9..16 only if lookup profiling justifies it;
-  preserve packed weights and compare the full pipeline against group16 (#1142).
-- [ ] Measure whether router selection can share a required Q8 quantizer launch
-  after accounting for QFUSE/QDEDUP; preserve FP32 logits and exact routes (#1147).
-- [ ] Prototype the SM75 chunked GDN shared-buffer schedule from #1228 in native
-  CUDA: no transposed K copy, A/P lifetime reuse, loop-end synchronization.
-  Compare FP32 recurrent state, preparation/output costs and cache-slot loss.
-- [ ] Audit launch bounds and spills where shared memory already limits occupancy
-  (#1226, issue #1132); benchmark selected variants instead of globally raising caps.
-- [ ] Trace SM7x QSA verifier scoring; test shared-key reuse for 2..8 queries only
-  where existing batching does not already provide it (#1127). Check exact top-k.
-- [ ] Apply architecture-specific accumulator mapping and shared-memory admission
-  lessons from #1236 to the K8V4 attention work; keep sm70/sm75 tuning separate.
-- [ ] Retain #797's separate SM75 FA2 build/worker-device selection as a reference
-  for future general FP16 attention or mixed-GPU stages; it is not a replacement
-  for Strata's current quantized sparse attention.
-- [ ] Measure mapped-host expert reads alongside concurrent compute; compare a
-  bounded DMA staging threshold for small decode misses, including fences and
-  lost expert-cache capacity (#1203). Existing prefill DMA/chunk balancing stays.
-- [ ] Compare KV probe-LRU policy and bounded staging under shared-prefix and
-  disjoint-context churn; retain K8V4 encoded storage (#1204/#1242).
-- [ ] Use QPN register-fragment scheduling as a V100 design reference, preserving
-  original GGUF bytes; do not treat NVFP4/MXFP4 support as an IQ3 drop-in (#742/#959).
-- [ ] Add shuffled-page/alignment, poisoned-scratch and changing-input graph checks
-  to relevant future kernels; hold chunk/capacity settings fixed (issues #98/#1003).
-- [ ] Keep resident expert task pools (#1078), 43%-larger IQ3 packets (#1068/#1121),
-  and acceptance-changing IQ2 expansion (#1011 first revision) out of default
-  implementation. Require a new measured argument before retrying them.
+13. **Further attention tuning — C08/C09**
 
-### Remaining leads from the report and saved PR discussions
+   1. **Pending:** Compare register-resident PV accumulation and launch-bound relaxation separately and together for Strata's D256 attention.
+   2. **Pending:** Audit register pressure/spills where shared memory already limits occupancy; avoid global launch-cap changes.
+   3. **Pending:** Validate separate sm70/sm75 accumulator maps, grouped heads, strides, ragged/shuffled pages, device scratch admission and compiled-kernel fallback.
+   4. **Conditional:** Treat direct Q4 code/scale arithmetic as a separate numerical experiment; preserve the adopted exact-rounding path.
 
-IDs below supplement the six workstreams and follow-ups above. Sources refer
-to the saved 2026-10-21 snapshot in the benchmark directory. Upstream results
-on four V100s are hypotheses for our single RTX 2060 SUPER, not local gains.
+14. **Chunked GDN shared-buffer design — C10**
 
-#### Dense, router and expert kernels
+   1. **Pending:** Prototype native CUDA with no transposed-K copy, shared A/P lifetime reuse and loop-end synchronization, following the newer #1228 design.
+   2. **Pending:** Verify final FP32 recurrent state across chunk boundaries and speculative commits.
+   3. **Pending:** Admit by actual shared-memory capacity; test high-register variants only where occupancy is already constrained.
+   4. **Pending:** Measure complete preparation, recurrence and output costs plus displaced expert-cache slots; prior 4–7x-slower kernels remain rejected.
 
-- [ ] C01 — For T=9..16 reuse, keep independent FP32 accumulators and each row's
-  reduction order while decoding each weight once; include quantization/interleave
-  costs and retain the large Q5_K head fallback. Treat M17..32 FP8/QPN8 reuse as
-  a later format-specific extension, not a reason to expand current verifier
-  capacity ([#1142](https://github.com/1CatAI/1Cat-vLLM/pull/1142),
-  [#1157](https://github.com/1CatAI/1Cat-vLLM/pull/1157)).
-- [ ] C02 — Test warp-local sorted router lists and winner-only exponentials
-  inside a still-needed Q8 launch. Preserve FP32 route keys, ties, nonfinites,
-  normalization and Q8 bytes; avoid global completion counters. Measure existing
-  QFUSE/QFUSE_HC/QDEDUP coverage first; standalone selection may lose
-  ([#1147](https://github.com/1CatAI/1Cat-vLLM/pull/1147)).
-  Source audit on v20: CUDA's `g_qfuse_hc()` is always false; the default shared
-  expert stream prevents QDEDUP, and the current config leaves QFUSE off. A
-  separate expert-input quantizer remains after routing. The first fusion must
-  write `nat_xq_`, using `iq_kernels.cu::quantize_q8_1_rows` as its byte reference,
-  rather than the dense/shared expert's `xq_` producer. `native_router.cu` is
-  compiled with `--use_fast_math`; `iq_kernels.cu` is not. A combined translation
-  unit must preserve both arithmetic contracts, including rounding thresholds,
-  subnormal and large finite activation blocks, before engine integration.
-  Preserve the current full-softmax normalization before top-k: winner-only
-  exponentials can change rounded ties/weights despite algebraic cancellation.
-  Measure launch cost and exact route/quantizer bytes before changing selection.
-  Further integration audit: `--native` enables the native router. In
-  `VerifyWindow::record` the n>1 path calls the multi-token router directly,
-  whereas n=1 goes through `moe_route`; cover both if integrating a fused launch.
-  The CPU doorbell is published after routing and before expert quantization.
-  Moving quantization into routing may delay CPU-expert work even when one GPU
-  launch is removed: measure doorbell latency and complete windows, not just
-  combined kernel time. First isolate launch fusion with the original top-k
-  arithmetic; test sorted lists and winner-only exponentials independently.
-  Keep Q8 work parallel across blocks rather than serializing 80 input blocks
-  behind the route warp; no global completion counter is needed for independent
-  route/Q8 outputs. Preserve the existing QFUSE/QDEDUP skip rules and skip the
-  later expert quantizer only after the fused producer actually succeeds.
-  First three prototypes evaluated; none adopted. Original-selection fusion
-  passes 468 kernel/sanitizer cases (expanded exact controls later pass 624),
-  16 retrieval requests with byte-identical adopted-reference logits, and
-  recorded 480 fused captures. Both async and synchronous full-workload ABBAs
-  completed 28 requests with matched budgets, but outputs/acceptance vary within
-  arms and no successful-task end-to-end gain is established. All first-baseline
-  edits failed; original tasks and failures are retained. Async residency,
-  timing-based draft windows and deferred CPU behavior remain quality/control
-  questions. The QFUSE/QDEDUP queue did not run after its parity gate failed.
-  Sorted lists pass exact output and sanitizers, but are 31–37% slower than
-  original fusion at the observed 1/2/8-row shapes in a same-run comparison.
-  Winner-only exponentials change expert IDs in 78/624 cases and weight bytes
-  in 308/624; Q8/guards and nonfinite fallback match, sanitizers report no errors.
-  Its roughly 0–4% kernel gain does not justify the unguarded routing change.
-  Exact source, complete reproducible patch, experimental executable and all
-  results are archived. Production source is restored to the adopted baseline;
-  the temporary build must be rebuilt before new engine work. C02's remaining
-  qualification gates are still open for any future variant; move current work
-  to measuring and reducing retained graph memory.
-  See `bench/volta-turing/router-q8-fusion.md` for measured scope and limits.
-- [ ] C03 — Audit remaining gate/up-to-down conversions and repeated activation
-  quantization after the existing mode-8 fusion. Investigate only uncovered
-  format/shape paths, including packed-byte DP4A/LUT readers
-  ([#982](https://github.com/1CatAI/1Cat-vLLM/pull/982),
-  [#970](https://github.com/1CatAI/1Cat-vLLM/pull/970)).
-  Native grouped-decode source audit and synthetic route timings complete.
-  Production route frequencies remain pending. Default CUDA already fuses
-  SwiGLU/Q8 and restricts it to the call's
-  entry interval (`e7a5fd30`); the old two-pass path requires GROUPED_V1.
-  Mode 8 additionally fuses gate/up into Q8 for IQ2_XXS/IQ3_XXS/IQ3_S/IQ2_S/
-  IQ4_XS. Turing's default mode 4 retains the combined epilogue launch. Verify
-  PCIe calls use grid_groups=4 with cap=n*10 and force mode 0 (`f6330507`),
-  even under a mode-8 override. VRAM/PCIe calls share the same input Q8 buffer;
-  shared-expert quantization is the separate C02/QDEDUP lead. Profile those
-  remaining epilogues/routes before a new kernel; do not duplicate existing
-  standalone fusion. Source hashes, exact branches, format inventory and scope
-  are in `expert-conversion-audit-v1/source-audit.json` in campaign artifacts.
-  Pack inventory: ten format pairs across 48 layers; ten layers use IQ2_XS
-  gate/up, which lacks the mode-8 epilogue, while 38 use eligible formats.
-  A detached baseline harness has passed 480 GPU comparisons over all ten
-  pairs, T=1/4/8/16 and empty/small strided PCIe plus VRAM shapes. It checks
-  exact output and active Q8 bytes, poisoned unused entries and allocation
-  guards against the legacy mode-0 path. Synthetic weights, real pack format
-  coverage; no model-quality or throughput result. All 57,600 balanced
-  default/0/4/8 timing samples are independently reviewed, with separate
-  whole-call/GU-plus-epilogue/down phases and 48 nonoverlapping weight regions.
-  Input quantization and host/PCIe transfers are outside this test.
-  An isolated opt-in IQ2_XS GridOf/DotG proposal now builds for sm70/sm75,
-  preserving the original dot arithmetic and existing default dispatch.
-  Both targets report 62 registers and zero spills. V1 passes 4800 exact
-  original/unset/zero/one comparisons, 24 graphs/144 changed-input replays and
-  three sanitizers. Its 115200 timing samples are reviewed; balanced VRAM
-  whole calls are 1.13–1.43x faster than old mode 8 in both pairs. No engine
-  gain is claimed. V2 extends the opt-in to Turing's normal mode 4 without a
-  global mode override. Its 4800 comparisons, 96 graphs/576 replays, three
-  sanitizers and 115200 timing samples pass independent review. Automatic
-  balanced VRAM calls are 1.23–1.34x faster at T=1/4 and 1.78–2.59x at T=8/16;
-  synthetic kernel results only, with unchanged controls exposing clock drift.
-  Clean engine build complete; all four disabled first-logit vectors match the
-  installed reference. All 16 enabled/disabled retrieval responses pass with
-  exact first logits. The allocation audit correctly declined missing request
-  traces (STRATA_TRACE was omitted); its failed run is preserved. The corrected
-  traced ABBA passes independent raw-response/logit/allocation review: all 16
-  responses and logits match, and startup plus per-request loan records agree.
-  The same 19-case continuation suite is now running without diagnostic relaxation.
-  Partial review now finds differing continuations in seven of eight completed
-  substantive baseline/candidate pairs (28/76 total requests); their prefix
-  reuse is zero in both arms. Repeated arms are still pending, so causation
-  remains unresolved. Exact-output adoption/timing qualification does not pass.
-  Follow-up found both arms use documented non-bit-exact --adapt-async 1,
-  and candidate repeat already differs on the rename task. A controlled
-  blocking-adaptation/fixed-PCIe diagnostic is queued; the original full run
-  remains intact. A separate 30-real-expert, 300-case kernel probe builds
-  against original/v2/compact kernels and is queued to test broader weights.
-  The historical 256-token context benchmark is prepared and queued behind
-  exact continuation/prefix parity; host validation passes. An expert-launch
-  tracer builds and passes eleven host parser checks; its graph-parity and
-  model-dispatch GPU tests wait until timing ends. Counts distinguish graph
-  capture from replay and describe submitted kernels, not active routed groups.
-  No adoption;
-  see [IQ2_XS notes](bench/volta-turing/iq2xs-gu.md).
-- [ ] C04 — Exploratory: screen the revised arithmetic-compatible IQ2 nibble
-  layout, preserving decoded weights, FP16 SiLU boundaries and reduction order.
-  Charge expanded bytes against cache residency and measure acceptance; the
-  first acceptance-changing revision stays rejected
-  ([#1011](https://github.com/1CatAI/1Cat-vLLM/pull/1011)).
-  CPU source/history/storage audit complete: the upstream corrected FP16
-  projection arithmetic differs from Strata's current integer DP4A path.
-  Expanding all 29 IQ2 gate/up layers would add 12.34 GiB across the full
-  512-expert/layer set; this is not measured resident memory. No weight
-  conversion or GPU adoption. Selective storage/runtime screening remains
-  open. A related compact-codebook prototype keeps original packed weights;
-  see C25 and [IQ2 layout notes](bench/volta-turing/iq2-layouts.md).
-- [ ] C05 — Profile narrower padded grouped-MoE prefill tactics and selective
-  Q5_K/Q6_K dequantize-plus-cuBLAS for large routed M. Admit only measured physical
-  layouts, threshold neighbors and available scratch; retain small-M fallbacks
-  ([#1205](https://github.com/1CatAI/1Cat-vLLM/pull/1205)).
+15. **Graph memory and reuse — C18**
 
-#### Attention, QSA and GDN
+   1. **Partial:** Extend measured solo-graph lifetimes/free-memory deltas to batch graphs and arena ownership; distinguish owned bytes from allocator deltas.
+   2. **Complete:** Prototype and test bounded solo-graph LRU. Caps 2/3 were not adopted; archive their exact patches, quality results and regressions.
+   3. **Pending:** Explore same-size updates, common padded topology and batch reuse; direct cross-size updates failed CUDA's equal-node-count requirement.
+   4. **Pending:** Include recurring preparation/recapture cost in lookup-policy measurements.
+   5. **Pending:** Test padded CPU/GDN/KV state, mixed prefill/decode, concurrency, eviction/recreation, changing inputs and low-memory fallback.
+   6. **Pending:** Measure full rounds and graph-padding inflation separately from draft time.
+   7. **Conditional:** Seek lookup-16 memory savings without shrinking prompt chunks or raising reserve; 75–100 MiB remains a target, not an established production saving.
 
-- [ ] C06 — Trace Turing QSA dispatch and compare existing native scoring with
-  cuBLAS plus exact top-k only on material large-prefill shapes. Check actual
-  kernel admission; 1Cat's gain over its Triton fallback does not transfer
-  ([#1229](https://github.com/1CatAI/1Cat-vLLM/pull/1229)).
-  Local source audit first found the FP16/halving-scorer interaction above.
-  Existing decode kernels already reuse pooled keys across queries; avoid
-  duplicating that work. Correct the storage path and trace admission before
-  comparing a new scorer.
-- [ ] C07 — Screen narrower pre-Ampere QSA prefill tiles after proving which
-  source path executes; account for the corrected historical attribution
-  ([issue #441](https://github.com/1CatAI/1Cat-vLLM/issues/441),
-  [#469](https://github.com/1CatAI/1Cat-vLLM/pull/469)).
-- [ ] C08 — Adapt register-resident PV accumulation and launch-bound relaxation
-  together to Strata's D256 attention; compare each change separately too.
-  The D128 V100 issue is a design reference, not a compatible patch
-  ([issue #1132](https://github.com/1CatAI/1Cat-vLLM/issues/1132)).
-- [ ] C09 — Validate sm70/sm75 accumulator maps, grouped query/KV heads, strides,
-  and ragged/shuffled pages. Bound planner/hash scratch to actual device shared
-  memory and check compiled kernel availability before dispatch; retain a safe
-  fallback ([#1236](https://github.com/1CatAI/1Cat-vLLM/pull/1236)).
-- [ ] C10 — For GDN buffer aliasing, verify loop-end barriers and final FP32
-  recurrent state across chunk boundaries and speculative commits. Select by
-  actual shared-memory availability and compare high-register variants only
-  where occupancy is already constrained
-  ([#1228](https://github.com/1CatAI/1Cat-vLLM/pull/1228),
-  [#1226](https://github.com/1CatAI/1Cat-vLLM/pull/1226)).
+16. **Existing T=5–8 wide kernels — hold promotion**
 
-#### Copies, KV policy and temporary memory
+   1. **Complete:** Port wide kernels, fused quantization/interleave and scratch sizing; add opt-in sm70/sm75 overrides and host dispatch tests.
+   2. **Complete:** Run 33-shape parity/sanitizer/timing and real dense/head profiling; select measured cells and retain slow-head fallbacks.
+   3. **Complete:** Run lookup-8/16 and speculative full-engine ABBA; no repeatable overall gain was established.
+   4. **Held:** Qualify group16-versus-wide arithmetic and successful edit/code/prose tasks before reopening promotion; preserve the isolated archived patch.
 
-- [ ] C11 — Audit whether host KV initialization can skip zeroing only after
-  proving all reads follow writes, including padding, reuse and graph replay.
-  Check pin registration and per-stream ownership/fences; reuse existing staged
-  prefill and balanced chunks ([#1203](https://github.com/1CatAI/1Cat-vLLM/pull/1203)).
-- [ ] C12 — Screen occupied-range cold-expert DMA and QSA DMA for a few large
-  contiguous runs, keeping mapped gathers for fragmented/small selections.
-  Calibrate local thresholds rather than copying the upstream four-run/512-KiB
-  rule ([#1205](https://github.com/1CatAI/1Cat-vLLM/pull/1205)).
-- [ ] C13 — Inspect small-miss copy-plan parallelism and avoid KV value reads
-  that cannot be consumed. Measure complete cache resolution with existing K8V4
-  storage and safe fallback for unsupported/alignment cases
-  ([#1204](https://github.com/1CatAI/1Cat-vLLM/pull/1204)).
-- [ ] C14 — Compare independent draft/target hot-cache budgets with a fixed
-  total memory budget; include shared-prefix reuse and disjoint-context churn.
-  Record hit rate, PCIe bytes, acceptance and expert-cache displacement
-  ([#1204](https://github.com/1CatAI/1Cat-vLLM/pull/1204)).
-- [ ] C15 — Prototype bounded prefill-history staging windows with a numerically
-  checked softmax/LSE merge. Compare against existing streaming and include
-  window boundaries, FP16 draft history and encoded target history
-  ([#1242](https://github.com/1CatAI/1Cat-vLLM/pull/1242)).
-- [ ] C16 — Conditional long-context work: partition exact top-k beyond 256K,
-  align draft/target RoPE and capacity, and test that speculation remains active
-  at the configured boundary. Do not raise model capacity as part of a speed A/B
-  ([#1242](https://github.com/1CatAI/1Cat-vLLM/pull/1242)).
-- [ ] C17 — Profile PLE convolution without padded history and release HC
-  projection temporaries after last use. Check state commit, SiLU, null/empty
-  slots and graph lifetime; measure whether savings recover cache slots or
-  improve chunk size ([#1205](https://github.com/1CatAI/1Cat-vLLM/pull/1205)).
+17. **Fused IQ prefill and scratch — hold promotion / C05**
 
-#### Verifier, graph and numerical validation
+   1. **Complete:** Build the detached v14 port with the IQ2_S admission fix; kernel references and sanitizers pass, but this is not adopted.
+   2. **Complete:** Review teacher-forced scoring and all 76 tasks; numerical differences and failed substantive tasks remain recorded.
+   3. **Held:** Resolve model quality and match actual MMQ/fused chunks, ring, residency, per-request loans and prefix reuse before interpreting timing.
+   4. **Partial:** Group-tail scratch prototype passes boundary logits and instrumented full-engine memcheck; qualify normal planner behavior, long contexts and race safety before adoption.
+   5. **Partial:** Review existing auto/64/128 tile results; use measured per-format/routed-M dispatch rather than a global override.
+   6. **Conditional:** Explore consistent smaller-block layouts and a one-stage barrier design; a THREADS-only edit does not cover all rows.
+   7. **Pending:** Check PF_DM_GROUP combine order and scratch/grouping interactions.
+   8. **Conditional:** Screen narrow padded tactics and large-M Q5_K/Q6_K dequantize-plus-cuBLAS, including physical layout, scratch limits and threshold neighbors.
+   9. **Held:** Require a full-engine prefill win; isolated layer gains do not qualify promotion.
 
-- [ ] C18 — Measure graph padding inflation and full verifier rounds (target,
-  sampling and state commit), separately from draft time. Exercise mixed
-  prefill/decode, concurrency, graph shrink/eviction/recreation, changing inputs
-  and low-memory fallback
-  ([#1211](https://github.com/1CatAI/1Cat-vLLM/pull/1211),
-  [issues #1220](https://github.com/1CatAI/1Cat-vLLM/issues/1220),
-  [#1042](https://github.com/1CatAI/1Cat-vLLM/issues/1042),
-  [#1070](https://github.com/1CatAI/1Cat-vLLM/issues/1070)).
-- [ ] C19 — Profile versioned per-layer QSA key reuse, bounded staging,
-  compact recurrent state and bounded expert leases; count persistent bytes
-  before considering any verifier cache
-  ([#1211](https://github.com/1CatAI/1Cat-vLLM/pull/1211)).
-- [ ] C20 — Profile grouped expert projections, mixed dense fusion, grouped Q8
-  draft-output warps, whole-batch HC and reuse of canonical HC RMS statistics.
-  Gate each on an observed Strata gap; upstream complete-verifier targets remain
-  unmet despite operator wins ([#1211](https://github.com/1CatAI/1Cat-vLLM/pull/1211)).
-- [ ] C21 — Check expert-ID width beyond 255, ragged/empty groups, owner changes,
-  stale key versions and barrier-counter wrap in any changed grouping/cache path
-  ([#1211](https://github.com/1CatAI/1Cat-vLLM/pull/1211)).
-- [ ] C22 — Use per-window traces to identify gaps in existing adaptive lookup
-  policy before revisiting width/chain decisions; include structured output,
-  changing context and accepted-token cost
-  ([#366](https://github.com/1CatAI/1Cat-vLLM/pull/366); Strata PR #3631).
-- [ ] C23 — Extend numerical qualification with real activation outliers and
-  FP64 scale references, FP32 attention accumulation, fixed reduction order,
-  accepted recurrent-state tails and request-local sampling parameters. These
-  are regression patterns to check, not diagnosed Strata bugs
-  ([#666](https://github.com/1CatAI/1Cat-vLLM/pull/666)).
-- [ ] C24 — Require WMMA alignment checks, poisoned scratch, changing-input
-  replay, shuffled pages, ragged tails and natural EOS. For retrieval comparisons
-  hold chunking/capacity fixed, distinguish cold/warm prefixes and inspect logit
-  margins before attributing differing text to state corruption
-  ([issue #98](https://github.com/1CatAI/1Cat-vLLM/issues/98),
-  [issue #1003](https://github.com/1CatAI/1Cat-vLLM/issues/1003)).
+18. **Router/Q8 fusion — hold promotion / C02**
 
-#### Later hardware/format work and deferred experiments
+   1. **Complete:** Audit QFUSE/QFUSE_HC/QDEDUP and prototype exact original-selection fusion for single/multi-token routing with the correct expert Q8 buffer.
+   2. **Complete:** Reject sorted-list selection for measured slowdown and winner-only exponentials for changed routes/weights; preserve full-softmax arithmetic.
+   3. **Held:** Finish relevant QFUSE/QDEDUP interaction coverage only if a new variant warrants reopening; preserve skip rules, rounding and nonfinite/tie behavior.
+   4. **Held:** Requalify task outputs and acceptance under controlled execution; measure CPU-doorbell delay and complete windows before another adoption attempt.
 
-- [ ] C25 — On V100, investigate compact IQ codebook/LUT layouts and direct
-  register-fragment decoding; validate lossless permutations/inverses and format
-  admission, retaining original GGUF storage. Preserve source attribution and
-  licenses for any reused code
-  ([#742](https://github.com/1CatAI/1Cat-vLLM/pull/742),
-  [#848](https://github.com/1CatAI/1Cat-vLLM/pull/848),
-  [#959](https://github.com/1CatAI/1Cat-vLLM/pull/959)).
-  A first IQ2_XS compact-table prototype now builds for sm70/sm75, with
-  unchanged packed weights and dot arithmetic. CPU tests cover 6561 ternary
-  vectors, 65536 signed grid combinations and 131072 scaled integer sub-dots.
-  Compiler static shared memory drops 5120 -> 2048 bytes; registers rise
-  62 -> 63, with zero spills. GPU correctness/sanitizer and v2-enabled versus
-  compact-enabled timing are queued after the current campaign. No occupancy,
-  inference or V100 runtime claim; direct register-fragment work remains open.
-- [ ] C26 — Future checkpoint support only: evaluate FP8/NVFP4/MXFP4 native
-  packed linear/MoE dispatch separately on sm70 and sm75. Preserve scale precision
-  and fallbacks; do not requantize the current IQ GGUF benchmark to claim a win
-  ([#804](https://github.com/1CatAI/1Cat-vLLM/pull/804),
-  [#742](https://github.com/1CatAI/1Cat-vLLM/pull/742),
-  [#1157](https://github.com/1CatAI/1Cat-vLLM/pull/1157)).
-- [ ] C27 — Future multi-GPU only: investigate shared pinned host KV for replicated
-  heads, query-row partition plus compact-index all-gather, root-only/banked
-  index staging and lossless FP16 peer-partial packing. Check ownership, mixed
-  request fallback, collective costs and epoch wrap; these are not single-2060
-  optimizations ([#1242](https://github.com/1CatAI/1Cat-vLLM/pull/1242),
-  [#1205](https://github.com/1CatAI/1Cat-vLLM/pull/1205),
-  [#1211](https://github.com/1CatAI/1Cat-vLLM/pull/1211)).
-- [ ] C28 — Future general-attention/mixed-GPU work: independently build, load
-  and test the current worker's sm75 FA2 backend and sm70 counterpart; preserve
-  capability-aware fallback ([#797](https://github.com/1CatAI/1Cat-vLLM/pull/797)).
-- [ ] D01 — Deferred: resident producer/consumer expert pools, including smaller
-  worker pools. Retry only after a profile identifies how to overcome the
-  recorded slowdown ([#1078](https://github.com/1CatAI/1Cat-vLLM/pull/1078)).
-- [ ] D02 — Deferred: expanded IQ3 register-pair packets (+43% weight traffic)
-  and the acceptance-changing first IQ2 layout. Require a new memory/quality
-  argument; C04 concerns only the revised compatible IQ2 design
-  ([#1068](https://github.com/1CatAI/1Cat-vLLM/pull/1068),
-  [#1121](https://github.com/1CatAI/1Cat-vLLM/pull/1121),
-  [#1011](https://github.com/1CatAI/1Cat-vLLM/pull/1011)).
-- [ ] D03 — Deferred: deeper dense prefetch, byte-expanded weights and uniform
-  format specialization. Lower register counts alone did not justify these in
-  the upstream dense-reuse campaign
-  ([#1142](https://github.com/1CatAI/1Cat-vLLM/pull/1142)).
-- [ ] D04 — Deferred: HC tile tuning/row partition with weight transport, the
-  rejected fused indexer, larger custom all-reduce buffers and OOM-prone larger
-  chunks. Require fresh path-specific evidence, not the aggregate prefill gain
-  ([#1205](https://github.com/1CatAI/1Cat-vLLM/pull/1205)).
+19. **V100/Volta qualification — requires hardware / C25**
 
-### Additional leads from local measurements
+   1. **Hardware:** Run V100 separately before selecting sm70 defaults; also qualify T4 independently of the 2060 SUPER.
+   2. **Pending:** Compare merbanan/v100 e24e2b2e, upstream PF_WMMA2 and QPN register-fragment scheduling as design references.
+   3. **Pending:** Extend the Q2 approach to IQ4_NL down and IQ2_S gate/up, then IQ3 if useful; retain small-batch DP4A.
+   4. **Pending:** Validate lossless prepacking/LUT permutations and inverse mappings while retaining original GGUF bytes and source licenses.
+   5. **Hardware:** Measure registers, spills, parity/numerics, occupancy and full inference on V100; compilation alone is insufficient.
 
-- [x] L01 — Reuse the immutable MTP expert host snapshot across prompt-room
-  loans, after auditing every writer and invalidation path. In
-  `src/core/mtp.cpp`, `experts_lend` retains its pinned allocation but copies
-  all 675 MiB from GPU to host on every loan; `experts_reclaim` restores those
-  bytes in place. A valid cached snapshot could avoid the repeated D2H copy.
-  Keep the idle/chain/ownership checks, graph addresses and reclaim copy intact;
-  invalidate on any reload/change of weights and cover shared drafters, failed
-  copies and repeated lend/reclaim cycles with byte hashes and model checks.
-  Measure an independent opt-in eager allocation/snapshot during startup too:
-  the first loan includes `cudaMallocHost`, which can stall under host pressure.
-  Charge its pinned bytes and startup time, and retain lazy allocation by default.
-  Evidence: the isolated attention candidate's first 4K loan took 1379.3 ms,
-  and the second baseline's took 28299.6 ms, versus roughly 107 ms for ordinary
-  loans. The benchmark's first request is 1023 tokens, below ROOM_MIN=1024, so
-  4K triggers the first pinned allocation; quality's exact 1024-token request
-  triggers it earlier. This is a transfer/allocation lead,
-  not proof that the attention kernel caused the outlier. Keep first-loan and
-  repeated-loan TTFT separate, and hold chunks/cache slots fixed.
+20. **Conditional long-context, format and multi-GPU work — C16/C26–C28**
 
-L01 implementation status (2026-10-22): `STRATA_MTP_EXPERT_SNAPSHOT=1` now
-reuses the first successful snapshot; unset/zero keep the original D2H copy.
-Ownership/idle/chain guards and in-place reclaim remain. Load attempts invalidate
-the snapshot; failed D2H never marks it valid. CUDA memcheck passes unset/0/1
-with injected allocation/copy/idle failures, shared-owner rejection, size checks,
-and five destructive loan/reclaim cycles followed by graph replay with exact
-bytes. Full-model ABBA passes all 16 tasks and byte-identical first-token
-logits against the adopted reference at every context. A new timing prompt
-failed on baseline (summary/cap instead of marker); preserve that failure.
-Corrected timing uses the qualified audit-marker template with cold prefixes.
-All 24 requests pass; both ABBA pairs improve repeated TTFT by 2.10–2.96%
-at 2K and 1.08–1.59% at 4K, with lower complete-request latency. Memory
-budgets match. Committed as `6e4f8498` and adopted locally with
-`STRATA_MTP_EXPERT_SNAPSHOT=1`; the installed release passed first/repeated
-loan requests with exact answers (955.1 ms then below 0.1 ms loan time).
-The separate eager-startup prototype built and passed lifecycle/memcheck
-unset/0/1. Its full ABBA returns identical output tokens and budgets. Ready-to-
-first-token improves 45.70–49.31%, but total start-to-answer improves 10.71%
-in one pair and regresses 16.49% in the other. It moves an allocation stall;
-no repeatable overall gain is demonstrated. Do not adopt eager priming locally.
-Exact prototype and results are retained; eager-only source edits are restored.
-See `bench/volta-turing/mtp-expert-snapshot-eager.md` and
-`Strata-data/bench/2026-10-21-volta-turing/mtp-expert-snapshot-eager/`.
+   1. **Conditional:** Beyond 256K, test partitioned exact top-k, draft/target RoPE/capacity agreement and speculation at boundaries; do not raise capacity inside a speed A/B.
+   2. **Future formats:** Evaluate native packed FP8/NVFP4/MXFP4 linear/MoE independently on sm70/sm75 with scale precision and fallbacks preserved; do not requantize this benchmark to claim a win.
+   3. **Future formats:** Evaluate M=17–32 FP8/QPN8 reuse only for an appropriate checkpoint/workload.
+   4. **Multi-GPU:** Test shared pinned KV for replicated heads, query-row partitioning and compact-index all-gather.
+   5. **Multi-GPU:** Test root-only/banked index staging and lossless FP16 peer-partial packing, including ownership, epochs, mixed-request fallback and collective costs.
+   6. **Future attention:** Independently build/load/test worker-selected sm75 FA2 and sm70 counterparts with capability-aware fallback; this does not replace current quantized sparse attention.
+
+21. **Deferred research — reopen only with new evidence / D01–D04**
+
+   1. **Deferred:** Resident producer/consumer expert pools, including smaller worker pools; explain how to overcome the measured slowdown.
+   2. **Deferred:** Expanded IQ3 register-pair packets with 43% more weight traffic, and the acceptance-changing first IQ2 expansion.
+   3. **Deferred:** The losing IQ3 pair-reader without a new measured reason.
+   4. **Deferred:** Deeper dense prefetch, byte-expanded weights and uniform format specialization; lower registers alone are insufficient.
+   5. **Deferred:** HC tile/row partition with transport, the rejected fused indexer, larger custom all-reduce buffers and OOM-prone chunks.
+   6. **Deferred:** Layer-major prefill rewrites until new copy-wait profiles justify them; reconcile historical T4 percentages with exact runs.
+   7. **Deferred:** Generic BF16 tensor-core caching because of memory cost.
+   8. **Deferred:** Lossy routing/tail skipping; inspect the near-full-cache regression before reconsideration.
+
+22. **Completed foundation and adopted improvements**
+
+   1. **Complete:** Investigate Strata and 1Cat code/history plus open/closed PRs/issues; retain source snapshots, discussions and relevant open diffs.
+   2. **Complete:** Create the isolated v20 worktree, resolve GPU access and record hardware/clocks/model/configuration/revisions.
+   3. **Complete:** Establish the same-day RTX 2060 SUPER baseline and retain raw evidence, build/resource logs and validation reports.
+   4. **Complete:** Build sm75 engine/matvec tests, compile the changed matvec unit for sm70, pass dispatch/invalid-TMAX tests and prepare GPU runners.
+   5. **Adopted:** Exact-rounding K8V4 register staging, including parity, graph/sanitizer, retrieval/logit, full-engine timing and installed-release smoke checks; local opt-in remains enabled.
+   6. **Complete:** Fix the INT8 V2T warp race; validate both switch states, all-format regression and sm70/sm75/sm80 compilation. V2T remains opt-in without a claimed engine speedup.
+   7. **Adopted:** Immutable MTP expert-snapshot reuse with ownership/reload/failure checks, exact restoration/graphs, retrieval/logit ABBA, matched-budget timing and installed-release smoke checks.
+   8. **Complete:** Test separate eager snapshot allocation; reject local adoption because end-to-end startup gains did not repeat. Preserve the patch and results.

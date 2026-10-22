@@ -103,3 +103,16 @@ missing fixed-policy evidence or drift in these controls. Nine host checks
 pass. Replaying the prior 76 fused-prefill records preserves every task
 classification. GPU task results, per-request allocation review and production
 performance remain pending; this diagnostic alone cannot justify adoption.
+
+
+## Timing comparison prepared
+
+`qsa-halve-f16-timing-v1` builds a separate host harness against the corrected
+sm75 object with `-Wall -Wextra -Werror`. Seven parser controls pass. It queues
+eight arms: fallback/halving/halving/fallback separately for FP32 and FP16,
+after the full-workload process releases the GPU and independent kernel review
+passes. Each arm includes the existing 60-graph/180-replay parity matrix plus
+120 timing graphs, with 64 repeated calls per graph. Score-only and complete
+score-plus-selection timings produce 19,200 samples across the eight arms.
+Outputs and guards are checked again after timing. This is stationary synthetic
+CUDA-event timing, not inference throughput; model promotion remains separate.
