@@ -444,11 +444,16 @@ on four V100s are hypotheses for our single RTX 2060 SUPER, not local gains.
   Clean engine build complete; all four disabled first-logit vectors match the
   installed reference. All 16 enabled/disabled retrieval responses pass with
   exact first logits. The allocation audit correctly declined missing request
-  traces (STRATA_TRACE was omitted); its failed run is preserved. A corrected
-  traced ABBA is running. The same 19-case continuation suite is requeued behind
-  exact-logit and matching-allocation gates, without diagnostic relaxation.
+  traces (STRATA_TRACE was omitted); its failed run is preserved. The corrected
+  traced ABBA passes independent raw-response/logit/allocation review: all 16
+  responses and logits match, and startup plus per-request loan records agree.
+  The same 19-case continuation suite is now running without diagnostic relaxation.
   The historical 256-token context benchmark is prepared and queued behind
-  exact continuation/prefix parity; host validation passes. No adoption;
+  exact continuation/prefix parity; host validation passes. An expert-launch
+  tracer builds and passes eleven host parser checks; its graph-parity and
+  model-dispatch GPU tests wait until timing ends. Counts distinguish graph
+  capture from replay and describe submitted kernels, not active routed groups.
+  No adoption;
   see [IQ2_XS notes](bench/volta-turing/iq2xs-gu.md).
 - [ ] C04 — Exploratory: screen the revised arithmetic-compatible IQ2 nibble
   layout, preserving decoded weights, FP16 SiLU boundaries and reduction order.

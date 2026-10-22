@@ -4,8 +4,9 @@ Status, 2026-10-22: both the isolated mode-8 proposal and its extension to
 Turing's normal mode 4 pass GPU correctness, sanitizers and reviewed repeated
 kernel timings. The clean engine build is complete; disabled logits match the
 installed reference. All 16 enabled/disabled retrieval requests also pass
-with exact logits. Their allocation audit lacked request traces; a corrected
-traced run is in progress. Neither proposal is installed or adopted.
+with exact logits. A corrected traced run now also passes independent
+retrieval/allocation review; full continuations are running. Neither proposal
+is installed or adopted.
 
 ## Measured reason to investigate
 
@@ -176,9 +177,13 @@ logs lack per-request loan records. Matching startup budgets alone cannot pass.
 The failed audit and stopped dependent queues are preserved.
 
 `iq2xs-engine-trace-v1` repeats the same retrieval ABBA with `STRATA_TRACE=1`
-in both arms. Actual request/loan records are now present. It rechecks the
-preserved disabled controls before running and retains the same exact-logit
-and strict allocation gates. It does not rebuild or change the candidate.
+in both arms. It completed with 16/16 exact responses and byte-identical first
+logits. `iq2xs-engine-trace-v1/quality-review.json` independently rechecks raw
+responses, finite vectors, configuration isolation and the allocation audit.
+All request/loan records are complete and equal across ABBA. Startup budgets
+also match: 1403 expert slots, chunk 6400, ring 96, maximum 1185 borrowed slots,
+39.60 GiB pinned complement, and 675 MiB/303 extra MTP-room slots. It rechecks
+the preserved disabled controls and does not rebuild or change the candidate.
 `iq2xs-workload-v1/run-queue-resume1.py` queues continuation checks behind that exact process and
 requires all 16 reference matches plus a strict allocation audit. Its prepared
 19 cases are byte-identical to the earlier workload (SHA256
@@ -188,6 +193,8 @@ requests across ABBA. Only `STRATA_IQ2XS_GU_FUSED=0/1` differs. Memory budgets
 must match; no diagnostic relaxation is enabled. Existing task failures remain
 failures even if continuations are identical. Full-model performance and
 adoption remain pending.
+
+The resumed continuation queue has passed those gates and is now running.
 
 `iq2xs-performance-v1/run-queue-resume1.py` then waits for the continuation
 job. It requires all 18 non-warmup tasks to retain identical emitted tokens
@@ -204,3 +211,24 @@ isolation. It retains fused-prefill coverage requirements for that experiment,
 without imposing those unrelated kernels on IQ2_XS. Replaying all 76 earlier
 fused-prefill records retains the same four warmup passes and 72 task failures.
 IQ2_XS launch coverage is a separate gate, not inferred from prefill traces.
+
+## Expert launch diagnostic
+
+`trace-expert-launches.cpp` is a separate Linux/CUDA interposer for grouped
+gate/up, down and standalone SwiGLU/Q8 kernels. It records launch shapes and
+capture state, inspects graph nodes (including child graphs), and records
+actual graph replays. `analyze-expert-launches.py` counts direct launches plus
+replayed nodes, excluding capture records from submitted-kernel totals.
+Unknown replay handles, incomplete metadata, failed CUDA calls and conditional
+graphs fail the trace qualification. Current engine sources do not update
+graphs or disable nodes; such mutations are outside this tracer's scope.
+
+The interposer builds with `-Wall -Wextra -Werror`; eleven host parser checks
+pass. GPU qualification is queued after performance, in
+`expert-launch-trace-v1`. It first runs the existing 24-graph/144-replay tests
+with the tracer on, requiring unchanged output and exact fused node counts.
+Then it runs four retrieval contexts with each feature setting, requiring
+matching output tokens and installed-reference logits while checking that
+IQ2_XS fused kernels are submitted only when enabled. These remain pending
+GPU checks. Full-process kernel counts include startup; launch capacities do
+not reveal active routed groups. No timing or occupancy is inferred.
