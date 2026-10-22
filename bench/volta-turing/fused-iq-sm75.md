@@ -365,3 +365,27 @@ baseline expert-route timing job to release the GPU. Those unchanged-kernel
 timings may run regardless of this feature's result, but model-quality work
 still requires a clean full boundary sanitizer report. No adoption gate is
 bypassed; tile work still follows the full task suite.
+
+### Fresh group-tail retrieval and automatic planning
+
+The resume5 retrieval ABBA completed on 2026-10-22. All 16 responses pass;
+both baseline legs match the installed-reference logits byte-for-byte, and
+each arm repeats its own first logits exactly. Independent raw-response and
+finite-vector review is in `fused-iq-workload-v1/retrieval-review.json`.
+First-token KL at 1K/4K/16K/32K is 0/0.0040404/0.0233124/0.1601582, with equal
+top-1. The larger long-context divergence must remain visible in qualification.
+
+With the group-tail reservation, candidate startup chunk is now 6912, versus
+6400 for baseline and 6144 in the earlier fused candidate without group-tail.
+Baseline/candidate maximum loans are 1185/1179 and pinned RAM 39.60/39.57 GiB;
+1403 expert slots, ring 96 and MTP room match. Per-request loans differ too.
+This establishes changed planner behavior; it does not isolate group-tail
+numerics or establish equal memory budgets. The fixed-chunk exact boundary
+controls remain separate evidence.
+
+The 76-request task suite has started with the original seven cases and all
+labelled long-context additions. Timing comparisons remain suppressed because
+observed budgets differ. Full task review, allocation control and a qualifying
+performance run are still required before adoption. The independent C03 route
+measurements are reviewed, and an [IQ2_XS prototype](iq2xs-gu.md) is queued after
+the tile tests; it does not change these frozen model-test binaries.

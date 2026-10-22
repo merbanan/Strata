@@ -148,7 +148,13 @@ are in bench/volta-turing/k8v4-stage.md.
   exactly and adds four task types at 4K/16K/32K with labelled background records.
   Default budget equality remains strict; diagnostic mode records mismatches
   and suppresses timing comparisons. Host gates/configuration preflight pass.
-  It is queued behind group-tail GPU gates and a fresh retrieval/allocation ABBA.
+  Fresh retrieval ABBA passes 16/16; both baseline legs match installed-reference
+  logits exactly, and each arm repeats its logits. Full 76-request tasks are
+  now running. With group-tail, candidate auto chunk rises to 6912 versus
+  baseline 6400; maximum loans 1179/1185 and pinned RAM 39.57/39.60 GiB differ.
+  First-token KL is 0/0.00404/0.02331/0.16016 at 1K/4K/16K/32K, with equal
+  top-1. This is diagnostic evidence, not quality or allocation qualification;
+  see `fused-iq-workload-v1/retrieval-review.json`.
 - [ ] Reduce fused fallback scratch under `STRATA_PF_GROUP_SCRATCH`.
   Detached opt-in `STRATA_PF_FUSED_GROUP_TAIL` prototype builds; it changes
   both buffer reservations and per-chunk group-cap selection/reset. Host size,
@@ -163,7 +169,7 @@ are in bench/volta-turing/k8v4-stage.md.
   and synchronization limit16 were required; this is not long-context or race
   qualification. Six prior failures and the clean graph smoke are retained.
   See `full-engine-memcheck-review.json`. Independent baseline route timings
-  are running; resume5 retrieval/full quality and tile controls follow.
+  are reviewed; resume5 full quality is running, with tile controls queued.
   Validate original tasks and auto planner behavior before adoption; no global
   VRAM-byte or speed claim yet.
 - [ ] Profile per-format/routed-M performance and use selective dispatch.
@@ -392,8 +398,9 @@ on four V100s are hypotheses for our single RTX 2060 SUPER, not local gains.
   format/shape paths, including packed-byte DP4A/LUT readers
   ([#982](https://github.com/1CatAI/1Cat-vLLM/pull/982),
   [#970](https://github.com/1CatAI/1Cat-vLLM/pull/970)).
-  Native grouped-decode source audit complete; runtime route costs remain
-  pending. Default CUDA already fuses SwiGLU/Q8 and restricts it to the call's
+  Native grouped-decode source audit and synthetic route timings complete.
+  Production route frequencies remain pending. Default CUDA already fuses
+  SwiGLU/Q8 and restricts it to the call's
   entry interval (`e7a5fd30`); the old two-pass path requires GROUPED_V1.
   Mode 8 additionally fuses gate/up into Q8 for IQ2_XXS/IQ3_XXS/IQ3_S/IQ2_S/
   IQ4_XS. Turing's default mode 4 retains the combined epilogue launch. Verify
@@ -409,13 +416,15 @@ on four V100s are hypotheses for our single RTX 2060 SUPER, not local gains.
   pairs, T=1/4/8/16 and empty/small strided PCIe plus VRAM shapes. It checks
   exact output and active Q8 bytes, poisoned unused entries and allocation
   guards against the legacy mode-0 path. Synthetic weights, real pack format
-  coverage; no model-quality or speed result. Its balanced default/0/4/8
-  graph timings are queued, with separate whole-call/GU-plus-epilogue/down
-  phases and 48 nonoverlapping weight regions in one device arena. Parser
-  gates pass; input quantization and host/PCIe transfers are outside this test.
-  If those measurements justify it, investigate GridOf/DotG support for
-  IQ2_XS's 512-entry table and an exact GU-to-Q8 epilogue, preserving the
-  current integer/sign arithmetic and default dispatch. No new kernel yet.
+  coverage; no model-quality or throughput result. All 57,600 balanced
+  default/0/4/8 timing samples are independently reviewed, with separate
+  whole-call/GU-plus-epilogue/down phases and 48 nonoverlapping weight regions.
+  Input quantization and host/PCIe transfers are outside this test.
+  An isolated opt-in IQ2_XS GridOf/DotG proposal now builds for sm70/sm75,
+  preserving the original dot arithmetic and existing default dispatch.
+  Both targets report 62 registers and zero spills. Original/unset/zero/one
+  controls, changed-input graph replays, sanitizers and timing ABBA are queued
+  after the existing GPU jobs. No adoption; see [IQ2_XS notes](bench/volta-turing/iq2xs-gu.md).
 - [ ] C04 — Exploratory: screen the revised arithmetic-compatible IQ2 nibble
   layout, preserving decoded weights, FP16 SiLU boundaries and reduction order.
   Charge expanded bytes against cache residency and measure acceptance; the
