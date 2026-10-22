@@ -11,6 +11,17 @@ tracks execution and evidence; the [optimization ledger](../Strata-data/bench/op
 indexes both. Unchecked items include conditional investigations, not promises
 that every proposed port will help. Deferred ideas require new evidence first.
 
+## Priority correctness follow-up
+
+- [ ] Fix and qualify the Turing QSA halving scorer with FP16 pooled-key storage
+  before further promotion. The local IDX_F16 option writes half values, while
+  the default sm75 halving scorer reads float4. A CPU byte-layout witness
+  confirms the mismatch; the corrected storage-aware variant builds for sm70
+  and sm75 and links into a separate clean engine. Original/fallback/corrected
+  GPU controls, changed-input graph replay and sanitizers are queued. No
+  runtime quality recovery, speedup or adoption claim yet. See
+  [QSA FP16 investigation](bench/volta-turing/qsa-halve-f16.md).
+
 ## Execution status
 
 - [x] Investigate local code/history and upstream open/closed PRs and issues.
@@ -487,6 +498,10 @@ on four V100s are hypotheses for our single RTX 2060 SUPER, not local gains.
   cuBLAS plus exact top-k only on material large-prefill shapes. Check actual
   kernel admission; 1Cat's gain over its Triton fallback does not transfer
   ([#1229](https://github.com/1CatAI/1Cat-vLLM/pull/1229)).
+  Local source audit first found the FP16/halving-scorer interaction above.
+  Existing decode kernels already reuse pooled keys across queries; avoid
+  duplicating that work. Correct the storage path and trace admission before
+  comparing a new scorer.
 - [ ] C07 — Screen narrower pre-Ampere QSA prefill tiles after proving which
   source path executes; account for the corrected historical attribution
   ([issue #441](https://github.com/1CatAI/1Cat-vLLM/issues/441),
