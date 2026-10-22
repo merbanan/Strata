@@ -3,7 +3,7 @@
 
 Partial reports describe completed requests only. Manual fresh-code/prose
 reviews apply only to the identical output bytes and task type. Supports the
-fused-prefill diagnostic and the IQ2_XS experiment with matching budgets.
+fused-prefill diagnostic, IQ2_XS experiment and controlled QSA FP16 comparison.
 Task qualification and performance qualification remain separate.
 """
 import argparse
@@ -73,6 +73,16 @@ def completed_traces(raw):
     return requests
 
 
+def validate_qsa_control(cfg, raw_log):
+    assert cfg['env']['STRATA_IDX_F16'] == '1', 'QSA comparison requires FP16 keys'
+    assert cfg['env']['STRATA_VERIFY_DEFER_CPU'] == '0', 'deferred CPU must be disabled'
+    for option, value in (('--adapt-async', '0'), ('--adapt-swaps', '0'), ('--pcie-frac', '0.11')):
+        assert cfg['args'].count(option) == 1
+        assert cfg['args'][cfg['args'].index(option) + 1] == value, option
+    assert b'strata diagnostic: fixed draft-policy costs; correctness control only' in raw_log
+    assert b'adaptive tier asynchronous' not in raw_log
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('workload', type=Path)
@@ -94,7 +104,7 @@ def main():
     assert raw_cases == read(args.prepared_cases)
     manifest = json.loads(read(args.workload/'manifest.json'))
     feature = manifest['feature_env']
-    assert feature in ('STRATA_PF_FUSED', 'STRATA_IQ2XS_GU_FUSED'), 'unsupported experiment'
+    assert feature in ('STRATA_PF_FUSED', 'STRATA_IQ2XS_GU_FUSED', 'STRATA_SCORES_HALVE'), 'unsupported experiment'
     assert manifest['base_value'] == '0' and manifest['candidate_value'] == '1'
     diagnostic = manifest['diagnostic_budgets']
     cases = json.loads(raw_cases)
@@ -156,7 +166,10 @@ def main():
             cfg.pop('log', None)
             normalized_configs[leg] = cfg
             assert all(c == normalized_configs[leg] for c in normalized_configs.values()), 'configuration drift beyond feature switch'
-            traces[leg] = completed_traces(read(directory/'engine.log'))
+            raw_log = read(directory/'engine.log')
+            if feature == 'STRATA_SCORES_HALVE':
+                validate_qsa_control(cfg, raw_log)
+            traces[leg] = completed_traces(raw_log)
         index = cases.index(case)
         trace = traces[leg][index]
         assert trace['done'] == row['done'] and trace['tokens'] == row['tokens']
@@ -195,7 +208,7 @@ def main():
               'complete': records_complete and not pending, 'adopted': False,
               'counts': dict(Counter(f"{r['arm']}:{'qualified' if r['qualified'] else 'unqualified'}" for r in results)),
               'results': results, 'inputs': inputs,
-              'limits': 'Incomplete or unreviewed tasks remain unqualified. Raw response/protocol and applicable fused-prefill coverage are checked. Diagnostic budgets forbid timing comparisons; equal budgets alone do not qualify performance. IQ2_XS launch coverage requires separate evidence. No model-wide quality or adoption claim.'}
+              'limits': 'Incomplete or unreviewed tasks remain unqualified. Raw response/protocol and applicable fused-prefill coverage are checked. Diagnostic budgets forbid timing comparisons; equal budgets alone do not qualify performance. Kernel launch coverage requires separate evidence. Fixed-policy QSA runs do not establish production performance. No model-wide quality or adoption claim.'}
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(report, indent=2)+'\n')
     print(json.dumps({k:v for k,v in report.items() if k not in ('results','inputs')}, indent=2))

@@ -21,6 +21,10 @@ that every proposed port will help. Deferred ideas require new evidence first.
   GPU controls, changed-input graph replay and sanitizers are queued. No
   runtime quality recovery, speedup or adoption claim yet. See
   [QSA FP16 investigation](bench/volta-turing/qsa-halve-f16.md).
+  Full 76-request qualification is prepared behind independent kernel review:
+  corrected halving versus the existing FP16-aware fallback, with fixed draft
+  costs, swaps/deferred CPU off and fixed PCIe fraction. All original tasks and
+  caps remain. Host policy/reviewer controls pass; model results remain pending.
 
 ## Execution status
 

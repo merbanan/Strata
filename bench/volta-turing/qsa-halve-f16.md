@@ -76,3 +76,30 @@ Public issue/PR searches for `STRATA_SCORES_HALVE` and `STRATA_IDX_F16` found
 no matching storage-fix report in that search. PR #3233 concerns gfx12 scoring;
 its saved diff retains the existing halving dispatch. This is a limited search,
 not a claim that every upstream discussion was inspected for this interaction.
+
+
+## Full-model qualification prepared
+
+`qsa-halve-f16-fixed-v1` links the corrected score object and the previously
+validated diagnostic draft-cost policy into the clean engine. A 1000-round
+host negative control varies only measured timing: the original policy makes
+987 different window choices, while the fixed-cost policy has zero differing
+choices, chains or costs. This demonstrates why learned timing must be
+controlled for numerical isolation; it does not validate model inference.
+
+`qsa-halve-f16-workload-v1` queues the same 19 original/4K/16K/32K tasks and
+full generation caps, in four ABBA legs. Prepared case bytes match the prior
+suite exactly. Both arms use one corrected binary with FP16 keys; the base
+selects the existing fallback (`STRATA_SCORES_HALVE=0`), the candidate selects
+the corrected halving scorer (`=1`). Both disable adaptive swaps and deferred
+CPU work, use blocking adaptation, fix the PCIe fraction to 0.11, and use
+fixed draft costs. No IQ2 fusion is enabled.
+
+The queue requires a fresh independent review of the complete kernel,
+negative-control and sanitizer logs before starting GPU inference. It retains
+all task failures, output tokens, prefix reuse and memory budgets. The workload
+reviewer now recognizes this explicitly controlled comparison and rejects
+missing fixed-policy evidence or drift in these controls. Nine host checks
+pass. Replaying the prior 76 fused-prefill records preserves every task
+classification. GPU task results, per-request allocation review and production
+performance remain pending; this diagnostic alone cannot justify adoption.
