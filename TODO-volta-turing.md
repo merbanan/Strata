@@ -135,11 +135,14 @@ are in bench/volta-turing/k8v4-stage.md.
   Observed-allocation audit detects real differences: chunks 6400/6144,
   max loans 1185/1192, pinned RAM 39.60/39.57 GiB; 4K and 16K loans also differ.
   Equal configuration or startup rings do not qualify allocation parity.
-- [ ] Score fixed continuations after batched prefill, then retain the full
-  original editing/code/prose workload. Added `prefill-teacher.py`; the 4K smoke
-  test passes exact prefix/tail coverage. Five segments at 1K/4K/16K/32K
-  are now running in ABBA (80 requests, 10,240 score positions). Target NLL/top-1
-  diagnostics do not substitute for full-distribution KL or task qualification.
+- [x] Score fixed continuations after batched prefill at 1K/4K/16K/32K.
+  All 80 requests/10,240 score positions complete; raw-score/target/read-path audit
+  passes and within-arm TSV bytes repeat exactly. Top-1 agreement is
+  100/98.44/92.19/88.91%; pooled perplexity ratio 1/0.9258/1.0233/0.9978.
+  Worst loss increase: 16K code, NLL +0.21054/perplexity 1.2343x. Scores are
+  rounded, allocations differ, and these probes do not qualify full tasks or KL.
+- [ ] Retain and review the full original editing/code/prose workload, with
+  additional long-context coverage that actually exercises fused prefill.
   Coverage audit: all original task prompts are below the 3072-token fusion
   threshold. A detached 76-request task suite retains all seven original cases
   exactly and adds four task types at 4K/16K/32K with labelled background records.
@@ -151,8 +154,8 @@ are in bench/volta-turing/k8v4-stage.md.
   both buffer reservations and per-chunk group-cap selection/reset. Host size,
   capacity and disabled-path probes pass. Calculated four-buffer size at
   T=6400/threshold3072 is 343.0 -> 168.8 MiB; actual arena/VRAM savings unmeasured.
-  Original/unset/zero/one GPU boundary controls plus full-engine memcheck are
-  queued behind the current teacher sweep. Validate original tasks and auto
+  Original/unset/zero/one GPU boundary controls are running after the completed
+  teacher sweep; full-engine memcheck follows. Validate original tasks and auto
   planner behavior before adoption; do not just lower baseline chunks.
 - [ ] Profile per-format/routed-M performance and use selective dispatch.
   Static audit maps all 19 compiler entries: IQ3_XXS/IQ4_NL use 124/125

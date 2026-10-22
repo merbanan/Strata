@@ -87,10 +87,29 @@ repeats, and reports full-vocabulary target NLL and top-1 agreement. Its top-64
 lists do not establish full-distribution KL. Corpus repetitions are explicit;
 these numerical probes do not replace full editing/code/prose task review.
 The 4K code smoke test passed: exactly 4096 batched prefix tokens and 128
-scored window positions, with fused execution confirmed. The full sweep is
-running: five corpus segments, four context lengths, ABBA (80 requests and
-10,240 scored positions planned). See `teacher-harness-validation.json` and
-`teacher-queue.json`.
+scored window positions, with fused execution confirmed. The complete sweep
+finished successfully: five corpus segments, four context lengths, ABBA
+(80 requests and 10,240 scored positions). `audit-teacher.py` independently
+checks the raw score rows against the fixed target IDs, exact read-path traces
+and saved per-case results. Both arms repeat all logged TSV bytes exactly;
+these are rounded scores, not a proof of identical full logits or states.
+
+Each context below pools five segments and 640 positions per arm. Both ABBA
+pairs give the same results:
+
+| Prefix | Top-1 agreement | NLL change (fused minus MMQ) | Perplexity ratio |
+| --- | ---: | ---: | ---: |
+| 1K | 100% | 0 | 1.0000 |
+| 4K | 98.4375% | -0.07713 | 0.9258 |
+| 16K | 92.1875% | +0.02298 | 1.0233 |
+| 32K | 88.9063% | -0.00218 | 0.9978 |
+
+Do not hide individual-case variation behind the averages: 16K code has
+NLL +0.21054 and perplexity 1.2343x; 32K docs has only 82.8125% top-1 agreement
+although its target NLL improves slightly. The original planner's allocation
+changes are included, so this does not isolate kernel error. Raw repeated-corpus
+scores do not qualify task quality. No adoption or throughput claim follows.
+Evidence: `teacher-audit.json`, `teacher/summary.json`, and raw TSV/trace files.
 
 ## Model gates still open
 
@@ -155,8 +174,9 @@ MoE buffers calculate to 359,712,384 -> 177,012,608 bytes (343.0 -> 168.8 MiB).
 This is buffer arithmetic, not observed VRAM savings: the enclosing arena is
 the maximum of attention, MoE and other scratch requirements.
 
-GPU validation is queued behind the existing teacher-forced sweep, pinning
-its process identity and all test inputs. It compares the original engine and
+The teacher-forced sweep has finished and GPU boundary validation is now
+running, with pinned inputs. The queued handoff checked its process identity
+and successful completion before starting. It compares the original engine and
 the new binary with unset/zero/one flags, fixed 4096-token chunks, CPU share
 off and an explicit 3072 streaming threshold. Fifteen tail cases include
 1/63/64/65, 511, 1023/1024/1025, 2047/2048/2049, 3071/3072/3073, then a full
