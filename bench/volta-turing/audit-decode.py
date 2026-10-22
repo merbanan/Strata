@@ -5,6 +5,7 @@ Can snapshot an incomplete run. Task success, output parity and timing are
 separate findings; a fast failed task never becomes a successful-task result.
 """
 import argparse
+from collections import Counter
 import hashlib
 import json
 from pathlib import Path
@@ -88,8 +89,16 @@ def main():
             continue
         log = (directory / 'engine.log').read_text(errors='replace')
         free = [int(n) for n in re.findall(r'(\d+) MiB of VRAM free', log)]
+        captures = re.findall(r'captured the (\d+)-token window', log)
+        evictions = re.findall(r'evicted solo graph T=(\d+) doorbell_variant=(\d+) \((\d+) retained, limit (\d+)\)', log)
         record = {'minimum_logged_free_mib': min(free) if free else None,
-                  'captured_windows': re.findall(r'captured the (\d+)-token window', log),
+                  'captured_windows': captures,
+                  'capture_counts_by_window': dict(Counter(captures)),
+                  'solo_evictions': len(evictions),
+                  'eviction_counts_by_window_variant': dict(Counter(f'{t}/{variant}' for t, variant, _, _ in evictions)),
+                  'solo_graph_limits_logged': sorted(set(int(limit) for _, _, _, limit in evictions)),
+                  'verifier_arena_mib_logged': sorted(set(float(value) for value in
+                      re.findall(r'window up to \d+ tokens, ([\d.]+) MiB of device buffers', log))),
                   'budget_complete': (directory / 'budget.json').exists()}
         if record['budget_complete']:
             record['budget'] = json.loads((directory / 'budget.json').read_text())

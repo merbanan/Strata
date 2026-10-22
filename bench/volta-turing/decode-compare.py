@@ -116,22 +116,34 @@ def main():
     p.add_argument('--source', type=Path, required=True, help='original lookup src_edit.py')
     p.add_argument('--warmup', type=Path, required=True, help='qualified retrieval requests.json')
     p.add_argument('--arms', default='base,candidate,candidate,base')
+    p.add_argument('--feature-env', default='STRATA_ROUTE_Q8_FUSE',
+                   help='the only environment setting allowed to differ between arms')
+    p.add_argument('--base-value', default='0')
+    p.add_argument('--candidate-value', default='1')
+    p.add_argument('--validate-configs-only', action='store_true',
+                   help='check the arm configurations and exit without GPU work or output creation')
     a = p.parse_args()
     arms = a.arms.split(',')
     if not arms or any(arm not in ('base', 'candidate') for arm in arms):
         p.error('invalid arms')
+    if a.base_value == a.candidate_value:
+        p.error('feature values must differ')
     repo = Path(__file__).resolve().parents[2]
     a.out = a.out.resolve()
-    a.out.mkdir(parents=True, exist_ok=False)
     configs = {name: json.loads(path.read_text()) for name, path in [('base', a.base), ('candidate', a.candidate)]}
     normalized = []
-    for arm, value in [('base', '0'), ('candidate', '1')]:
+    for arm, value in [('base', a.base_value), ('candidate', a.candidate_value)]:
         cfg = json.loads(json.dumps(configs[arm]))
-        assert cfg['env'].pop('STRATA_ROUTE_Q8_FUSE') == value
-        assert not any(name in cfg['env'] for name in ('LD_PRELOAD', 'STRATA_DUMP_FIRST_LOGITS', 'STRATA_ROUTE_Q8_LAUNCH_LOG'))
+        assert cfg['env'].pop(a.feature_env) == value, f'{arm}: unexpected {a.feature_env}'
+        assert not any(name in cfg['env'] for name in ('LD_PRELOAD', 'STRATA_DUMP_FIRST_LOGITS',
+                                                      'STRATA_ROUTE_Q8_LAUNCH_LOG', 'STRATA_GRAPH_MEMORY_LOG'))
         cfg.pop('log', None)
         normalized.append(cfg)
-    assert normalized[0] == normalized[1], 'configuration mismatch beyond fusion switch'
+    assert normalized[0] == normalized[1], 'configuration mismatch beyond selected feature switch'
+    if a.validate_configs_only:
+        print(f'PASS configuration comparison: {a.feature_env}={a.base_value}/{a.candidate_value}')
+        return 0
+    a.out.mkdir(parents=True, exist_ok=False)
     sys.path[:0] = [str(repo), str(repo / 'tools')]
     from strata_tokenizer import Tokenizer
     from serve.frontend import ChatTemplate, openai_to_messages
@@ -178,6 +190,7 @@ def main():
     spec.loader.exec_module(checks)
     manifest = {'binary': configs['base']['exe'], 'binary_sha256': digest(configs['base']['exe']),
                 'source_sha256': digest(a.source), 'harness_sha256': digest(__file__),
+                'feature_env': a.feature_env, 'base_value': a.base_value, 'candidate_value': a.candidate_value,
                 'scope': 'Direct engine; original lookup tasks plus separately named instruction-first edits. No generated code execution.'}
     (a.out / 'manifest.json').write_text(json.dumps(manifest, indent=2) + '\n')
     (a.out / Path(__file__).name).write_bytes(Path(__file__).read_bytes())
