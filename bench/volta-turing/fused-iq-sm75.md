@@ -44,6 +44,13 @@ before the archive; only its native IQ member is replaced. It strips CMake's
 link dependency-output option so artifact links cannot overwrite build metadata.
 Commands, source and library hashes are in `build-prepared.json`.
 
+A separate checkout at `/tmp/strata-v20-iq-prefill` is based on `5e4d56b7` and
+contains only the 31-line IQ admission patch. Its full sm75 engine build is
+queued after all microchecks pass, with a separate build directory and pinned
+source hashes (`engine-prepared.json`). It excludes the uncommitted solo-graph
+cache experiment. Build completion alone will not trigger adoption or bypass
+model qualification.
+
 ## Model gates still open
 
 After the kernel tests pass, build an isolated engine and compare with identical
@@ -52,6 +59,25 @@ show 6400-token chunks, a 96-slot ring and 303 additional loaned slots. The ring
 can be fixed with `STRATA_PREFILL_RING`; verify actual allocations in both arms.
 Do not infer equality from identical configuration alone: the fused layout
 changes scratch allocation and the automatic planner can choose other budgets.
+
+`audit-prefill-allocation.py` compares observed startup slots/chunks/rings,
+maximum borrowed slots, pinned RAM and MTP room, plus each request's loan
+counts. Use `STRATA_TRACE=1` in separate diagnostic runs; do not use their
+timings as throughput measurements. Missing trace coverage, incomplete prefill,
+multi-device lending or chunk-reduction warnings cannot pass. Example:
+
+```sh
+python3 bench/volta-turing/audit-prefill-allocation.py base/engine.log candidate/engine.log \
+  --expected-requests 4 --output allocation-comparison.json
+```
+
+Nine parser/gate checks pass, including mismatched rings, maximum/request loans,
+prompt shapes, missing/incomplete traces and reduced chunks. A real untraced
+baseline compared with itself correctly fails completeness. These checks use
+synthetic request traces and are recorded in `allocation-audit-validation.json`;
+they are not new GPU measurements. Equal counts do not prove equal expert
+identities or owned bytes. Source audit: the existing loan trace prints the
+requested chunk (`want`), so a logged reduction to `want_p` requires review.
 
 Retain short/4K/16K/32K prompts and the full editing, code and prose workload.
 Measure first-token and teacher-forced numerics plus task quality before treating

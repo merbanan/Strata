@@ -124,13 +124,18 @@ are in bench/volta-turing/k8v4-stage.md.
 
 - [ ] Port the v14 sm_75 IQ candidate (540953d7) behind its opt-in switch.
   Prepared a detached current-source port; the original patch applies without
-  offsets or fuzz. Compile, Q2 disabled-path byte comparison, all 11 format
+  offsets or fuzz. A clean checkout based on `5e4d56b7` excludes the graph-cache
+  prototype; its full sm75 engine build waits for the microchecks to pass.
+  Compile, Q2 disabled-path byte comparison, all 11 format
   references, sanitizers and repeated 2048/6400/8192 layer timing are queued
   after the graph-cache full-model comparison. Production source is unchanged.
   See [IQ prefill notes](bench/volta-turing/fused-iq-sm75.md). The old first-token
   KL of 0.35 remains an unresolved numerical result; kernel error comparable to
   MMQ is not model-quality qualification.
 - [ ] Compare against MMQ with identical chunk size, ring and expert residency.
+  Added an observed-allocation audit for startup budgets and per-request loans.
+  Nine negative/positive checks pass; missing traces and reduced chunks cannot
+  qualify. Actual traced fused/MMQ comparison is pending the engine build.
 - [ ] Profile per-format/routed-M performance and use selective dispatch.
 - [ ] Check scratch/grouping interactions; PF_DM_GROUP changes combine order.
 - [ ] Require a full-engine win: the old isolated-kernel win did not improve prefill.
