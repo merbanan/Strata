@@ -228,3 +228,37 @@ It then runs a 16-request retrieval/allocation ABBA with the new binary, require
 both baseline legs to match the adopted-release logits and all retrieval tasks
 to pass, and only then runs the 76-request task suite. Neither stage adopts the
 feature automatically. See `fused-iq-workload-v1/queue-prepared.json`.
+
+## Existing tile-control experiment and smaller-block constraints
+
+`fused-iq-tiles-v1/` prepares the existing auto/64/128-row controls with the
+unchanged v2 kernel-test binary. It is queued after the full task suite, with
+no GPU overlap. All 11 format references run under each setting; canonical
+IQ3_XXS/IQ4_NL output bytes are retained at the reference shape. IQ2_S's
+requested 64-row layout still falls back to 128 because four warps do not fit.
+
+The balanced auto/64/128/128/64/auto timing order covers 1024, 2048, 2867,
+2868, 4096, 5632, 5734, 5735, 6144, 6400 and 8192 tokens. The adjacent shapes
+straddle the existing average-routed-row cutoffs of 56 and 112. Small shapes
+also include cases below this engine configuration's fusion threshold; their
+kernel timings cannot establish a current engine gain. The parser was checked
+against real logs and rejects wrong shapes, incomplete runs and zero timings.
+GPU results are pending. Larger-shape output hashes are checksums, while the
+reference-shape comparison retains the full output bytes.
+
+The source-level smaller-block audit rules out changing only THREADS from
+512 to 256: at WW=4, half the weight rows and half the routed rows would be
+uncovered; at WW=2, half the routed rows would be uncovered. A consistent
+256-thread WW=2/TR=64 mapping covers the intended rows but still needs 36,096
+shared bytes for IQ3_XXS with two activation stages. Turing has 64 KiB shared
+memory per SM, so shared memory alone limits that proposed layout to one
+block. This is an inference from the source's size formula and NVIDIA's
+[occupancy limits](https://docs.nvidia.com/cuda/turing-tuning-guide/index.html#occupancy),
+not a runtime occupancy measurement.
+
+One activation stage would calculate to 30,976 bytes, but the existing loop
+loads that stage after its barrier and would then let other warps read it
+without another barrier. A one-stage variant needs explicit synchronization
+and updated host/device accounting before any numerical or sanitizer tests.
+Neither smaller-block variant is implemented. See `smaller-block-audit.json`;
+benchmark the existing tile controls before changing the kernel mapping.

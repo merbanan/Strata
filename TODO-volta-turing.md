@@ -160,9 +160,14 @@ are in bench/volta-turing/k8v4-stage.md.
 - [ ] Profile per-format/routed-M performance and use selective dispatch.
   Static audit maps all 19 compiler entries: IQ3_XXS/IQ4_NL use 124/125
   registers without spills. Spill entries belong to IQ2_S/IQ2_XS/Q2_0 GU.
-  Compare existing TILE=64/128 first. Investigate smaller blocks only with
-  consistent tile/group coverage; do not assume other formats' spills explain
-  current-model performance.
+  Existing auto/64/128 controls are queued after full task quality: all 11
+  references, canonical IQ3 bytes, and 11 shapes including 2867/2868 and
+  5734/5735 threshold neighbors, in balanced six-leg order. Parser gates pass.
+  The smaller-block audit rejects a THREADS-only edit (missing row coverage).
+  A consistent 256-thread WW2/TR64 layout still uses 36,096 shared bytes; a
+  one-stage 30,976-byte variant needs a new load/consumer barrier. Neither is
+  implemented. Keep these leads gated on measured tile results; other formats'
+  spills do not explain current-model performance.
 - [ ] Check scratch/grouping interactions; PF_DM_GROUP changes combine order.
 - [ ] Require a full-engine win: the old isolated-kernel win did not improve prefill.
 
