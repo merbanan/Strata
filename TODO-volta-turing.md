@@ -437,9 +437,15 @@ on four V100s are hypotheses for our single RTX 2060 SUPER, not local gains.
   three sanitizers. Its 115200 timing samples are reviewed; balanced VRAM
   whole calls are 1.13–1.43x faster than old mode 8 in both pairs. No engine
   gain is claimed. V2 extends the opt-in to Turing's normal mode 4 without a
-  global mode override; controls and sanitizers pass, timing ABBA is running.
-  A clean production-source engine build and strict disabled/enabled model
-  checks are queued. No adoption; see [IQ2_XS notes](bench/volta-turing/iq2xs-gu.md).
+  global mode override. Its 4800 comparisons, 96 graphs/576 replays, three
+  sanitizers and 115200 timing samples pass independent review. Automatic
+  balanced VRAM calls are 1.23–1.34x faster at T=1/4 and 1.78–2.59x at T=8/16;
+  synthetic kernel results only, with unchanged controls exposing clock drift.
+  Clean engine build complete; all four disabled first-logit vectors match the
+  installed reference. Strict enabled/disabled retrieval checks are running.
+  The same 19-case continuation suite is queued behind exact-logit and matching-
+  allocation gates, without diagnostic budget relaxation. No adoption;
+  see [IQ2_XS notes](bench/volta-turing/iq2xs-gu.md).
 - [ ] C04 — Exploratory: screen the revised arithmetic-compatible IQ2 nibble
   layout, preserving decoded weights, FP16 SiLU boundaries and reduction order.
   Charge expanded bytes against cache residency and measure acceptance; the

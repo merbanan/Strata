@@ -1,9 +1,10 @@
 # IQ2_XS grouped gate/up fusion experiment
 
-Status, 2026-10-22: the isolated mode-8 proposal passes GPU correctness,
-sanitizers and repeated kernel timings. A second proposal extends the opt-in
-to Turing's normal mode 4; its controls/sanitizers pass and timing is running.
-A clean engine build and strict model checks follow. Neither is installed or adopted.
+Status, 2026-10-22: both the isolated mode-8 proposal and its extension to
+Turing's normal mode 4 pass GPU correctness, sanitizers and reviewed repeated
+kernel timings. The clean engine build is complete; disabled logits match the
+installed reference. Enabled/disabled model checks are running. Neither
+proposal is installed or adopted.
 
 ## Measured reason to investigate
 
@@ -127,8 +128,32 @@ strided PCIe, unsupported geometry and other formats keep their old paths.
 sm70/sm75 builds and complete patch replay pass.
 
 V2 expands graph coverage to automatic/0/4/8: 24 graphs and 144 changed-input
-replays per arm. All four 300-case controls and all three sanitizers have
-passed; timing ABBA is running. Results remain under `iq2xs-gu-v2/run/`.
+replays per arm. All four 300-case controls and all three sanitizers passed.
+`iq2xs-gu-v2/review-results.py` rechecks frozen inputs, all raw parity/graph/
+sanitizer logs and 115,200 timing samples. It independently reconstructs
+sample counts and medians, compares them with saved summaries, and checks
+all timing-leg output hashes against the original control. Results are in
+`iq2xs-gu-v2/results-review.json`.
+
+For automatic dispatch, complete-call disabled/enabled ratios for balanced
+VRAM shapes are:
+
+| Down format | Tokens | First pair | Second pair |
+| --- | ---: | ---: | ---: |
+| IQ4_NL | 1 | 1.241 | 1.298 |
+| IQ4_NL | 4 | 1.234 | 1.287 |
+| IQ4_NL | 8 | 1.778 | 1.867 |
+| IQ4_NL | 16 | 2.516 | 2.588 |
+| Q2_0 | 1 | 1.301 | 1.337 |
+| Q2_0 | 4 | 1.298 | 1.316 |
+| Q2_0 | 8 | 1.857 | 1.889 |
+| Q2_0 | 16 | 2.472 | 2.513 |
+
+Unchanged mode-0 and down controls are retained with each comparison to
+expose clock drift. Automatic dispatch is now an affected path, so it cannot
+serve as the unchanged control used for v1. Two CPU compilation jobs overlapped
+part of this run. These synthetic kernel ratios justify full-model testing;
+they do not establish an inference speedup or V100 performance.
 
 `iq2xs-engine-v1` builds a fresh production-source baseline and links only the
 IQ2_XS CUDA object into a candidate. It does not reuse experimental fused-IQ
@@ -138,3 +163,15 @@ installed-reference logits, followed by 16 disabled/enabled ABBA requests.
 Every first-logit byte must match the installed reference and observed memory
 budgets must match. The local installed configuration remains unchanged;
 performance/continuation qualification and adoption are separate later steps.
+
+The clean build completed and all four disabled first-logit vectors match the
+installed reference byte for byte. The retrieval ABBA is running.
+`iq2xs-workload-v1` queues continuation checks behind that exact process and
+requires all 16 reference matches plus a strict allocation audit. Its prepared
+19 cases are byte-identical to the earlier workload (SHA256
+`7262da4ecbd575c22755d08f91faabe91a77ff564d7b21da650e5fb3c1adc36a`):
+seven original cases and twelve separately named 4K/16K/32K variants, 76
+requests across ABBA. Only `STRATA_IQ2XS_GU_FUSED=0/1` differs. Memory budgets
+must match; no diagnostic relaxation is enabled. Existing task failures remain
+failures even if continuations are identical. Full-model performance and
+adoption remain pending.
