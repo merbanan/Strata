@@ -314,7 +314,10 @@ context and memory settings. Full-engine memcheck has not yet passed:
   A separate one-token graph smoke process must pass before repeating the
   full boundary process. No graph, request or kernel coverage is removed from
   that boundary test. Both stages retain the synchronization limit and strict
-  report checks. The final result remains pending.
+  report checks. The one-token smoke has passed: clean exit, zero errors and
+  diagnostic lines, with 248,320 finite first logits. Independent inspection
+  is recorded in `graph-smoke-review.json`. The full boundary process is now
+  running; its final result remains pending.
 
 The fourth runner now rejects startup chunk reduction before issuing a
 request; it retains the post-request exact chunk/cap and fused-route checks.
@@ -341,3 +344,6 @@ prerequisites without running their GPU suites. Workload resumption requires
 a successful sanitizer result plus the independent boundary audit. Tile tests
 follow the retrieval and full-task suite. All stages retain independent
 review/adoption gates; no failed queue or log has been overwritten.
+After the successful graph smoke, `queue-resume4` restored the quality/tile
+chain behind the full boundary process and its strict report gate. It also
+pins the smoke-review evidence; no failed prerequisite has been bypassed.
