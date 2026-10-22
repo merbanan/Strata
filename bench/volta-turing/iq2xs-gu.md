@@ -256,3 +256,49 @@ then isolate any reproducible difference. Retrieval parity and synthetic
 kernel tests do not override continuation failures. The performance queue
 must decline this run if the exact-continuation requirement remains failed;
 no new inference throughput or adoption is qualified.
+
+
+## Repeatability confound and controlled diagnostics
+
+The original continuation configuration enables `--adapt-async 1`. Both logs
+confirm the asynchronous tier is active. `src/program/generate.cpp` and
+`docs/DETAILS.md` explicitly describe its run-to-run numerical variation:
+copy completion determines which window first computes an expert on GPU,
+whose rounding differs from CPU execution. In addition, the default PCIe
+fraction is computed continuously from a startup bandwidth probe; the logs
+print only two decimals. Identical printed fractions do not establish identical
+routing decisions. The original exact-output gate therefore cannot, by itself,
+isolate this kernel change. This confound should have been accounted for when
+preparing the comparison.
+
+The second candidate pass already differs from the first on `edit-rename`,
+after 2343 common tokens. This establishes variation with the same feature
+setting, without excluding a simultaneous feature effect. Preserve all four
+original legs to assess repeats. Evidence: `iq2xs-workload-v1/reviews/divergence-progress-2.json`
+and `iq2xs-blocking-diagnostic-v1/configuration-audit.json`.
+
+Two additional diagnostics are queued, with exact process identities and
+input hashes, after the existing GPU jobs:
+
+- `iq2xs-realweights-v1`: unmodified gate/up/down slices for experts 0, 127 and
+  511 in all ten IQ2_XS layers (47,769,600 bytes total). The host probe builds
+  against original, v2 and compact kernels with warnings as errors. Five arms
+  check 300 cases each, four modes, active Q8 bytes, full output and guards.
+  Cases use 1/3/4/5/16 tokens, uneven groups, two seeds and synthetic activation
+  standard deviations 0.03125/1/8. Weight slices retain offsets and hashes.
+  These are real weights with synthetic activations, not actual activation
+  replay or model inference. GPU results remain pending.
+- `iq2xs-blocking-diagnostic-v1`: ABBA with `--adapt-async 0` and explicit
+  `--pcie-frac 0.11` in both arms, holding the fusion switch as the arm
+  difference. The original warmup plus fresh-code, prose and instruction-first
+  logging prompts retain exact token IDs; the three continuations are capped
+  at 256 tokens to cover early observed differences. First-logit vectors,
+  emitted tokens, same-arm repeatability and observed memory budgets are
+  retained. This selected diagnostic does not replace full-task qualification
+  or production performance testing. Host preparation checks pass; GPU pending.
+
+The first baseline and first candidate task reviews are complete. At the
+40-request snapshot, all saved text matches emitted tokens, there are no
+pending independent reviews, three warmups pass and 37 substantive responses
+fail the requested tasks (`reviews/progress-7.json`). These failures do not
+establish a candidate-specific regression. No feature has been adopted.

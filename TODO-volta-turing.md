@@ -452,6 +452,11 @@ on four V100s are hypotheses for our single RTX 2060 SUPER, not local gains.
   substantive baseline/candidate pairs (28/76 total requests); their prefix
   reuse is zero in both arms. Repeated arms are still pending, so causation
   remains unresolved. Exact-output adoption/timing qualification does not pass.
+  Follow-up found both arms use documented non-bit-exact --adapt-async 1,
+  and candidate repeat already differs on the rename task. A controlled
+  blocking-adaptation/fixed-PCIe diagnostic is queued; the original full run
+  remains intact. A separate 30-real-expert, 300-case kernel probe builds
+  against original/v2/compact kernels and is queued to test broader weights.
   The historical 256-token context benchmark is prepared and queued behind
   exact continuation/prefix parity; host validation passes. An expert-launch
   tracer builds and passes eleven host parser checks; its graph-parity and
