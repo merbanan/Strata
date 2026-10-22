@@ -174,9 +174,9 @@ MoE buffers calculate to 359,712,384 -> 177,012,608 bytes (343.0 -> 168.8 MiB).
 This is buffer arithmetic, not observed VRAM savings: the enclosing arena is
 the maximum of attention, MoE and other scratch requirements.
 
-The teacher-forced sweep has finished and GPU boundary validation is now
-running, with pinned inputs. The queued handoff checked its process identity
-and successful completion before starting. It compares the original engine and
+The teacher-forced sweep finished and the queued handoff checked its process
+identity and successful completion. All GPU boundary controls now pass, with
+pinned inputs. It compares the original engine and
 the new binary with unset/zero/one flags, fixed 4096-token chunks, CPU share
 off and an explicit 3072 streaming threshold. Fifteen tail cases include
 1/63/64/65, 511, 1023/1024/1025, 2047/2048/2049, 3071/3072/3073, then a full
@@ -185,6 +185,17 @@ and zero first logits must match the original engine byte-for-byte. A separate
 full-engine memcheck covers the 3071-token tail. Model numerics, actual budget
 changes, original task quality and speed remain pending; the prototype is not
 adopted. See `queue.json` and `allocation-probe-results.json`.
+
+The completed boundary test has 60 requests: 15 each for the original binary,
+new binary with the switch unset, zero, and one. All three new-binary arms
+match all original first-logit bytes. The expected full/short chunk sequence
+and enabled group-cap selection/reset traces pass, with clean exits. An
+independent raw-vector/config/trace audit confirms finite 248,320-entry logits
+and all 60 request shapes. Observed loans are 956 slots for original/unset/zero
+and 844 with the switch on, at the same fixed 4096-token chunk: 112 fewer
+resident mappings displaced. This is not a global VRAM-byte or speed result.
+Full-engine memcheck is running; full model/automatic-planner task qualification
+remains pending. Evidence: `boundary-audit.json` and `boundaries/summary.json`.
 
 ## Compiler resource audit
 

@@ -154,9 +154,11 @@ are in bench/volta-turing/k8v4-stage.md.
   both buffer reservations and per-chunk group-cap selection/reset. Host size,
   capacity and disabled-path probes pass. Calculated four-buffer size at
   T=6400/threshold3072 is 343.0 -> 168.8 MiB; actual arena/VRAM savings unmeasured.
-  Original/unset/zero/one GPU boundary controls are running after the completed
-  teacher sweep; full-engine memcheck follows. Validate original tasks and auto
-  planner behavior before adoption; do not just lower baseline chunks.
+  All 60 original/unset/zero/one GPU boundary requests pass; all first-logit
+  bytes match the original. Actual fixed-4K loans fall 956 -> 844 slots (112
+  fewer displaced mappings). Chunk/cap reset traces and independent audit pass.
+  Full-engine memcheck is running. Validate original tasks and auto planner
+  behavior before adoption; no global VRAM-byte or speed claim yet.
 - [ ] Profile per-format/routed-M performance and use selective dispatch.
   Static audit maps all 19 compiler entries: IQ3_XXS/IQ4_NL use 124/125
   registers without spills. Spill entries belong to IQ2_S/IQ2_XS/Q2_0 GU.
