@@ -11,9 +11,9 @@ Previous lists had 110 implementation entries and 31 benchmark entries, includin
 1. **QSA FP16 correctness — highest priority**
 
    1. **Built:** Correct the halving scorer's pooled-key reads; preserve FP32 behavior and FP32 tail keys. CUDA sm70/sm75 builds pass; HIP remains untested.
-   2. **Queued:** Reproduce the original wrong-storage result and verify eight original/fallback/corrected control arms.
-   3. **Queued:** Check exact scores/top-k IDs, causal tails, guards, changed-input graph replay and memcheck/racecheck/synccheck.
-   4. **Queued:** Compare corrected halving against the FP16-aware fallback on all 76 original task requests, with fixed draft costs and controlled adaptation.
+   2. **Complete:** Independent GPU review reproduced the original wrong-storage result and verified eight original/fallback/corrected control arms: 480 graphs and 1440 changed-input replays.
+   3. **Complete:** Exact scores/top-k IDs, causal tails, guards and memcheck/racecheck/synccheck passed on RTX 2060 SUPER. This is synthetic kernel coverage, not engine qualification.
+   4. **Running:** Compare corrected halving against the FP16-aware fallback on all 76 original task requests, with fixed draft costs and controlled adaptation.
    5. **Queued:** Measure scorer-only and scorer-plus-selection timing in FP32/FP16 ABBA; the harness builds and seven host parser checks pass.
    6. **Pending:** Review task quality, per-request allocations and production-policy performance before committing and adopting the correction.
 
@@ -32,7 +32,7 @@ Previous lists had 110 implementation entries and 31 benchmark entries, includin
    3. **Complete:** Review 16 model retrieval requests, first logits and corrected allocation traces; these pass.
    4. **Complete:** Independently verify model dispatch: 640 fused submissions through graph replay when enabled, zero when disabled; all eight retrieval outputs/reference logits match. Counts do not establish timing or active groups.
    5. **Complete:** Independently review original/v2/compact kernel parity with weights from 30 real experts: all 6000 comparisons pass; activations remain synthetic.
-   6. **Queued:** Run the blocking-adaptation/fixed-PCIe diagnostic; retain its remaining draft-policy/deferred-CPU confounds.
+   6. **Complete diagnostic:** Four ABBA legs produced identical tokens and first-logit arrays for four selected prompts. Independent review passed. Startup budgets and loan counts match after proving two short prompts per leg used only verifier windows; the original loan-only auditor's false result is retained. Draft-policy/deferred-CPU confounds and the 256-token caps remain.
    7. **Held:** The original full-workload timing gate declined because continuations differ. Requalify under the corrected baseline before a new performance comparison.
    8. **Pending:** Adopt fusion only after controlled full-model quality, matched budgets and repeatable accepted-token throughput pass.
 

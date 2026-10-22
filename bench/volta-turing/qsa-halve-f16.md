@@ -1,8 +1,9 @@
 # QSA halving scorer and FP16 pooled keys
 
-Status, 2026-10-22: source/data-layout mismatch confirmed; corrected standalone
-CUDA builds and a separate engine link pass. GPU reproduction, sanitizer,
-model-quality and performance checks remain pending. Nothing installed.
+Status, 2026-10-23: source/data-layout mismatch and original GPU score error
+confirmed. Corrected standalone CUDA builds, separate engine link, eight
+control arms and three sanitizers pass independent review on RTX 2060 SUPER.
+Full-model quality and timing checks are running or queued. Nothing installed.
 
 The local configuration enables `STRATA_IDX_F16=1`. The indexer allocates and
 writes two bytes per pooled-key element. Turing enables `scores_halve_on()` by
@@ -24,9 +25,10 @@ A CPU byte-layout witness packs two FP16 values of 1.0 as `003c003c`.
 Interpreting those bytes as FP32 gives 0.007826805114746094. With constant-one
 queries and keys, four heads of dimension 128 should score 512; the incorrect
 load predicts 4.00732421875 for the first block. This is a source/data-layout
-demonstration, not a GPU measurement. At larger active contexts the doubled
-stride can also exceed the logical pooled-key allocation; whether a specific
-engine run crosses an allocation boundary needs runtime evidence.
+demonstration. The GPU negative control reproduced the predicted wrong score
+with padded backing. At larger active contexts the doubled stride can also
+exceed the logical pooled-key allocation; whether a specific engine run crosses
+an allocation boundary needs runtime evidence.
 
 The isolated correction adds a storage-type template parameter and reuses
 `ld_key4<F16>` in the halving scorer. Dispatch selects the storage variant;
@@ -42,7 +44,7 @@ Four-slot sm70 variants report a 16-byte stack frame; sm75 reports no stack
 frame. These compiler resources do not establish performance. HIP was not
 built, and V100 runtime testing remains outstanding.
 
-The queued regression suite contains:
+The completed regression suite contains:
 
 - An original-FP16 negative control with padded key backing, requiring the
   predicted score mismatch rather than accepting an arbitrary CUDA failure.
@@ -55,7 +57,10 @@ The queued regression suite contains:
 
 Nine host parser checks pass, including rejected missing/duplicate replays,
 wrong storage metadata, absent completion markers, sanitizer warnings and
-nonzero exits. They are synthetic protocol checks, not GPU qualification.
+nonzero exits. Independent GPU review confirms all eight control arms, 480
+graphs, 1440 changed-input replays, and memcheck/racecheck/synccheck pass. The
+corrected FP16 halving path equals the FP16-aware fallback; corrected FP32
+equals original FP32. This is synthetic kernel qualification, not model quality.
 
 `STRATA_SCORES_HALVE=0` selects the existing storage-aware fallback and is a
 candidate correctness control, not an adopted recommendation yet. Once the
@@ -95,14 +100,15 @@ the corrected halving scorer (`=1`). Both disable adaptive swaps and deferred
 CPU work, use blocking adaptation, fix the PCIe fraction to 0.11, and use
 fixed draft costs. No IQ2 fusion is enabled.
 
-The queue requires a fresh independent review of the complete kernel,
-negative-control and sanitizer logs before starting GPU inference. It retains
+The queue completed a fresh independent review of the kernel, negative-control
+and sanitizer logs before starting GPU inference. It retains
 all task failures, output tokens, prefix reuse and memory budgets. The workload
 reviewer now recognizes this explicitly controlled comparison and rejects
 missing fixed-policy evidence or drift in these controls. Nine host checks
 pass. Replaying the prior 76 fused-prefill records preserves every task
-classification. GPU task results, per-request allocation review and production
-performance remain pending; this diagnostic alone cannot justify adoption.
+classification. The 76-request workload is running. Task results, per-request
+allocation review and production performance remain pending; this diagnostic
+alone cannot justify adoption.
 
 
 ## Timing comparison prepared
