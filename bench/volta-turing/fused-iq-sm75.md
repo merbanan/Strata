@@ -316,8 +316,17 @@ context and memory settings. Full-engine memcheck has not yet passed:
   that boundary test. Both stages retain the synchronization limit and strict
   report checks. The one-token smoke has passed: clean exit, zero errors and
   diagnostic lines, with 248,320 finite first logits. Independent inspection
-  is recorded in `graph-smoke-review.json`. The full boundary process is now
-  running; its final result remains pending.
+  is recorded in `graph-smoke-review.json`. The full boundary process also
+  completed its request and generated one token, but still reported 553
+  tracking errors. It had 165 MiB free before graph capture versus 257 MiB
+  in the clean smoke. The CPU-service failure is resolved for that request;
+  complete memory checking is not. See `memcheck-async-failure-audit.json`.
+- The seventh attempt raises only the sixth's reserve from 1408 to 1536 MiB.
+  It initializes with 383 MiB free and 849 cache slots; the exact 4096-token
+  chunk borrows 784, and the 3071-token tail has started. Async launch,
+  synchronization limit 16, context, floor, input and binary are unchanged.
+  No repeated short smoke substitutes for the full request. Final result
+  pending; inputs and commands are in `memcheck-reserve1536-async-prepared.json`.
 
 The fourth runner now rejects startup chunk reduction before issuing a
 request; it retains the post-request exact chunk/cap and fused-route checks.
@@ -344,6 +353,9 @@ prerequisites without running their GPU suites. Workload resumption requires
 a successful sanitizer result plus the independent boundary audit. Tile tests
 follow the retrieval and full-task suite. All stages retain independent
 review/adoption gates; no failed queue or log has been overwritten.
-After the successful graph smoke, `queue-resume4` restored the quality/tile
-chain behind the full boundary process and its strict report gate. It also
-pins the smoke-review evidence; no failed prerequisite has been bypassed.
+The subsequent `queue-resume4` also declined the sixth attempt's failed full
+result. `queue-resume5` now waits for the seventh attempt and the independent
+baseline expert-route timing job to release the GPU. Those unchanged-kernel
+timings may run regardless of this feature's result, but model-quality work
+still requires a clean full boundary sanitizer report. No adoption gate is
+bypassed; tile work still follows the full task suite.

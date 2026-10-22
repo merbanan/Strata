@@ -166,10 +166,14 @@ are in bench/volta-turing/k8v4-stage.md.
   The runner omitted the existing documented ASYNC_LAUNCH instrumentation
   option. With it enabled, the separate one-token graph smoke passed: clean
   exit, zero sanitizer errors/diagnostics and 248,320 finite logits. The full
-  boundary request is running. A new report gate rejects internal
+  request also generated a token, but tracking errors remained at 165 MiB free
+  before graph capture. The seventh attempt raises only its reserve to 1536
+  MiB: 383 MiB free at READY, 849 slots, 784 lent for the exact 4096 chunk.
+  The 3071 tail has started; completion remains pending. A new report gate rejects internal
   errors/untracked launches even with a zero-error summary; seven host checks
   pass. Clean exit and complete boundary checking remain required. The
-  resume4 quality/tile queues now wait behind the full sanitizer gate.
+  resume5 quality/tile queues wait behind independent baseline route timings
+  and still require the full sanitizer gate.
   Validate original tasks and auto planner behavior before adoption; no global
   VRAM-byte or speed claim yet.
 - [ ] Profile per-format/routed-M performance and use selective dispatch.
@@ -409,6 +413,19 @@ on four V100s are hypotheses for our single RTX 2060 SUPER, not local gains.
   remaining epilogues/routes before a new kernel; do not duplicate existing
   standalone fusion. Source hashes, exact branches, format inventory and scope
   are in `expert-conversion-audit-v1/source-audit.json` in campaign artifacts.
+  Pack inventory: ten format pairs across 48 layers; ten layers use IQ2_XS
+  gate/up, which lacks the mode-8 epilogue, while 38 use eligible formats.
+  A detached baseline harness has passed 480 GPU comparisons over all ten
+  pairs, T=1/4/8/16 and empty/small strided PCIe plus VRAM shapes. It checks
+  exact output and active Q8 bytes, poisoned unused entries and allocation
+  guards against the legacy mode-0 path. Synthetic weights, real pack format
+  coverage; no model-quality or speed result. Its balanced default/0/4/8
+  graph timings are queued, with separate whole-call/GU-plus-epilogue/down
+  phases and 48 nonoverlapping weight regions in one device arena. Parser
+  gates pass; input quantization and host/PCIe transfers are outside this test.
+  If those measurements justify it, investigate GridOf/DotG support for
+  IQ2_XS's 512-entry table and an exact GU-to-Q8 epilogue, preserving the
+  current integer/sign arithmetic and default dispatch. No new kernel yet.
 - [ ] C04 — Exploratory: screen the revised arithmetic-compatible IQ2 nibble
   layout, preserving decoded weights, FP16 SiLU boundaries and reduction order.
   Charge expanded bytes against cache residency and measure acceptance; the
