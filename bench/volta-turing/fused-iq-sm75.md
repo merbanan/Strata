@@ -389,3 +389,37 @@ observed budgets differ. Full task review, allocation control and a qualifying
 performance run are still required before adoption. The independent C03 route
 measurements are reviewed, and an [IQ2_XS prototype](iq2xs-gu.md) is queued after
 the tile tests; it does not change these frozen model-test binaries.
+
+### Completed task and tile review
+
+All 76 requests have now completed. `review-workload.py` independently matches
+each saved response record to its original request, emitted token sequence,
+DONE line and per-request prefill traces. Hash-pinned fresh-code/prose reviews
+and static edit checks are in `fused-iq-workload-v1/reviews/qualification-verified.json`.
+All four warmups pass. None of the 72 editing/code/prose responses qualifies,
+in either arm; there are no remaining pending response reviews. The four
+original generated cache suites pass 14/14/19/13 tests respectively, but all
+fail the independent exact-TTL-deadline test. Incomplete code, unrelated edits
+and long-context background-summary responses remain failures.
+
+The original rename response is token-identical across all four legs but
+still fails the requested edit. Other long-task continuations differ. Three
+32K tasks also reuse different prefixes: baseline 19200, candidate 19968.
+Their prompt reads are consequently 13568/12800 tokens (one fewer for fresh
+code). Candidate traces confirm fused prefill on every added long-context
+request. Full context length alone therefore cannot establish equal work.
+The diagnostic run suppresses timing comparisons as designed.
+
+The fused-IQ candidate is not selected for adoption from this experiment.
+This does not attribute baseline failures to the candidate; it records that
+the required task-quality/performance qualification was not obtained.
+
+Existing auto/64/128 tile controls also finished and were reviewed in
+`fused-iq-tiles-v1/results-review.json`: all 33 format-reference runs pass,
+all three canonical IQ3 output vectors match byte-for-byte, and all eleven
+large-shape checksums agree across layouts/repeats. At T=2868, tile64 costs
+18.723/19.019 ms versus auto 22.526/22.874 ms; this shape is below the engine
+fusion threshold. At T=5735, tile128 costs 31.797/31.939 ms versus auto
+33.612/34.158 ms. Other shapes favor different layouts, so no global override
+is selected. Threshold tuning remains a conditional lead; these measurements
+do not resolve fused-IQ model qualification.

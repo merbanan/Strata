@@ -1,8 +1,9 @@
 # IQ2_XS grouped gate/up fusion experiment
 
-Status, 2026-10-22: an isolated CUDA proposal builds for sm_70 and sm_75.
-GPU correctness, sanitizer and timing tests are queued after the existing
-model-quality and tile runs. It is not installed or adopted.
+Status, 2026-10-22: the isolated mode-8 proposal passes GPU correctness,
+sanitizers and repeated kernel timings. A second proposal extends the opt-in
+to Turing's normal mode 4; its controls/sanitizers pass and timing is running.
+A clean engine build and strict model checks follow. Neither is installed or adopted.
 
 ## Measured reason to investigate
 
@@ -38,7 +39,7 @@ measured production route frequencies, CPU/PCIe transfer costs or full-model
 speed gains in this experiment. The earlier full mode-8 inference comparison
 did not establish a consistent decode win.
 
-## Isolated proposal
+## First isolated proposal
 
 `STRATA_IQ2XS_GU_FUSED=1` enables the proposed format only when the effective
 expert mode is 8, the device is sm_70/sm_75, and dimensions are 2560/640.
@@ -58,7 +59,7 @@ CUDA 12.4 builds pass for both architectures. The new specialization uses
 this geometry, and zero stack/spill bytes on both targets. These compiler
 results do not measure runtime occupancy or V100 performance.
 
-## Queued validation
+## Completed first-proposal validation
 
 - Original binary and candidate unset/zero/one controls: 300 cases per arm
   across all ten format pairs, automatic/0/4/8, empty/strided/VRAM routes,
@@ -92,3 +93,48 @@ Artifacts are under
 
 The live source tree, frozen fused-prefill library and installed engine were
 not replaced by these builds.
+
+Independent review of the v1 raw logs and pinned inputs is in
+`iq2xs-gu-v1/results-review.json`: 4,800 exact comparisons, 24 captured graphs,
+144 changed-input replays, all three sanitizers clean, and 115,200 timing
+samples. Enabled IQ2_XS VRAM graphs have two kernels; disabled/fallback graphs
+have three. Original/unset/zero/one output hashes match across all 300 cases.
+
+For balanced VRAM shapes, complete-call disabled/enabled ratios in the two
+ABBA pairs are:
+
+| Down format | Tokens | First pair | Second pair |
+| --- | ---: | ---: | ---: |
+| IQ4_NL | 1 | 1.126 | 1.181 |
+| IQ4_NL | 4 | 1.154 | 1.216 |
+| IQ4_NL | 8 | 1.255 | 1.309 |
+| IQ4_NL | 16 | 1.327 | 1.400 |
+| Q2_0 | 1 | 1.171 | 1.205 |
+| Q2_0 | 4 | 1.205 | 1.222 |
+| Q2_0 | 8 | 1.312 | 1.347 |
+| Q2_0 | 16 | 1.426 | 1.424 |
+
+Both arms use explicit mode 8. Unchanged automatic/down controls show clock
+drift between legs; the report retains raw costs and control-normalized ratios.
+These are synthetic kernel results, not an engine speedup.
+
+## Selective Turing dispatch and engine qualification
+
+`iq2xs-gu-v2` reuses the exact v1 device-kernel body and additionally admits
+effective mode 4 when `STRATA_IQ2XS_GU_FUSED=1`. On Turing this includes normal
+automatic dispatch, so no global `STRATA_EXP_MODE` override is needed. Mode 0,
+strided PCIe, unsupported geometry and other formats keep their old paths.
+sm70/sm75 builds and complete patch replay pass.
+
+V2 expands graph coverage to automatic/0/4/8: 24 graphs and 144 changed-input
+replays per arm. All four 300-case controls and all three sanitizers have
+passed; timing ABBA is running. Results remain under `iq2xs-gu-v2/run/`.
+
+`iq2xs-engine-v1` builds a fresh production-source baseline and links only the
+IQ2_XS CUDA object into a candidate. It does not reuse experimental fused-IQ
+prefill or group-tail objects. Its queued model gate waits for both the exact
+build and kernel-test processes, then runs four disabled controls against the
+installed-reference logits, followed by 16 disabled/enabled ABBA requests.
+Every first-logit byte must match the installed reference and observed memory
+budgets must match. The local installed configuration remains unchanged;
+performance/continuation qualification and adoption are separate later steps.

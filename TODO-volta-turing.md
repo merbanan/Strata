@@ -141,7 +141,7 @@ are in bench/volta-turing/k8v4-stage.md.
   100/98.44/92.19/88.91%; pooled perplexity ratio 1/0.9258/1.0233/0.9978.
   Worst loss increase: 16K code, NLL +0.21054/perplexity 1.2343x. Scores are
   rounded, allocations differ, and these probes do not qualify full tasks or KL.
-- [ ] Retain and review the full original editing/code/prose workload, with
+- [x] Retain and review the full original editing/code/prose workload, with
   additional long-context coverage that actually exercises fused prefill.
   Coverage audit: all original task prompts are below the 3072-token fusion
   threshold. A detached 76-request task suite retains all seven original cases
@@ -150,11 +150,16 @@ are in bench/volta-turing/k8v4-stage.md.
   and suppresses timing comparisons. Host gates/configuration preflight pass.
   Fresh retrieval ABBA passes 16/16; both baseline legs match installed-reference
   logits exactly, and each arm repeats its logits. Full 76-request tasks are
-  now running. With group-tail, candidate auto chunk rises to 6912 versus
+  complete and independently reviewed. Only four warmups qualify; none of the
+  72 editing/code/prose responses qualify in either arm. All four original
+  generated cache modules pass their own tests but fail the independent TTL
+  boundary check. Three 32K tasks reuse different prefixes: baseline 19200
+  versus candidate 19968 tokens. With group-tail, candidate auto chunk is 6912 versus
   baseline 6400; maximum loans 1179/1185 and pinned RAM 39.57/39.60 GiB differ.
   First-token KL is 0/0.00404/0.02331/0.16016 at 1K/4K/16K/32K, with equal
   top-1. This is diagnostic evidence, not quality or allocation qualification;
-  see `fused-iq-workload-v1/retrieval-review.json`.
+  see `fused-iq-workload-v1/retrieval-review.json` and `reviews/qualification-verified.json`.
+  The fused-IQ candidate is not selected for adoption on this evidence.
 - [ ] Reduce fused fallback scratch under `STRATA_PF_GROUP_SCRATCH`.
   Detached opt-in `STRATA_PF_FUSED_GROUP_TAIL` prototype builds; it changes
   both buffer reservations and per-chunk group-cap selection/reset. Host size,
@@ -169,15 +174,20 @@ are in bench/volta-turing/k8v4-stage.md.
   and synchronization limit16 were required; this is not long-context or race
   qualification. Six prior failures and the clean graph smoke are retained.
   See `full-engine-memcheck-review.json`. Independent baseline route timings
-  are reviewed; resume5 full quality is running, with tile controls queued.
+  are reviewed; resume5 full quality and tile controls are now complete.
   Validate original tasks and auto planner behavior before adoption; no global
   VRAM-byte or speed claim yet.
 - [ ] Profile per-format/routed-M performance and use selective dispatch.
   Static audit maps all 19 compiler entries: IQ3_XXS/IQ4_NL use 124/125
   registers without spills. Spill entries belong to IQ2_S/IQ2_XS/Q2_0 GU.
-  Existing auto/64/128 controls are queued after full task quality: all 11
+  Existing auto/64/128 controls complete after full task quality: all 11
   references, canonical IQ3 bytes, and 11 shapes including 2867/2868 and
-  5734/5735 threshold neighbors, in balanced six-leg order. Parser gates pass.
+  5734/5735 threshold neighbors, in balanced six-leg order. All 33 reference
+  runs pass, all canonical IQ3 output bytes match, and every large-shape hash
+  agrees across layouts/repeats. The default switch at 2868 costs about 20%
+  versus tile64, but is below the engine fusion threshold; at 5735 tile128
+  is about 6% faster than auto. Other shapes differ; no global override or
+  model speedup is established. See `fused-iq-tiles-v1/results-review.json`.
   The smaller-block audit rejects a THREADS-only edit (missing row coverage).
   A consistent 256-thread WW2/TR64 layout still uses 36,096 shared bytes; a
   one-stage 30,976-byte variant needs a new load/consumer barrier. Neither is
@@ -422,9 +432,14 @@ on four V100s are hypotheses for our single RTX 2060 SUPER, not local gains.
   Input quantization and host/PCIe transfers are outside this test.
   An isolated opt-in IQ2_XS GridOf/DotG proposal now builds for sm70/sm75,
   preserving the original dot arithmetic and existing default dispatch.
-  Both targets report 62 registers and zero spills. Original/unset/zero/one
-  controls, changed-input graph replays, sanitizers and timing ABBA are queued
-  after the existing GPU jobs. No adoption; see [IQ2_XS notes](bench/volta-turing/iq2xs-gu.md).
+  Both targets report 62 registers and zero spills. V1 passes 4800 exact
+  original/unset/zero/one comparisons, 24 graphs/144 changed-input replays and
+  three sanitizers. Its 115200 timing samples are reviewed; balanced VRAM
+  whole calls are 1.13–1.43x faster than old mode 8 in both pairs. No engine
+  gain is claimed. V2 extends the opt-in to Turing's normal mode 4 without a
+  global mode override; controls and sanitizers pass, timing ABBA is running.
+  A clean production-source engine build and strict disabled/enabled model
+  checks are queued. No adoption; see [IQ2_XS notes](bench/volta-turing/iq2xs-gu.md).
 - [ ] C04 — Exploratory: screen the revised arithmetic-compatible IQ2 nibble
   layout, preserving decoded weights, FP16 SiLU boundaries and reduction order.
   Charge expanded bytes against cache residency and measure acceptance; the
