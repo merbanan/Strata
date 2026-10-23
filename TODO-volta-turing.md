@@ -1,6 +1,6 @@
 # Volta and Turing inference: numbered backlog
 
-Updated 2026-10-23. This is the authoritative task list, sorted by correctness, current RTX 2060 SUPER work, measured opportunity, and hardware dependencies. Parent order is research priority, not the order of already-running jobs. No running test was cancelled or reprioritized by this edit.
+Updated 2026-10-24. This is the authoritative task list, sorted by correctness, current RTX 2060 SUPER work, measured opportunity, and hardware dependencies. Parent order is research priority, not the order of already-running jobs. No running test was cancelled or reprioritized by this edit.
 
 **Execution resumed:** tasks 1 → 2 → 3 → 13 were completed in the earlier requested sequence. The user has asked to continue through this backlog; task 4's remaining compatible IQ2 layout is the current investigation. Local RTX 2060 SUPER results do not substitute for V100/T4 runtime qualification.
 
@@ -42,7 +42,7 @@ Previous lists had 110 implementation entries and 31 benchmark entries, includin
    2. **Built:** Implement the lossless compact IQ2_XS codebook with original packed weights; CPU exhaustive checks and sm70/sm75 builds pass.
    3. **Complete:** GPU parity, changed-input graphs and sanitizers pass; compact-versus-v2 ABBA timing is reviewed. Populated VRAM calls lose at T=1/4/8; do not integrate this prototype.
    4. **Pending:** If the compact table wins, integrate separately and measure cache residency, full inference and acceptance.
-   5. **Screen complete; model integration pending:** The compatible signed-nibble codec round-trips all 65,536 table/sign combinations and 384,000 real blocks. The sm75 reader is bitwise equal on nine shapes and 1.51–1.76x faster in isolated row-dot timing; CUDA sanitizers pass and sm70 compiles. Each 512-expert layer would add 437.5 MiB, so cache residency, grouped GU/SwiGLU/down, prefill, PCIe and full-model quality/timing remain open. Do not adopt on this kernel result alone. See [screen](bench/volta-turing/iq2-nibble-layout.md).
+   5. **Screen complete; selective hot-cache integration conditional:** The compatible signed-nibble codec round-trips all 65,536 table/sign combinations and 384,000 real blocks. The sm75 reader is bitwise equal on nine shapes and 1.51–1.76x faster in the original isolated row-dot timing; CUDA sanitizers pass and sm70 compiles. A two-run pinned-host copy-plus-dot screen remains bitwise equal but loses at all nine 1/3/30-expert by 1/4/8-token shapes because the converted bank is 1.95x larger. Each 512-expert layer would add 437.5 MiB. Profile actual expert reuse before selective integration; grouped GU/SwiGLU/down, prefill, cache displacement, overlapped PCIe and full-model quality/timing remain open. Do not adopt on this kernel result alone. See [screen](bench/volta-turing/iq2-nibble-layout.md).
 
 5. **Measurement and correctness requirements — apply to every candidate**
 

@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <bit>
 #include <cstdint>
+#include <cstring>
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
@@ -106,10 +107,15 @@ uint64_t hash(const std::vector<float>& v) {
 } // namespace
 
 int main(int argc, char** argv) {
-    if (argc != 3 && !(argc == 4 && std::string(argv[3]) == "--small")) {
-        std::fprintf(stderr, "usage: %s ORIGINAL-GU-ALL CONVERTED-GU-ALL [--small]\n", argv[0]); return 2;
+    if (argc < 3) {
+        std::fprintf(stderr, "usage: %s ORIGINAL-GU-ALL CONVERTED-GU-ALL [--small] [--cold]\n", argv[0]); return 2;
     }
-    const bool small = argc == 4;
+    bool small = false, cold = false;
+    for (int i = 3; i < argc; ++i) {
+        if (std::string(argv[i]) == "--small") small = true;
+        else if (std::string(argv[i]) == "--cold") cold = true;
+        else { std::fprintf(stderr, "unknown option: %s\n", argv[i]); return 2; }
+    }
     const auto original = read(argv[1]), nibble = read(argv[2]);
     if (original.size() % (kRowsPerExpert * kOriginalRow) ||
         nibble.size() != original.size() / (kRowsPerExpert * kOriginalRow) * kRowsPerExpert * kNibbleRow) {
@@ -126,6 +132,13 @@ int main(int argc, char** argv) {
     ck(cudaMalloc(&dw1, nibble.size()), "malloc nibble");
     ck(cudaMemcpy(dw0, original.data(), original.size(), cudaMemcpyHostToDevice), "upload original");
     ck(cudaMemcpy(dw1, nibble.data(), nibble.size(), cudaMemcpyHostToDevice), "upload nibble");
+    uint8_t *pinned0 = nullptr, *pinned1 = nullptr;
+    if (cold) {
+        ck(cudaHostAlloc(&pinned0, original.size(), cudaHostAllocDefault), "pin original");
+        ck(cudaHostAlloc(&pinned1, nibble.size(), cudaHostAllocDefault), "pin nibble");
+        std::memcpy(pinned0, original.data(), original.size());
+        std::memcpy(pinned1, nibble.data(), nibble.size());
+    }
     std::mt19937 rng(20261023);
     std::uniform_int_distribution<int> code(-127, 127);
     const int max_tokens = 8;
@@ -172,9 +185,31 @@ int main(int argc, char** argv) {
                             is_nibble ? "nibble" : "original", ms);
             }
         }
+        if (cold) {
+            for (int pair = 0; pair < 2; ++pair) {
+                for (int slot = 0; slot < 4; ++slot) {
+                    const bool is_nibble = pair ? slot < 2 : slot >= 2;
+                    const size_t bytes = (size_t) experts * kRowsPerExpert *
+                                         (is_nibble ? kNibbleRow : kOriginalRow);
+                    const uint8_t* host = is_nibble ? pinned1 : pinned0;
+                    uint8_t* device = is_nibble ? dw1 : dw0;
+                    ck(cudaEventRecord(begin), "cold start");
+                    ck(cudaMemcpyAsync(device, host, bytes, cudaMemcpyHostToDevice), "cold upload");
+                    if (is_nibble) launch<true>(dw1, dq, do1, experts, tokens);
+                    else launch<false>(dw0, dq, do0, experts, tokens);
+                    ck(cudaEventRecord(end), "cold stop");
+                    ck(cudaEventSynchronize(end), "cold wait");
+                    float ms = 0; ck(cudaEventElapsedTime(&ms, begin, end), "cold elapsed");
+                    std::printf("COLD_TIME,%d,%d,%d,%d,%s,%.6f,%zu\n", experts, tokens, pair,
+                                slot, is_nibble ? "nibble" : "original", ms, bytes);
+                }
+            }
+        }
     }
     ck(cudaEventDestroy(begin), "event destroy"); ck(cudaEventDestroy(end), "event destroy");
     ck(cudaFree(dw0), "free original"); ck(cudaFree(dw1), "free nibble");
     ck(cudaFree(dq), "free q8"); ck(cudaFree(do0), "free output original"); ck(cudaFree(do1), "free output nibble");
+    if (pinned0) ck(cudaFreeHost(pinned0), "free pinned original");
+    if (pinned1) ck(cudaFreeHost(pinned1), "free pinned nibble");
     return 0;
 }
