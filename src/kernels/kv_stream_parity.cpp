@@ -8,6 +8,7 @@
 //   2. the residency map is consistent after every call (slot_block and page_table invert each other);
 //   3. no call overflowed, and the hit/miss counters add up;
 //   4. a ring (the MTP drafter's layout) restored from the host copy reads the same values as the resident pool.
+//   5. a reset and short reused sequence cannot observe stale host cells or a partly written final page.
 // INT8, FP16, Q4_0 (PR #21) and hybrid K8V4 pools; K8V4's appends are the engine's folded calls (layer.cpp), its host
 // copy written through kv_hybrid_k_half / kv_hybrid_v_half.
 #include "strata/kernels/kv_q4.hpp"
@@ -22,6 +23,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <numeric>
 #include <random>
 #include <set>
 #include <vector>
@@ -43,7 +45,9 @@ template <typename T> T* halloc(size_t n) {   // pinned, mapped; returns the dev
     void* h = nullptr;
     void* d = nullptr;
     ck(cudaHostAlloc(&h, n * sizeof(T) + 64, cudaHostAllocMapped), "hostalloc");
-    std::memset(h, 0, n * sizeof(T) + 64);
+    // Production does not clear the authoritative host KV on allocation or reset.
+    // Poison unwritten cells so a mistaken gather cannot pass against zeroed VRAM.
+    std::memset(h, 0xa5, n * sizeof(T) + 64);
     ck(cudaHostGetDevicePointer(&d, h, 0), "devptr");
     return (T*) d;
 }
@@ -233,13 +237,61 @@ bool run(int fmt) {
         std::printf("  %s ring restore: %s\n", name, ok ? "identical" : "DIFFERS");
         if (!ok) ++bad;
     }
+    // Reset the residency map without clearing the host copy. The host still
+    // contains the previous 40K-cell sequence; a short new sequence may read
+    // only its freshly written cells, including a partial final page.
+    k::kv_stream_reset(m, nullptr);
+    constexpr int fresh = 133;
+    for (int pos = 0; pos < fresh; ++pos) {
+        for (auto& x : hk) x = nd(rng) * 2.f;
+        for (auto& x : hv) x = nd(rng);
+        const int32_t st[4] = {pos, pos + 1, (pos + 1) / 4, 0};
+        ck(cudaMemcpy(kc, hk.data(), hk.size() * 4, cudaMemcpyHostToDevice), "reuse k");
+        ck(cudaMemcpy(vc, hv.data(), hv.size() * 4, cudaMemcpyHostToDevice), "reuse v");
+        ck(cudaMemcpy(step, st, sizeof(st), cudaMemcpyHostToDevice), "reuse step");
+        append(ref, ident, step, kc, vc, s, fmt, nullptr);
+        append(slots, m.page_table, step, kc, vc, s, fmt, &host.p);
+    }
+    {
+        std::vector<int32_t> hids((size_t) cap, 0);
+        std::iota(hids.begin(), hids.begin() + fresh, 0);
+        const int32_t hst[4] = {fresh - 1, fresh, fresh / 4, fresh};
+        for (auto& x : hq) x = nd(rng);
+        ck(cudaMemcpy(ids, hids.data(), hids.size() * 4, cudaMemcpyHostToDevice), "reuse ids");
+        ck(cudaMemcpy(steps, hst, sizeof(hst), cudaMemcpyHostToDevice), "reuse steps");
+        ck(cudaMemcpy(q, hq.data(), hq.size() * 4, cudaMemcpyHostToDevice), "reuse q");
+        k::qsa_decode_attn_batch(q, ref.attn(ident), ids, steps, cap, s, scratch, out_ref, 1, nullptr);
+        k::kv_stream_resolve(m, slots.attn(m.page_table), host.p, fmt, ids, steps, 1, cap, s, nullptr);
+        k::qsa_decode_attn_batch(q, slots.attn(m.page_table), ids, steps, cap, s, scratch, out_str, 1, nullptr);
+        ck(cudaDeviceSynchronize(), "reuse attention");
+        ck(cudaMemcpy(a.data(), out_ref, (size_t) NH * D * 4, cudaMemcpyDeviceToHost), "reuse reference");
+        ck(cudaMemcpy(b2.data(), out_str, (size_t) NH * D * 4, cudaMemcpyDeviceToHost), "reuse streamed");
+        const bool ok = std::memcmp(a.data(), b2.data(), (size_t) NH * D * 4) == 0;
+        std::printf("  %s reused host copy: %s\n", name, ok ? "identical" : "DIFFERS");
+        if (!ok) ++bad;
+    }
     return bad == 0;
 }
 }  // namespace
 
-int main() {
+int main(int argc, char** argv) {
+    int only_fmt = -1;
+    if (argc == 2 && std::strcmp(argv[1], "--k8v4-only") == 0) only_fmt = k::kKvHybrid;
+    else if (argc == 3 && std::strcmp(argv[1], "--format") == 0) {
+        if (std::strcmp(argv[2], "int8") == 0) only_fmt = k::kKvInt8;
+        else if (std::strcmp(argv[2], "fp16") == 0) only_fmt = k::kKvF16;
+        else if (std::strcmp(argv[2], "q4") == 0) only_fmt = k::kKvQ4;
+        else if (std::strcmp(argv[2], "k8v4") == 0) only_fmt = k::kKvHybrid;
+    }
+    if (argc != 1 && only_fmt < 0) {
+        std::fprintf(stderr, "usage: %s [--format int8|fp16|q4|k8v4]\n", argv[0]);
+        return 2;
+    }
     std::printf("kv_stream_parity: streamed vs resident KV, bitwise\n");
-    const bool a = run(k::kKvInt8), b = run(k::kKvF16), c = run(k::kKvQ4), d = run(k::kKvHybrid);
+    const bool a = (only_fmt >= 0 && only_fmt != k::kKvInt8) || run(k::kKvInt8),
+               b = (only_fmt >= 0 && only_fmt != k::kKvF16) || run(k::kKvF16),
+               c = (only_fmt >= 0 && only_fmt != k::kKvQ4) || run(k::kKvQ4),
+               d = (only_fmt >= 0 && only_fmt != k::kKvHybrid) || run(k::kKvHybrid);
     if (!a || !b || !c || !d) ++g_fail;
     std::printf(g_fail ? "FAIL\n" : "PASS\n");
     return g_fail ? 1 : 0;
