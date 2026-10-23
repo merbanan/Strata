@@ -146,7 +146,7 @@ Previous lists had 110 implementation entries and 31 benchmark entries, includin
    4. **Partial:** Group-tail scratch prototype passes boundary logits and instrumented full-engine memcheck; qualify normal planner behavior, long contexts and race safety before adoption.
    5. **Partial:** Review existing auto/64/128 tile results; use measured per-format/routed-M dispatch rather than a global override.
    6. **Conditional:** Explore consistent smaller-block layouts and a one-stage barrier design; a THREADS-only edit does not cover all rows.
-   7. **Pending:** Check PF_DM_GROUP combine order and scratch/grouping interactions.
+   7. **Partial synthetic check:** `PF_DM_GROUP`'s expert-order accumulation and the baseline router-order combine each match an independent FP32 reference bitwise on RTX 2060 SUPER. Their outputs differ at 6,905/10,240 values; ordinary-column max absolute error is 4.77e-7, while deliberate cancellation reaches 2. Empty experts, a short last group and scratch reuse pass memcheck/racecheck. Full-model quality, CPU/streamed fallback and matched-budget timing remain; keep the switch disabled. See [check](bench/volta-turing/pf-dm-group-order.md).
    8. **Conditional:** Screen narrow padded tactics and large-M Q5_K/Q6_K dequantize-plus-cuBLAS, including physical layout, scratch limits and threshold neighbors.
    9. **Held:** Require a full-engine prefill win; isolated layer gains do not qualify promotion.
 
