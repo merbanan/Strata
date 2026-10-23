@@ -105,7 +105,9 @@ RTX 2060 SUPER mode-8 full-engine ABBA, 2026-10-21:
 
 Both paired delta ranges cross zero. Do not promote mode 8 from the faster
 expert microbenchmarks. The second candidate's 4K prefill is an unexplained
-outlier (158 versus 478–489 tok/s); retain the raw data rather than remove it.
+outlier (158 versus 478–489 tok/s); the later [request-level review](mode8-4k-outlier.md)
+found 18.14 s spent lending prompt room versus 0.70–0.87 s in the other legs.
+Retain the raw data and investigate why that lending operation stalled.
 At 16K prefill, medians are 669.7/673.3 tok/s. All arms retain 1,403 cache slots,
 6,400-token prompt chunks and 39.60 GiB pinned expert RAM. Results and exact
 configs are in `mode8-abba-2155` under the artifact directory above.
