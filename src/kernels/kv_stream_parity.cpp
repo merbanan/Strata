@@ -313,6 +313,31 @@ bool run(int fmt) {
         ck(cudaGraphDestroy(graph), "graph destroy");
         ck(cudaStreamDestroy(cs), "graph stream destroy");
     }
+    // A hit must not read any authoritative host K or V. Install block zero,
+    // then resolve the same cell with deliberately invalid host pointers. The
+    // copy kernel is still launched; its device-side placed count must be zero.
+    {
+        const int32_t cell = 0, hst[4] = {0, 1, 0, 1};
+        ck(cudaMemcpy(ids, &cell, sizeof(cell), cudaMemcpyHostToDevice), "hit-only id");
+        ck(cudaMemcpy(steps, hst, sizeof(hst), cudaMemcpyHostToDevice), "hit-only step");
+        k::kv_stream_reset(m, nullptr);
+        k::kv_stream_resolve(m, slots.attn(m.page_table), host.p, fmt, ids, steps, 1, cap, s, nullptr);
+        k::KvHostPools inaccessible;
+        inaccessible.k_pool = reinterpret_cast<uint16_t*>(1);
+        inaccessible.v_pool = reinterpret_cast<uint16_t*>(1);
+        inaccessible.k_q = reinterpret_cast<int8_t*>(1);
+        inaccessible.v_q = reinterpret_cast<int8_t*>(1);
+        inaccessible.k_scale = reinterpret_cast<uint16_t*>(1);
+        inaccessible.v_scale = reinterpret_cast<uint16_t*>(1);
+        inaccessible.k_q4 = reinterpret_cast<uint8_t*>(1);
+        inaccessible.v_q4 = reinterpret_cast<uint8_t*>(1);
+        k::kv_stream_resolve(m, slots.attn(m.page_table), inaccessible, fmt, ids, steps, 1, cap, s, nullptr);
+        ck(cudaDeviceSynchronize(), "hit-only resolve");
+        const k::KvStreamCounters c = k::kv_stream_counters(m);
+        const bool ok = c.calls == 2 && c.lookups == 2 && c.misses == 1 && !c.overflow;
+        std::printf("  %s hit-only resolve with inaccessible host K/V: %s\n", name, ok ? "no copy" : "DIFFERS");
+        if (!ok) ++bad;
+    }
     // An optional, model-free screen of the complete reset + resolve + copy
     // path. Each captured resolve starts cold so the requested pages are misses.
     if (std::getenv("STRATA_KV_COPY_BENCH")) {
