@@ -82,7 +82,7 @@ Previous lists had 110 implementation entries and 31 benchmark entries, includin
 
    1. **Pending:** Profile PLE separately; verify the actual bottleneck rather than assuming the HDD issue reported upstream.
    2. **Complete, existing path verified:** Both legacy and native PLE convolution already read the nine-row history directly, without a padded buffer. On RTX 2060 SUPER, an independent padded-history CPU reference agrees with the single-token legacy path and native 2/3/4/8-token windows (worst absolute error 4.77e-7); the native batch results, final history and snapshots remain bitwise equal to the serial path. This verifies arithmetic, not a new speedup or full-model timing. Run `verify_batch_parity` for the synthetic gate.
-   3. **Pending:** Release HC projection temporaries after last use; measure recovered cache slots or larger usable prompt chunks.
+   3. **Partial, earlier reuse measured:** `STRATA_PF_HC_REGION=1` already reuses the prefill HC projection scratch after each half's last reader, saving 63,360 bytes per token outside the shared region in the normal BF16 path. The original RTX 2060 SUPER IQ3_XXS 15.5K-prompt screen grew the auto chunk from 5,120 to 6,400 and prompt speed from 508.6 to 548.2 tok/s; recent benchmark configs enable this opt-in. The separate `STRATA_HC_REQ8` and `STRATA_PF_HC_FAST` conversion scratches can each persist at 6.25 MiB on this geometry. Measure safe release/reuse, cache slots and full request timing before changing those lifetimes. See [audit](bench/volta-turing/hc-scratch-lifetime-audit.md).
    4. **Pending:** Verify SiLU, state commit, empty/null slots and graph lifetimes for both changes.
 
 10. **Verifier and adaptive drafting — C19/C20/C22**
