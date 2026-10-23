@@ -13,7 +13,7 @@
 // Hybrid K8V4 coverage includes the existing Q4-to-half rounding boundary.
 // QA_GRAPH=1 replays with changed queries and poisoned output; QA_EMPTY=1 includes
 // a zero-width selection. QA_OUTPUT writes output floats for cross-process A/B.
-// Usage: qsa_prompt_attn_parity [context=32768] [queries=2048] [reps=5] [format=1|3; default all]
+// Usage: qsa_prompt_attn_parity [context=32768] [queries=2048] [reps=5] [format=0|1|3; default all]
 #include "strata/kernels/qsa.hpp"
 #include "strata/kernels/qsa_decode_attn.hpp"
 #include "strata/kernels/qsa_prompt_attn.hpp"
@@ -270,7 +270,7 @@ int run(int fmt, int64_t ctx, int64_t nq, int reps) {   // fmt 1 int8, 0 fp16, 2
     }
     bool ok_merge = true;
 #if !defined(__HIP_PLATFORM_AMD__)
-    if (fmt == 3 && std::getenv("QA_WINDOW_MERGE")) {
+    if ((fmt == 0 || fmt == 3) && std::getenv("QA_WINDOW_MERGE")) {
         std::vector<int32_t> ids_a(ids.size(), 0), ids_b(ids.size(), 0);
         std::vector<int32_t> steps_a = steps, steps_b = steps;
         for (int64_t i = 0; i < nq; ++i) {
@@ -288,8 +288,8 @@ int run(int fmt, int64_t ctx, int64_t nq, int reps) {   // fmt 1 int8, 0 fp16, 2
         ck(cudaMalloc(&ob, nw.size() * sizeof(float)), "slice B output");
         ck(cudaMalloc(&la, (size_t) (nq * NH) * sizeof(float)), "slice A lse");
         ck(cudaMalloc(&lb, (size_t) (nq * NH) * sizeof(float)), "slice B lse");
-        if (!k::qsa_prompt_attn_batch_lse_k8v4(d_q, pl, da, sa, cap, s, oa, la, nq, nullptr) ||
-            !k::qsa_prompt_attn_batch_lse_k8v4(d_q, pl, db, sb, cap, s, ob, lb, nq, nullptr)) std::exit(2);
+        if (!k::qsa_prompt_attn_batch_lse(d_q, pl, da, sa, cap, s, oa, la, nq, nullptr) ||
+            !k::qsa_prompt_attn_batch_lse(d_q, pl, db, sb, cap, s, ob, lb, nq, nullptr)) std::exit(2);
         ck(cudaDeviceSynchronize(), "slice attention");
         std::vector<float> ha(nw.size()), hb(nw.size()), hla((size_t) (nq * NH)), hlb(hla.size());
         ck(cudaMemcpy(ha.data(), oa, ha.size() * 4, cudaMemcpyDeviceToHost), "slice A down");
@@ -310,8 +310,8 @@ int run(int fmt, int64_t ctx, int64_t nq, int reps) {   // fmt 1 int8, 0 fp16, 2
             }
         }
         ok_merge = ok_merge && worst <= 3e-4 * std::max(magnitude, 1.0);
-        std::printf("%s K8V4 two-window LSE merge: max difference %.3g (output scale %.3g)\n",
-                    ok_merge ? "PASS" : "FAIL", worst, magnitude);
+        std::printf("%s %s two-window LSE merge: max difference %.3g (output scale %.3g)\n",
+                    ok_merge ? "PASS" : "FAIL", fmt == 3 ? "K8V4" : "FP16", worst, magnitude);
         cudaFree((void*) da); cudaFree((void*) db); cudaFree((void*) sa); cudaFree((void*) sb);
         cudaFree(oa); cudaFree(ob); cudaFree(la); cudaFree(lb);
     }
@@ -453,7 +453,7 @@ int main(int argc, char** argv) {
         return 2;
     }
     if (argc > 4) {
-        if (std::strcmp(argv[4], "1") && std::strcmp(argv[4], "3")) return 2;
+        if (std::strcmp(argv[4], "0") && std::strcmp(argv[4], "1") && std::strcmp(argv[4], "3")) return 2;
         return run(std::atoi(argv[4]), ctx, nq, reps);
     }
     if (std::getenv("QA_OUTPUT")) {

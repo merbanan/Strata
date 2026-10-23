@@ -1650,11 +1650,11 @@ bool qsa_prompt_attn_batch(const float* q, const QsaAttnPools& pools, const int3
     return launch<0>(q, pools, ids, steps, cap, s, attn, n_q, st);
 }
 
-bool qsa_prompt_attn_batch_lse_k8v4(const float* q, const QsaAttnPools& pools, const int32_t* ids, const int32_t* steps,
-                                    int64_t cap, const QsaShapes& s, float* attn, float* lse2, int64_t n_q, void* stream) {
+bool qsa_prompt_attn_batch_lse(const float* q, const QsaAttnPools& pools, const int32_t* ids, const int32_t* steps,
+                               int64_t cap, const QsaShapes& s, float* attn, float* lse2, int64_t n_q, void* stream) {
 #if !defined(__HIPCC__)
     if (n_q <= 0) return true;
-    if (!q || !attn || !lse2 || !ids || !steps || !pools.page_table || !pools.k_q || !pools.k_scale || !pools.v_q4 ||
+    if (!q || !attn || !lse2 || !ids || !steps || !pools.page_table ||
         cap <= 0 || s.head_dim != HD || s.n_head != (int64_t) G * s.n_head_kv) return false;
     int dev = 0, major = 0, minor = 0;
     if (cudaGetDevice(&dev) != cudaSuccess ||
@@ -1664,7 +1664,11 @@ bool qsa_prompt_attn_batch_lse_k8v4(const float* q, const QsaAttnPools& pools, c
         return false;
     }
     if (10 * major + minor < 75) return false;
-    return launch<3>(q, pools, ids, steps, cap, s, attn, n_q, (cudaStream_t) stream, lse2);
+    if (pools.k_q && pools.k_scale && pools.v_q4)
+        return launch<3>(q, pools, ids, steps, cap, s, attn, n_q, (cudaStream_t) stream, lse2);
+    if (pools.k_pool && pools.v_pool)
+        return launch<0>(q, pools, ids, steps, cap, s, attn, n_q, (cudaStream_t) stream, lse2);
+    return false;
 #else
     (void) q; (void) pools; (void) ids; (void) steps; (void) cap; (void) s;
     (void) attn; (void) lse2; (void) n_q; (void) stream;
