@@ -70,7 +70,7 @@ Previous lists had 110 implementation entries and 31 benchmark entries, includin
    3. **Pending:** Increase small-miss copy-plan parallelism only where complete cache-resolution time improves.
    4. **Pending:** Skip KV value reads only when the values cannot be consumed; preserve alignment and unsupported-case fallbacks.
    5. **Complete for CUDA streamed decode on RTX 2060 SUPER:** Host-KV zeroing was already omitted in `qsa_state_zero`. A poisoned-host parity run passes all four formats, 306 eviction batches per format, reset/reuse with a partial last block, ring restore and 4/4 changed-input graph replays per format. This validates the tested CUDA read-after-write path; it is not a new speedup. HIP host-DMA prefill, full-model continuation, sanitizers and V100/T4 runtime remain outside this check. See [evidence](bench/volta-turing/kv-host-zeroing.md).
-   6. **Pending:** Audit pin registration, initialization, stream ownership and fences; reuse existing staged prefill and chunk balancing.
+   6. **Source audit complete; runtime qualification pending:** The CUDA host allocation, reset, serial staging, opt-in prefetch release/ready fences and drain paths have been traced. No missing fence was found. Session-pinned buffers persist until process exit, so future in-process reinitialization needs explicit cleanup. RTX 2060 SUPER prefetch overlap, cancellation/relayout at runtime and HIP host DMA still need tests before any adoption. Reuse the existing staging pool and chunk balancing. See [audit](bench/volta-turing/kv-stage-lifetime-audit.md).
 
 8. **KV cache policy and bounded history — C14/C15**
 
