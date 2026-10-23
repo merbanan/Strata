@@ -87,7 +87,7 @@ Previous lists had 110 implementation entries and 31 benchmark entries, includin
 
 10. **Verifier and adaptive drafting — C19/C20/C22**
 
-   1. **Pending:** Profile versioned per-layer QSA key reuse and bounded staging; existing multi-query reuse must not be duplicated.
+   1. **Partial existing-path screen:** The default QSA scorer already reads each pooled key once for a 2–8-query call. On RTX 2060 SUPER at 32K context, its isolated score call is 1.70x/1.81x/1.88x faster than the per-query scorer at 2/4/8 queries with matching hashes; this is an existing gain, not new inference work. A cache across verification windows would need per-layer/state ownership and append versions; collect real traces and full-round timing before implementing it. Bounded K/V staging remains open under item 8.3. See [audit](bench/volta-turing/qsa-key-reuse-audit.md).
    2. **Pending:** Measure compact recurrent state and bounded expert leases, including persistent bytes and ownership/version changes.
    3. **Pending:** Profile grouped expert projections and mixed dense fusion only where Strata has an uncovered operation.
    4. **Pending:** Screen grouped draft-output Q8 warps, whole-batch HC and reuse of canonical HC RMS statistics.
