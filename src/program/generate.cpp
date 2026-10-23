@@ -13709,18 +13709,24 @@ int main(int argc, char** argv) {
             if (g.n_qsa_layers() > 0 && ss.qsa_states[ss.qsa_primary()].kv_mode == 1) {
                 // KV streaming, cumulative over the process: blocks the selections named vs blocks read from RAM
                 // (this device's owned ordinals; a split's other stages hold theirs)
-                uint64_t miss = 0, look = 0;
+                uint64_t miss = 0, look = 0, host_bytes = 0;
                 bool over = false;
+                const strata::kernels::QsaShapes kv_shapes = strata::core::qsa_shapes(g);
                 for (int64_t j = 0; j < ss.qsa_alloc; ++j) {
-                    const strata::kernels::KvStreamCounters c =
-                        strata::kernels::kv_stream_counters(ss.qsa_states[ss.qsa_ord0 + j].map);
+                    const strata::core::QsaState& state = ss.qsa_states[ss.qsa_ord0 + j];
+                    const strata::kernels::KvStreamCounters c = strata::kernels::kv_stream_counters(state.map);
                     miss += c.misses; look += c.lookups; over = over || c.overflow;
+                    host_bytes += c.misses * strata::kernels::kv_block_bytes(kv_shapes, strata::core::qsa_kv_format(state));
                 }
                 std::fprintf(stderr, "strata serve: KV streaming: %.2f%% of %llu block reads hit VRAM, %.1f MiB read "
                                      "from RAM%s\n", look ? 100.0 * (double) (look - miss) / (double) look : 100.0,
-                             (unsigned long long) look, (double) miss * 4224.0 / 1048576.0,
+                             (unsigned long long) look, (double) host_bytes / 1048576.0,
                              over ? " - OVERFLOW (too few resident cells)" : "");
             }
+            if (mtp.kv_restore_calls > 0)
+                std::fprintf(stderr, "strata serve: draft KV ring restores: %llu calls, %.1f MiB read from RAM\n",
+                             (unsigned long long) mtp.kv_restore_calls,
+                             (double) mtp.kv_restore_bytes / 1048576.0);
             if (sfx_windows > 0)
                 std::fprintf(stderr, "strata serve: suffix drafts: %lld windows, %lld of %lld drafts accepted\n",
                              (long long) sfx_windows, (long long) sfx_ok, (long long) sfx_drafts);

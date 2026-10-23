@@ -1416,8 +1416,11 @@ void MtpDrafter::kv_restore(int64_t upto) {
     // the ring's blocks below `upto`, from the host copy: a checkpoint resume may have left later cells in them
     const strata::kernels::QsaShapes s = shapes_of(*g_);
     const int64_t b1 = (upto + s.page_size - 1) / s.page_size, b0 = std::max<int64_t>(0, b1 - st_.n_slots);
-    strata::kernels::kv_ring_restore(qsa_attn_pools(st_), st_.host, qsa_kv_format(st_), b0, b1, st_.n_slots, s, cs_);
+    const int fmt = qsa_kv_format(st_);
+    strata::kernels::kv_ring_restore(qsa_attn_pools(st_), st_.host, fmt, b0, b1, st_.n_slots, s, cs_);
     cudaStreamSynchronize(cs_);
+    kv_restore_bytes += (uint64_t) (b1 - b0) * strata::kernels::kv_block_bytes(s, fmt);
+    ++kv_restore_calls;
 }
 
 bool MtpDrafter::prepare_prefill(std::string& err) {

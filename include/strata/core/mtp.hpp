@@ -177,6 +177,8 @@ public:
     double ms_src = 0;      ///< the host time spent staging the source rows (a cross-card copy when the drafter is on another card)
     int64_t n_src = 0;
     int64_t rounds = 0;
+    uint64_t kv_restore_bytes = 0;   ///< cumulative host-to-VRAM draft ring restore payload
+    uint64_t kv_restore_calls = 0;
 
     /// E-9: the prompt path computes this layer's prompt K/V in batches (Prefill::draft_kv): its tensors, its K/V
     /// state, the first cell a round can still read, its device, and a wait for its own stream.
