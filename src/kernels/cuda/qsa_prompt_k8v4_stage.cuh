@@ -3,22 +3,25 @@
 // registers; Q4 V bytes stay packed there until the previous tile is consumed.
 // Q4-to-half rounding and p.v arithmetic match the original mode-3 reader.
 // q.k work is distributed across warps, retaining mode 3's ordered scale FMAs.
+template<bool V_TRANSPOSE>
 struct SmemK8V4Stage {
     int8_t kv[1][4][1][CH2][64];
-    __half v[4][CH2][72];
+    __half v[4][V_TRANSPOSE ? 72 : CH2][V_TRANSPOSE ? CH2 + 2 : 72];
     float sc[1][4][2][CH2];
     float p[16][CH2 + 1];
     float qmax[4], alpha[16], lsum[16], mrow[16];
 };
-static_assert(sizeof(SmemK8V4Stage) <= 32 * 1024, "two shared-memory blocks per Turing SM");
+static_assert(sizeof(SmemK8V4Stage<false>) <= 32 * 1024, "two shared-memory blocks per Turing SM");
+static_assert(sizeof(SmemK8V4Stage<true>) <= 32 * 1024, "two shared-memory blocks per Turing SM");
 
+template<bool V_TRANSPOSE>
 __global__ void __launch_bounds__(THREADS) prompt_attn_k8v4_stage_kernel(const float* __restrict__ q, QsaAttnPools p,
                                                                  const int32_t* __restrict__ ids,
                                                                  const int32_t* __restrict__ steps, int n_kv_heads,
                                                                  int page_size, float scale_log2,
                                                                  float* __restrict__ attn, int cap) {
     extern __shared__ __align__(16) unsigned char smem_raw[];
-    SmemK8V4Stage& S = *reinterpret_cast<SmemK8V4Stage*>(smem_raw);
+    SmemK8V4Stage<V_TRANSPOSE>& S = *reinterpret_cast<SmemK8V4Stage<V_TRANSPOSE>*>(smem_raw);
     // the partial of (row r, cell c) of warp w: cell group c / 8's 512 bytes of w's K slice, [row][cell % 8]
 #define PAK4_PART(w, r, c) reinterpret_cast<const float*>(&S.kv[0][w][0][0][0])[((c) >> 3) * 128 + (r) * 8 + ((c) & 7)]
     const int qi = blockIdx.x, kvh = blockIdx.y;
@@ -87,8 +90,15 @@ __global__ void __launch_bounds__(THREADS) prompt_attn_k8v4_stage_kernel(const f
 #pragma unroll
             for (int j = 0; j < 16; ++j) {
                 const unsigned byte = (vbits[b][j / 4] >> (8 * (j % 4))) & 255u;
-                S.v[warp][lane][b * 32 + j] = __float2half_rn((float) ((int) (byte & 15u) - 8) * vd[b]);
-                S.v[warp][lane][b * 32 + j + 16] = __float2half_rn((float) ((int) (byte >> 4) - 8) * vd[b]);
+                const __half lo = __float2half_rn((float) ((int) (byte & 15u) - 8) * vd[b]);
+                const __half hi = __float2half_rn((float) ((int) (byte >> 4) - 8) * vd[b]);
+                if constexpr (V_TRANSPOSE) {
+                    S.v[warp][b * 32 + j][lane] = lo;
+                    S.v[warp][b * 32 + j + 16][lane] = hi;
+                } else {
+                    S.v[warp][lane][b * 32 + j] = lo;
+                    S.v[warp][lane][b * 32 + j + 16] = hi;
+                }
             }
         }
     };
@@ -231,11 +241,16 @@ __global__ void __launch_bounds__(THREADS) prompt_attn_k8v4_stage_kernel(const f
 #pragma unroll
                 for (int j = 0; j < 8; ++j) {
                     const int d = j * 8 + gid;
-                    const __half2 h0 = __halves2half2(S.v[warp][cA][d], S.v[warp][cA + 1][d]);
-                    const __half2 h1 = __halves2half2(S.v[warp][cB][d], S.v[warp][cB + 1][d]);
                     uint32_t b[2];
-                    b[0] = *reinterpret_cast<const uint32_t*>(&h0);
-                    b[1] = *reinterpret_cast<const uint32_t*>(&h1);
+                    if constexpr (V_TRANSPOSE) {
+                        b[0] = *reinterpret_cast<const uint32_t*>(&S.v[warp][d][cA]);
+                        b[1] = *reinterpret_cast<const uint32_t*>(&S.v[warp][d][cB]);
+                    } else {
+                        const __half2 h0 = __halves2half2(S.v[warp][cA][d], S.v[warp][cA + 1][d]);
+                        const __half2 h1 = __halves2half2(S.v[warp][cB][d], S.v[warp][cB + 1][d]);
+                        b[0] = *reinterpret_cast<const uint32_t*>(&h0);
+                        b[1] = *reinterpret_cast<const uint32_t*>(&h1);
+                    }
                     mma16816(tmp[j], ah, b);
                     mma16816(tmp[j], al, b);
                 }
@@ -282,13 +297,23 @@ bool launch_k8v4_stage(const float* q, const QsaAttnPools& pools, const int32_t*
         cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, dev) != cudaSuccess ||
         cudaDeviceGetAttribute(&minor, cudaDevAttrComputeCapabilityMinor, dev) != cudaSuccess ||
         major != 7 || minor != 5) return false;
-    constexpr int bytes = sizeof(SmemK8V4Stage);
+    static const bool transpose = [] {
+        const char* e = std::getenv("STRATA_PA_K8V4_V_TRANSPOSE");
+        return e != nullptr && e[0] == '1';
+    }();
     const float scale_log2 = 1.4426950408889634f / sqrtf((float) HD);
     for (int64_t q0 = 0; q0 < n_q; q0 += 65535) {
         const int64_t nb = n_q - q0 < 65535 ? n_q - q0 : 65535;
-        prompt_attn_k8v4_stage_kernel<<<dim3((unsigned) nb, (unsigned) s.n_head_kv), THREADS, bytes, st>>>(
-            q + q0 * s.n_head * HD, pools, ids + q0 * cap, steps + q0 * kStepCount, (int) s.n_head_kv,
-            (int) s.page_size, scale_log2, attn + q0 * s.n_head * HD, (int) cap);
+        if (transpose)
+            prompt_attn_k8v4_stage_kernel<true><<<dim3((unsigned) nb, (unsigned) s.n_head_kv), THREADS,
+                sizeof(SmemK8V4Stage<true>), st>>>(q + q0 * s.n_head * HD, pools, ids + q0 * cap,
+                steps + q0 * kStepCount, (int) s.n_head_kv, (int) s.page_size, scale_log2,
+                attn + q0 * s.n_head * HD, (int) cap);
+        else
+            prompt_attn_k8v4_stage_kernel<false><<<dim3((unsigned) nb, (unsigned) s.n_head_kv), THREADS,
+                sizeof(SmemK8V4Stage<false>), st>>>(q + q0 * s.n_head * HD, pools, ids + q0 * cap,
+                steps + q0 * kStepCount, (int) s.n_head_kv, (int) s.page_size, scale_log2,
+                attn + q0 * s.n_head * HD, (int) cap);
     }
     const cudaError_t e = cudaGetLastError();
     if (e != cudaSuccess) {

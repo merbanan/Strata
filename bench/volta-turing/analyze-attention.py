@@ -11,6 +11,8 @@ p = argparse.ArgumentParser(description=__doc__)
 p.add_argument('directory', type=Path)
 p.add_argument('--targets', default='1024,4096,16384,32768')
 p.add_argument('--pairs', type=int, default=2)
+p.add_argument('--switch', default='STRATA_PA_K8V4_STAGE',
+               help='the sole environment switch allowed to differ between arms')
 a = p.parse_args()
 targets = list(map(int, a.targets.split(',')))
 rows = [json.loads(line) for line in (a.directory / 'runs.jsonl').read_text().splitlines()]
@@ -29,7 +31,7 @@ for name, digest in manifest['changed_sources'].items():
         raise SystemExit('saved source has changed: ' + name)
 configs = [json.loads((a.directory / f'{arm}.json').read_text()) for arm in ('base', 'candidate')]
 for ordinal, cfg in enumerate(configs):
-    if cfg['env'].pop('STRATA_PA_K8V4_STAGE') != str(ordinal):
+    if cfg['env'].pop(a.switch) != str(ordinal):
         raise SystemExit('wrong attention switch')
     cfg.pop('log', None)
 if configs[0] != configs[1]:
