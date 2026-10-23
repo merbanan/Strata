@@ -9,6 +9,7 @@
 //   3. no call overflowed, and the hit/miss counters add up;
 //   4. a ring (the MTP drafter's layout) restored from the host copy reads the same values as the resident pool.
 //   5. a reset and short reused sequence cannot observe stale host cells or a partly written final page.
+//   6. captured reset/append/resolve/attention stays bitwise equal across changed-input graph replays.
 // INT8, FP16, Q4_0 (PR #21) and hybrid K8V4 pools; K8V4's appends are the engine's folded calls (layer.cpp), its host
 // copy written through kv_hybrid_k_half / kv_hybrid_v_half.
 #include "strata/kernels/kv_q4.hpp"
@@ -84,16 +85,16 @@ struct Pools {   // one K/V pool set of `pages` pages
 };
 
 void append(const Pools& pl, const int32_t* table, const int32_t* step, const float* kc, const float* vc,
-            const k::QsaShapes& s, int fmt, const k::KvHostPools* host) {
+            const k::QsaShapes& s, int fmt, const k::KvHostPools* host, void* stream = nullptr) {
     if (fmt == k::kKvHybrid) {   // exactly as qsa_layer: each half folded onto its own pool, host copy by halves
         const k::KvHostPools hk = host ? k::kv_hybrid_k_half(*host) : k::KvHostPools{},
                              hv = host ? k::kv_hybrid_v_half(*host) : k::KvHostPools{};
-        k::kv_append_q8_step(pl.p.k_q, pl.p.k_q, pl.p.k_scale, pl.p.k_scale, table, step, kc, kc, s, nullptr,
+        k::kv_append_q8_step(pl.p.k_q, pl.p.k_q, pl.p.k_scale, pl.p.k_scale, table, step, kc, kc, s, stream,
                              host ? &hk : nullptr);
-        k::kv_append_q4_step(pl.p.v_q4, pl.p.v_q4, table, step, vc, vc, s, nullptr, host ? &hv : nullptr);
-    } else if (fmt == k::kKvQ4) k::kv_append_q4_step(pl.p.k_q4, pl.p.v_q4, table, step, kc, vc, s, nullptr, host);
-    else if (fmt == k::kKvInt8) k::kv_append_q8_step(pl.p.k_q, pl.p.v_q, pl.p.k_scale, pl.p.v_scale, table, step, kc, vc, s, nullptr, host);
-    else k::kv_append_step(pl.p.k_pool, pl.p.v_pool, table, step, kc, vc, s, nullptr, host);
+        k::kv_append_q4_step(pl.p.v_q4, pl.p.v_q4, table, step, vc, vc, s, stream, host ? &hv : nullptr);
+    } else if (fmt == k::kKvQ4) k::kv_append_q4_step(pl.p.k_q4, pl.p.v_q4, table, step, kc, vc, s, stream, host);
+    else if (fmt == k::kKvInt8) k::kv_append_q8_step(pl.p.k_q, pl.p.v_q, pl.p.k_scale, pl.p.v_scale, table, step, kc, vc, s, stream, host);
+    else k::kv_append_step(pl.p.k_pool, pl.p.v_pool, table, step, kc, vc, s, stream, host);
 }
 
 // A selection like qsa_block_topk's: ascending cells, whole blocks, the tail block's cells, and one partial block.
@@ -269,6 +270,48 @@ bool run(int fmt) {
         const bool ok = std::memcmp(a.data(), b2.data(), (size_t) NH * D * 4) == 0;
         std::printf("  %s reused host copy: %s\n", name, ok ? "identical" : "DIFFERS");
         if (!ok) ++bad;
+    }
+    // Capture the production order with fixed device pointers. Replaying it at
+    // different positions and with new K/V and queries checks that neither the
+    // residency map nor the mapped host copy leaks values from a prior replay.
+    {
+        cudaStream_t cs = nullptr;
+        cudaGraph_t graph = nullptr;
+        cudaGraphExec_t graph_exec = nullptr;
+        ck(cudaStreamCreate(&cs), "graph stream");
+        ck(cudaStreamBeginCapture(cs, cudaStreamCaptureModeThreadLocal), "graph capture begin");
+        k::kv_stream_reset(m, cs);
+        append(slots, m.page_table, step, kc, vc, s, fmt, &host.p, cs);
+        k::kv_stream_resolve(m, slots.attn(m.page_table), host.p, fmt, ids, steps, 1, cap, s, cs);
+        k::qsa_decode_attn_batch(q, slots.attn(m.page_table), ids, steps, cap, s, scratch, out_str, 1, cs);
+        ck(cudaStreamEndCapture(cs, &graph), "graph capture end");
+        ck(cudaGraphInstantiate(&graph_exec, graph, nullptr, nullptr, 0), "graph instantiate");
+        int matched = 0;
+        for (const int pos : {0, 1, 4, 0}) {
+            for (auto& x : hk) x = nd(rng) * 2.f;
+            for (auto& x : hv) x = nd(rng);
+            for (auto& x : hq) x = nd(rng);
+            const int32_t st[4] = {pos, pos + 1, (pos + 1) / 4, 0};
+            const int32_t query_step[4] = {pos, pos + 1, (pos + 1) / 4, 1};
+            ck(cudaMemcpy(kc, hk.data(), hk.size() * 4, cudaMemcpyHostToDevice), "graph k");
+            ck(cudaMemcpy(vc, hv.data(), hv.size() * 4, cudaMemcpyHostToDevice), "graph v");
+            ck(cudaMemcpy(q, hq.data(), hq.size() * 4, cudaMemcpyHostToDevice), "graph q");
+            ck(cudaMemcpy(step, st, sizeof(st), cudaMemcpyHostToDevice), "graph step");
+            ck(cudaMemcpy(steps, query_step, sizeof(query_step), cudaMemcpyHostToDevice), "graph query step");
+            ck(cudaMemcpy(ids, &pos, sizeof(pos), cudaMemcpyHostToDevice), "graph id");
+            append(ref, ident, step, kc, vc, s, fmt, nullptr, cs);
+            k::qsa_decode_attn_batch(q, ref.attn(ident), ids, steps, cap, s, scratch, out_ref, 1, cs);
+            ck(cudaGraphLaunch(graph_exec, cs), "graph replay");
+            ck(cudaStreamSynchronize(cs), "graph replay sync");
+            ck(cudaMemcpy(a.data(), out_ref, (size_t) NH * D * 4, cudaMemcpyDeviceToHost), "graph reference");
+            ck(cudaMemcpy(b2.data(), out_str, (size_t) NH * D * 4, cudaMemcpyDeviceToHost), "graph streamed");
+            matched += std::memcmp(a.data(), b2.data(), (size_t) NH * D * 4) == 0;
+        }
+        std::printf("  %s changed-input graph replays: %d/4 identical\n", name, matched);
+        if (matched != 4) ++bad;
+        ck(cudaGraphExecDestroy(graph_exec), "graph exec destroy");
+        ck(cudaGraphDestroy(graph), "graph destroy");
+        ck(cudaStreamDestroy(cs), "graph stream destroy");
     }
     return bad == 0;
 }
