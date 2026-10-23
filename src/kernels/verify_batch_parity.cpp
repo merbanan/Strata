@@ -232,6 +232,41 @@ void ple(cudaStream_t s) {
                 conv_ok ? "within tolerance" : "DIFFERENT");
     std::printf("  max conv absolute error: %.9g\n", worst_conv_error);
     if (!conv_ok) ++g_fail;
+    cudaGraph_t graph = nullptr;
+    cudaGraphExec_t graph_exec = nullptr;
+    ck(cudaStreamBeginCapture(s, cudaStreamCaptureModeThreadLocal), "PLE graph capture begin");
+    k::ple_block(d_value, d_hidden, d_history, w, out, scratch, s);
+    k::ple_history_advance(d_history, d_normalized, s);
+    ck(cudaStreamEndCapture(s, &graph), "PLE graph capture end");
+    ck(cudaGraphInstantiate(&graph_exec, graph, nullptr, nullptr, 0), "PLE graph instantiate");
+    for (int iteration = 0; iteration < 2; ++iteration) {
+        // Both the projected input and history change while graph addresses stay fixed.
+        for (auto& x : key) x = 4.f * nd(rng);
+        for (auto& x : hidden) x = nd(rng);
+        for (auto& x : value) x = nd(rng);
+        for (auto& x : hist0) x = nd(rng);
+        auto reset_inputs = [&] {
+            ck(cudaMemcpyAsync(d_key, key.data(), key.size() * sizeof(float), cudaMemcpyHostToDevice, s), "PLE graph key upload");
+            ck(cudaMemcpyAsync(d_hidden, hidden.data(), hidden.size() * sizeof(float), cudaMemcpyHostToDevice, s), "PLE graph hidden upload");
+            ck(cudaMemcpyAsync(d_value, value.data(), value.size() * sizeof(float), cudaMemcpyHostToDevice, s), "PLE graph value upload");
+            ck(cudaMemcpyAsync(d_history, hist0.data(), hist0.size() * sizeof(float), cudaMemcpyHostToDevice, s), "PLE graph history upload");
+        };
+        reset_inputs();
+        k::ple_block(d_value, d_hidden, d_history, w, out, scratch, s);
+        k::ple_history_advance(d_history, d_normalized, s);
+        ck(cudaStreamSynchronize(s), "PLE eager sync");
+        const auto eager_result = read(d_result, D);
+        const auto eager_history = read(d_history, hist0.size());
+        reset_inputs();
+        ck(cudaGraphLaunch(graph_exec, s), "PLE graph replay");
+        ck(cudaStreamSynchronize(s), "PLE graph replay sync");
+        const bool equal = eager_result == read(d_result, D) && eager_history == read(d_history, hist0.size());
+        char what[96];
+        std::snprintf(what, sizeof what, "PLE captured block and history, changed input %d", iteration + 1);
+        report(what, equal);
+    }
+    ck(cudaGraphExecDestroy(graph_exec), "PLE graph exec destroy");
+    ck(cudaGraphDestroy(graph), "PLE graph destroy");
     for (void* p : std::initializer_list<void*>{d_key, d_hidden, d_value, d_history, d_normalized, d_conv, d_result, scratch,
                     (void*) w.norm_key, (void*) w.norm_query, (void*) w.norm_conv, (void*) w.conv1d_f16})
         cudaFree(p);
