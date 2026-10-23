@@ -74,7 +74,7 @@ Previous lists had 110 implementation entries and 31 benchmark entries, includin
 
 8. **KV cache policy and bounded history — C14/C15**
 
-   1. **Pending:** Compare probe-LRU under shared-prefix reuse and disjoint-context churn while retaining K8V4 encoded storage.
+   1. **Partial, synthetic policy screen complete:** K8V4 parity emitted 306 selected-page batches; a CPU CLOCK replay predicts 70,472 misses versus 70,502 measured on GPU. Ideal LRU saves 0.34% of simulated misses, while a simplified 16-probe/64-hand screen adds 4.85%. Constructed shared-prefix reuse ties all policies; constructed disjoint-context churn saves 3.86% of misses with the probe screen. These are no model traces or GPU policy timings. Collect real shared-prefix/disjoint model traces, then qualify a GPU prototype before adopting any replacement change. Keep CLOCK and K8V4. See [screen](bench/volta-turing/kv-policy-replay.md).
    2. **Pending:** Compare independent draft/target hot-cache budgets at fixed total memory; measure hit rates, PCIe bytes, acceptance and expert displacement.
    3. **Pending:** Test bounded history staging with checked softmax/LSE merging, FP16 draft history and encoded target history, including window boundaries.
 

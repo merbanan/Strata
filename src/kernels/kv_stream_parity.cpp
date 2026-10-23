@@ -121,6 +121,14 @@ std::vector<int32_t> selection(int64_t n_kv, int64_t width, std::mt19937& rng) {
 
 bool run(int fmt) {
     const char* name = fmt == k::kKvHybrid ? "k8v4" : fmt == k::kKvQ4 ? "q4_0" : fmt == k::kKvInt8 ? "int8" : "fp16";
+    FILE* selection_trace = nullptr;
+    if (const char* path = std::getenv("STRATA_KV_SELECTION_TRACE")) {
+        selection_trace = std::fopen(path, "w");
+        if (!selection_trace) {
+            std::perror("STRATA_KV_SELECTION_TRACE");
+            return false;
+        }
+    }
     k::QsaShapes s = k::qsa_real_shapes();
     const int64_t N = 40000, n_blocks = (N + 3) / 4, n_slots = 8 * 516 + 700;   // must evict: slots < blocks
     const int64_t cap = k::qsa_selection_width(k::kTopkMaxCells, s), NQ = 8;
@@ -208,6 +216,21 @@ bool run(int fmt) {
         }
         for (int64_t sl = 0; sl < n_slots; ++sl)
             if (sb[sl] >= 0 && pt[sb[sl]] != sl) { if (bad++ < 5) std::fprintf(stderr, "  slot %lld not in the table\n", (long long) sl); break; }
+        if (selection_trace) {
+            std::set<int32_t> seen;
+            const k::KvStreamCounters count = k::kv_stream_counters(m);
+            std::fprintf(selection_trace, "{\"blocks\":[");
+            bool first = true;
+            for (int t = 0; t < n_q; ++t)
+                for (int i = 0; i < hst[t * 4 + 3]; ++i) {
+                    const int32_t block = hids[(size_t) t * cap + i] / (int32_t) s.page_size;
+                    if (!seen.insert(block).second) continue;
+                    std::fprintf(selection_trace, "%s%d", first ? "" : ",", block);
+                    first = false;
+                }
+            std::fprintf(selection_trace, "],\"gpu_misses_total\":%llu,\"gpu_lookups_total\":%llu}\n",
+                         (unsigned long long) count.misses, (unsigned long long) count.lookups);
+        }
         ++batches;
     }
     const k::KvStreamCounters c = k::kv_stream_counters(m);
@@ -447,6 +470,10 @@ bool run(int fmt) {
         ck(cudaEventDestroy(begin), "DMA bench begin destroy");
         ck(cudaEventDestroy(end), "DMA bench end destroy");
         ck(cudaStreamDestroy(cs), "DMA bench stream destroy");
+    }
+    if (selection_trace && std::fclose(selection_trace) != 0) {
+        std::perror("STRATA_KV_SELECTION_TRACE close");
+        ++bad;
     }
     return bad == 0;
 }
