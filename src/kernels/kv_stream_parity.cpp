@@ -313,6 +313,52 @@ bool run(int fmt) {
         ck(cudaGraphDestroy(graph), "graph destroy");
         ck(cudaStreamDestroy(cs), "graph stream destroy");
     }
+    // An optional, model-free screen of the complete reset + resolve + copy
+    // path. Each captured resolve starts cold so the requested pages are misses.
+    if (std::getenv("STRATA_KV_COPY_BENCH")) {
+        constexpr int repeats = 32, launches = 128;
+        cudaStream_t cs = nullptr;
+        cudaEvent_t begin = nullptr, end = nullptr;
+        ck(cudaStreamCreate(&cs), "bench stream");
+        ck(cudaEventCreate(&begin), "bench begin event");
+        ck(cudaEventCreate(&end), "bench end event");
+        for (const int misses : {1, 4, 16, 64}) {
+            if (misses > cap) continue;
+            std::vector<int32_t> hids((size_t) cap, 0);
+            for (int i = 0; i < misses; ++i) hids[(size_t) i] = i * (int) s.page_size;
+            const int32_t hst[4] = {misses * (int) s.page_size - 1,
+                                    misses * (int) s.page_size, misses, misses};
+            ck(cudaMemcpy(ids, hids.data(), hids.size() * 4, cudaMemcpyHostToDevice), "bench ids");
+            ck(cudaMemcpy(steps, hst, sizeof(hst), cudaMemcpyHostToDevice), "bench steps");
+            cudaGraph_t graph = nullptr;
+            cudaGraphExec_t graph_exec = nullptr;
+            ck(cudaStreamBeginCapture(cs, cudaStreamCaptureModeThreadLocal), "bench capture begin");
+            for (int i = 0; i < repeats; ++i) {
+                k::kv_stream_reset(m, cs);
+                k::kv_stream_resolve(m, slots.attn(m.page_table), host.p, fmt, ids, steps, 1, cap, s, cs);
+            }
+            ck(cudaStreamEndCapture(cs, &graph), "bench capture end");
+            ck(cudaGraphInstantiate(&graph_exec, graph, nullptr, nullptr, 0), "bench instantiate");
+            for (int i = 0; i < 4; ++i) ck(cudaGraphLaunch(graph_exec, cs), "bench warmup");
+            ck(cudaStreamSynchronize(cs), "bench warmup sync");
+            float samples[3] = {};
+            for (float& sample : samples) {
+                ck(cudaEventRecord(begin, cs), "bench begin");
+                for (int i = 0; i < launches; ++i) ck(cudaGraphLaunch(graph_exec, cs), "bench launch");
+                ck(cudaEventRecord(end, cs), "bench end");
+                ck(cudaEventSynchronize(end), "bench sync");
+                ck(cudaEventElapsedTime(&sample, begin, end), "bench elapsed");
+            }
+            std::sort(samples, samples + 3);
+            std::printf("  %s cold resolve + copy, %d misses: %.3f us/call (median of 3 x %d)\n",
+                        name, misses, samples[1] * 1000.f / (repeats * launches), repeats * launches);
+            ck(cudaGraphExecDestroy(graph_exec), "bench exec destroy");
+            ck(cudaGraphDestroy(graph), "bench graph destroy");
+        }
+        ck(cudaEventDestroy(begin), "bench begin destroy");
+        ck(cudaEventDestroy(end), "bench end destroy");
+        ck(cudaStreamDestroy(cs), "bench stream destroy");
+    }
     return bad == 0;
 }
 }  // namespace

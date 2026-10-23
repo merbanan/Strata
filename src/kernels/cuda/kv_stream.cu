@@ -177,6 +177,19 @@ __global__ void copy_kernel(KvStreamMap m, Runs r) {
     }
 }
 
+// Experimental small-miss path: independent K, scale and V runs from the same
+// missed page can use separate CTAs. The regular path uses one CTA per page.
+__global__ void copy_runs_kernel(KvStreamMap m, Runs r) {
+    const int count = m.ctl[2] * r.n;
+    for (int task = blockIdx.x; task < count; task += gridDim.x) {
+        const int k = task / r.n, a = task % r.n;
+        const long long b = m.miss_block[k], sl = m.miss_slot[k];
+        const uint4* src = reinterpret_cast<const uint4*>(r.src[a] + b * r.len[a]);
+        uint4* dst = reinterpret_cast<uint4*>(r.dst[a] + sl * r.len[a]);
+        for (int i = threadIdx.x; i < r.len[a] / 16; i += blockDim.x) dst[i] = src[i];
+    }
+}
+
 __global__ void reset_kernel(KvStreamMap m) {
     const long long i0 = (long long) blockIdx.x * blockDim.x + threadIdx.x, st = (long long) gridDim.x * blockDim.x;
     for (long long i = i0; i < m.n_blocks; i += st) m.page_table[i] = -1;
@@ -229,7 +242,13 @@ void kv_stream_resolve(const KvStreamMap& m, const QsaAttnPools& slots, const Kv
     }
     resolve_kernel<<<1, RT, 0, (cudaStream_t) stream>>>(m, ids, steps, (int) n_q, (int) cap, (int) s.page_size);
     check("resolve");
-    copy_kernel<<<96, 128, 0, (cudaStream_t) stream>>>(m, runs_of(slots, host, fmt, s));
+    static const bool split_runs = [] {
+        const char* v = std::getenv("STRATA_KV_COPY_RUNS");
+        return v && v[0] == '1' && v[1] == '\0';
+    }();
+    const Runs runs = runs_of(slots, host, fmt, s);
+    if (split_runs) copy_runs_kernel<<<96, 128, 0, (cudaStream_t) stream>>>(m, runs);
+    else copy_kernel<<<96, 128, 0, (cudaStream_t) stream>>>(m, runs);
     check("copy");
 }
 
