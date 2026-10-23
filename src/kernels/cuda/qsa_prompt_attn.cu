@@ -84,8 +84,9 @@ __device__ __forceinline__ uint32_t pack_h2(float lo_k, float hi_k) {   // eleme
 // KV_MODE 4 (Q4_0 K and V, `--kv q4_0`): mode 1 with a scale per 32 values - each q4_0 block's codes enter as exact
 // int8 (code - 8) and its fp16 scale is applied in FP32, as mode 1's are; the caller rotates q and un-rotates the
 // output (kv_q4.hpp).
-template <int KV_MODE>
+template <int KV_MODE, int CHUNK = CH>
 struct Smem {
+    static constexpr int CH = CHUNK;
     using KElem = typename std::conditional<KV_MODE == 0, __half, int8_t>::type;
     using VElem = typename std::conditional<KV_MODE == 1 || KV_MODE == 4, int8_t, __half>::type;
     static constexpr int KROW = KV_MODE == 0 ? HD + 8 : HD + 16;   // elements; 16-byte aligned rows, banks spread
@@ -105,14 +106,15 @@ struct Smem {
     long long row[CH];
 };
 
-template <int KV_MODE>
+template <int KV_MODE, int CHUNK>
 __global__ void __launch_bounds__(THREADS) prompt_attn_kernel(const float* __restrict__ q, QsaAttnPools p,
                                                               const int32_t* __restrict__ ids,
                                                               const int32_t* __restrict__ steps, int n_kv_heads,
                                                               int page_size, float scale_log2, float* __restrict__ attn,
                                                               int cap, float* __restrict__ lse2) {
     extern __shared__ __align__(16) unsigned char smem_raw[];
-    Smem<KV_MODE>& S = *reinterpret_cast<Smem<KV_MODE>*>(smem_raw);
+    Smem<KV_MODE, CHUNK>& S = *reinterpret_cast<Smem<KV_MODE, CHUNK>*>(smem_raw);
+    constexpr int CH = CHUNK;
     const int qi = blockIdx.x, kvh = blockIdx.y;
     const int n_head = n_kv_heads * G;
     q += (size_t) qi * n_head * HD + (size_t) kvh * G * HD;
@@ -194,7 +196,7 @@ __global__ void __launch_bounds__(THREADS) prompt_attn_kernel(const float* __res
                 (kv == 0 ? S.ks : S.vs)[c][b] = d;
             }
         } else {
-            constexpr int KPIECES = HD * (int) sizeof(typename Smem<KV_MODE>::KElem) / 16;   // per K row
+            constexpr int KPIECES = HD * (int) sizeof(typename Smem<KV_MODE, CHUNK>::KElem) / 16;   // per K row
             for (int i = t; i < CH * KPIECES; i += THREADS) {
                 const int c = i / KPIECES, pc = i % KPIECES;
                 const long long r = S.row[c];
@@ -227,7 +229,7 @@ __global__ void __launch_bounds__(THREADS) prompt_attn_kernel(const float* __res
                     }
                 }
             } else {
-                constexpr int VPIECES = HD * (int) sizeof(typename Smem<KV_MODE>::VElem) / 16;   // per V row
+                constexpr int VPIECES = HD * (int) sizeof(typename Smem<KV_MODE, CHUNK>::VElem) / 16;   // per V row
                 for (int i = t; i < CH * VPIECES; i += THREADS) {
                     const int c = i / VPIECES, pc = i % VPIECES;
                     const long long r = S.row[c];
@@ -262,10 +264,11 @@ __global__ void __launch_bounds__(THREADS) prompt_attn_kernel(const float* __res
         }
         __syncthreads();
         // scores: warp w takes cells 8w..8w+7 (one n-tile) over all 256 dims, per scale group (64 dims; q4_0's 32)
-        constexpr int NG = Smem<KV_MODE>::NG, KPG = HD / 16 / NG;   // groups per row, 16-dim MMA steps per group
+        constexpr int NG = Smem<KV_MODE, CHUNK>::NG, KPG = HD / 16 / NG;   // groups per row, 16-dim MMA steps per group
 #pragma unroll
-        for (int nt = 0; nt < CH / 32; ++nt) {
+        for (int nt = 0; nt < (CH + 31) / 32; ++nt) {
             const int cb = (warp + 4 * nt) * 8;
+            if (cb >= CH) continue;
             float sc[4] = {0.f, 0.f, 0.f, 0.f};
 #pragma unroll
             for (int g = 0; g < NG; ++g) {
@@ -789,16 +792,16 @@ bool launch_i8(const float* q, const QsaAttnPools& pools, const int32_t* ids, co
 #include "qsa_prompt_k8v4_stage.cuh"
 #endif
 
-template <int KV_MODE>
+template <int KV_MODE, int CHUNK = CH>
 bool launch(const float* q, const QsaAttnPools& pools, const int32_t* ids, const int32_t* steps, int64_t cap,
             const QsaShapes& s, float* attn, int64_t n_q, cudaStream_t st, float* lse2 = nullptr) {
     static bool attr[64] = {};   // per device, as above
     int dev = 0;
     cudaGetDevice(&dev);
-    const int bytes = (int) sizeof(Smem<KV_MODE>);
+    const int bytes = (int) sizeof(Smem<KV_MODE, CHUNK>);
     if (dev < 0 || dev >= 64) return false;
     if (!attr[dev]) {
-        if (cudaFuncSetAttribute(prompt_attn_kernel<KV_MODE>, cudaFuncAttributeMaxDynamicSharedMemorySize, bytes) !=
+        if (cudaFuncSetAttribute(prompt_attn_kernel<KV_MODE, CHUNK>, cudaFuncAttributeMaxDynamicSharedMemorySize, bytes) !=
             cudaSuccess) {
             cudaGetLastError();
             return false;
@@ -808,7 +811,7 @@ bool launch(const float* q, const QsaAttnPools& pools, const int32_t* ids, const
     const float scale_log2 = 1.4426950408889634f / sqrtf((float) HD);
     for (int64_t q0 = 0; q0 < n_q; q0 += 65535) {
         const int64_t nb = n_q - q0 < 65535 ? n_q - q0 : 65535;
-        prompt_attn_kernel<KV_MODE><<<dim3((unsigned) nb, (unsigned) s.n_head_kv), THREADS, bytes, st>>>(
+        prompt_attn_kernel<KV_MODE, CHUNK><<<dim3((unsigned) nb, (unsigned) s.n_head_kv), THREADS, bytes, st>>>(
             q + q0 * s.n_head * HD, pools, ids + q0 * cap, steps + q0 * kStepCount, (int) s.n_head_kv,
             (int) s.page_size, scale_log2, attn + q0 * s.n_head * HD, (int) cap,
             lse2 ? lse2 + q0 * s.n_head : nullptr);
@@ -1629,6 +1632,11 @@ bool qsa_prompt_attn_batch(const float* q, const QsaAttnPools& pools, const int3
         if (!pools.k_scale) return false;
         if (volta) return launch70<3>(q, pools, ids, steps, cap, s, attn, n_q, st);
 #if !defined(__HIPCC__)
+        static const bool k8v4_ch16 = [] {
+            const char* e = std::getenv("STRATA_PA_K8V4_CH16");
+            return e != nullptr && std::strcmp(e, "1") == 0;
+        }();
+        if (turing && k8v4_ch16) return launch<3, 16>(q, pools, ids, steps, cap, s, attn, n_q, st);
         static const bool k8v4_stage = [] {
             const char* e = std::getenv("STRATA_PA_K8V4_STAGE");
             return e != nullptr && std::strcmp(e, "1") == 0;
