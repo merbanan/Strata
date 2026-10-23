@@ -3,7 +3,7 @@
 
 Partial reports describe completed requests only. Manual fresh-code/prose
 reviews apply only to the identical output bytes and task type. Supports the
-fused-prefill diagnostic, IQ2_XS experiment and controlled QSA FP16 comparison.
+fused-prefill diagnostic, IQ2_XS experiment and QSA FP16 comparisons.
 Task qualification and performance qualification remain separate.
 """
 import argparse
@@ -73,14 +73,26 @@ def completed_traces(raw):
     return requests
 
 
-def validate_qsa_control(cfg, raw_log):
+def validate_qsa_control(cfg, raw_log, policy):
     assert cfg['env']['STRATA_IDX_F16'] == '1', 'QSA comparison requires FP16 keys'
-    assert cfg['env']['STRATA_VERIFY_DEFER_CPU'] == '0', 'deferred CPU must be disabled'
-    for option, value in (('--adapt-async', '0'), ('--adapt-swaps', '0'), ('--pcie-frac', '0.11')):
+    if policy == 'fixed':
+        assert cfg['env']['STRATA_VERIFY_DEFER_CPU'] == '0', 'deferred CPU must be disabled'
+        options = (('--adapt-async', '0'), ('--adapt-swaps', '0'), ('--pcie-frac', '0.11'))
+        assert b'strata diagnostic: fixed draft-policy costs; correctness control only' in raw_log
+        assert b'adaptive tier asynchronous' not in raw_log
+    else:
+        assert policy == 'production'
+        assert cfg['env']['STRATA_VERIFY_DEFER_CPU'] == '1', 'production deferred CPU must be enabled'
+        assert cfg['env']['STRATA_PREFILL_CPU_SHARE'] == 'auto'
+        assert cfg['env']['STRATA_PCIE_FRAC_DEFAULT'] == 'old'
+        assert '--pcie-frac' not in cfg['args'], 'production PCIe probe must remain active'
+        options = (('--adapt-async', '1'), ('--adapt-swaps', '192'))
+        assert b'adaptive tier asynchronous' in raw_log
+        assert b'PCIe probe:' in raw_log
+        assert b'fixed draft-policy costs' not in raw_log
+    for option, value in options:
         assert cfg['args'].count(option) == 1
         assert cfg['args'][cfg['args'].index(option) + 1] == value, option
-    assert b'strata diagnostic: fixed draft-policy costs; correctness control only' in raw_log
-    assert b'adaptive tier asynchronous' not in raw_log
 
 
 def main():
@@ -90,6 +102,7 @@ def main():
     parser.add_argument('--reviews', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--partial', action='store_true')
+    parser.add_argument('--qsa-policy', choices=('fixed', 'production'), default='fixed')
     args = parser.parse_args()
     inputs = {}
     def read(path):
@@ -105,6 +118,7 @@ def main():
     manifest = json.loads(read(args.workload/'manifest.json'))
     feature = manifest['feature_env']
     assert feature in ('STRATA_PF_FUSED', 'STRATA_IQ2XS_GU_FUSED', 'STRATA_SCORES_HALVE'), 'unsupported experiment'
+    assert args.qsa_policy == 'fixed' or feature == 'STRATA_SCORES_HALVE'
     assert manifest['base_value'] == '0' and manifest['candidate_value'] == '1'
     diagnostic = manifest['diagnostic_budgets']
     cases = json.loads(raw_cases)
@@ -168,7 +182,7 @@ def main():
             assert all(c == normalized_configs[leg] for c in normalized_configs.values()), 'configuration drift beyond feature switch'
             raw_log = read(directory/'engine.log')
             if feature == 'STRATA_SCORES_HALVE':
-                validate_qsa_control(cfg, raw_log)
+                validate_qsa_control(cfg, raw_log, args.qsa_policy)
             traces[leg] = completed_traces(raw_log)
         index = cases.index(case)
         trace = traces[leg][index]
@@ -202,13 +216,14 @@ def main():
     report = {'status': 'partial_review' if args.partial else
               ('independent_reviews_pending' if pending else 'completed_workload_review'),
               'requests_reviewed': len(results), 'planned_requests': len(expected),
-              'feature_env': feature, 'diagnostic_budgets': diagnostic,
+              'feature_env': feature, 'qsa_policy': args.qsa_policy if feature == 'STRATA_SCORES_HALVE' else None,
+              'diagnostic_budgets': diagnostic,
               'records_complete': records_complete, 'pending_independent_reviews': pending,
               'saved_text_matches_emitted_tokens': True,
               'complete': records_complete and not pending, 'adopted': False,
               'counts': dict(Counter(f"{r['arm']}:{'qualified' if r['qualified'] else 'unqualified'}" for r in results)),
               'results': results, 'inputs': inputs,
-              'limits': 'Incomplete or unreviewed tasks remain unqualified. Raw response/protocol and applicable fused-prefill coverage are checked. Diagnostic budgets forbid timing comparisons; equal budgets alone do not qualify performance. Kernel launch coverage requires separate evidence. Fixed-policy QSA runs do not establish production performance. No model-wide quality or adoption claim.'}
+              'limits': 'Incomplete or unreviewed tasks remain unqualified. Raw response/protocol and applicable fused-prefill coverage are checked. Diagnostic budgets forbid timing comparisons; equal budgets alone do not qualify performance. Kernel launch coverage requires separate evidence. No model-wide quality or adoption claim.'}
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(report, indent=2)+'\n')
     print(json.dumps({k:v for k,v in report.items() if k not in ('results','inputs')}, indent=2))

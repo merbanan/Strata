@@ -9,6 +9,23 @@ retrieval/allocation review. All 76 continuation requests are now independently
 reviewed: four warmups qualify and all 72 substantive task responses fail.
 Exact-continuation timing qualification declined. Neither proposal is adopted.
 
+## Corrected-baseline full-workload decision (2026-10-23)
+
+The fixed-policy one-switch ABBA on RTX 2060 SUPER completed all 76 original
+requests with the same binary in both arms. Independent review qualifies 11/19
+tasks per leg; all ten successful edits have identical tokens across four legs.
+Startup and per-request allocations match, including verified window-only reads
+for the two short requests in each leg. No task has identical non-timing logged
+work in both pairs. On the successful equal-output edits, candidate/base decode
+geometric means are 1.001x and 0.976x; prompt-processing means are 1.001x and
+0.997x. There is no repeatable full-model speedup, so fusion is **not adopted**.
+
+The saved binary, source provenance, complete workload, independent task and
+allocation reviews, timing screen and promotion decision are under
+`Strata-data/bench/2026-10-21-volta-turing/iq2xs-requalified-fixed-v1/`.
+The isolated kernel gains below remain valid only at that scope. No V100 runtime
+result is claimed.
+
 ## Measured reason to investigate
 
 The installed IQ3_XXS pack uses ten gate/up/down format pairs across 48 layers.

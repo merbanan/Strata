@@ -55,3 +55,12 @@ otherwise the existing kernel or caller fallback runs. No V100 runtime claim
 follows from the sm70 compile check. Direct Q4 code/scale arithmetic remains a
 separate numerical experiment because it would change the exact FP16 rounding
 boundary tested here.
+
+The committed source is `c62eb333`. The rollbackable local release is
+`Strata-data/releases/v20-k8v4-vlayout-c62eb333/`; its installed engine has the
+same SHA-256 as the full-model benchmark binary. The installed `kv1188` smoke
+probe passed counting and colors, and the live service reported `loaded=true`
+with `STRATA_PA_K8V4_STAGE=1` and `STRATA_PA_K8V4_V_TRANSPOSE=1`. The local
+launcher is `Strata/start-current.sh`; `Strata/start-v20-snapshot.sh` retains
+the previous release and config for rollback. The release adoption manifest
+and `k8v4-task13-v1/installation-smoke.json` record the exact files and hashes.
