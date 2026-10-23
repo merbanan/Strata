@@ -1636,7 +1636,19 @@ bool qsa_prompt_attn_batch(const float* q, const QsaAttnPools& pools, const int3
             const char* e = std::getenv("STRATA_PA_K8V4_CH16");
             return e != nullptr && std::strcmp(e, "1") == 0;
         }();
-        if (turing && k8v4_ch16) return launch<3, 16>(q, pools, ids, steps, cap, s, attn, n_q, st);
+        if (turing && k8v4_ch16) {
+            // A partial first wave loses on the smaller tile: 16 queries * 2 KV heads is only 32 CTAs on the
+            // 34-SM RTX 2060 SUPER.  Admit CH16 once there is more than one CTA per SM on this device.
+            int dev = 0, sms = 0;
+            const cudaError_t dev_status = cudaGetDevice(&dev);
+            const cudaError_t sms_status = dev_status == cudaSuccess
+                ? cudaDeviceGetAttribute(&sms, cudaDevAttrMultiProcessorCount, dev) : dev_status;
+            if (sms_status == cudaSuccess) {
+                if (n_q * s.n_head_kv > sms) return launch<3, 16>(q, pools, ids, steps, cap, s, attn, n_q, st);
+            } else {
+                cudaGetLastError();
+            }
+        }
         static const bool k8v4_stage = [] {
             const char* e = std::getenv("STRATA_PA_K8V4_STAGE");
             return e != nullptr && std::strcmp(e, "1") == 0;
