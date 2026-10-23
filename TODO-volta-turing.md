@@ -81,7 +81,7 @@ Previous lists had 110 implementation entries and 31 benchmark entries, includin
 9. **PLE and temporary-memory lifetimes — C17**
 
    1. **Pending:** Profile PLE separately; verify the actual bottleneck rather than assuming the HDD issue reported upstream.
-   2. **Pending:** Test PLE convolution without padded history.
+   2. **Complete, existing path verified:** Both legacy and native PLE convolution already read the nine-row history directly, without a padded buffer. On RTX 2060 SUPER, an independent padded-history CPU reference agrees with the single-token legacy path and native 2/3/4/8-token windows (worst absolute error 4.77e-7); the native batch results, final history and snapshots remain bitwise equal to the serial path. This verifies arithmetic, not a new speedup or full-model timing. Run `verify_batch_parity` for the synthetic gate.
    3. **Pending:** Release HC projection temporaries after last use; measure recovered cache slots or larger usable prompt chunks.
    4. **Pending:** Verify SiLU, state commit, empty/null slots and graph lifetimes for both changes.
 

@@ -19,10 +19,13 @@
 
 #include <cuda_runtime.h>
 
+#include <algorithm>
 #include <cstdint>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <initializer_list>
 #include <random>
 #include <vector>
 
@@ -128,9 +131,35 @@ void ple(cudaStream_t s) {
         float* snap_a = dalloc<float>((size_t) n * HS);
         float *q = dalloc<float>(D), *nrm = dalloc<float>(D), *g = dalloc<float>(4), *gd = dalloc<float>(D);
         float* cv = dalloc<float>(D);
+        std::vector<float> hist_ref = hist0;
+        bool conv_ok = true;
+        float worst_conv_error = 0.f;
         for (int t = 0; t < n; ++t) {
             k::NativePlePostopsBuffers b{q, nrm, g, gd, nrm, cv, hid0 + (size_t) t * D};
             k::native_ple_postops(key0 + (size_t) t * D, hid0 + (size_t) t * D, val0 + (size_t) t * N, hist_a, w, b, s);
+            ck(cudaStreamSynchronize(s), "ple conv reference sync");
+            const auto normalized = read(nrm, D);
+            const auto actual_conv = read(cv, D);
+            // Independent padded-history reference: the production kernel must give the same
+            // answer while reading its three old taps directly from the caller's state.
+            for (int c = 0; c < D; ++c) {
+                float terms[k::NG_HIST + 1];
+                for (int r = 0; r < k::NG_HIST; ++r)
+                    terms[r] = hist_ref[(size_t) c * k::NG_HIST + r];
+                terms[k::NG_HIST] = normalized[c];
+                float sum = 0.f;
+                for (int tap = 0; tap < k::PLE_CONV_KERNEL; ++tap)
+                    sum += k::f32_from_f16(conv[(size_t) c * k::PLE_CONV_KERNEL + tap]) *
+                           terms[tap * k::NGRAM_SIZE];
+                const float expected = sum / (1.f + std::exp(-sum));
+                const float error = std::fabs(actual_conv[c] - expected);
+                worst_conv_error = std::max(worst_conv_error, error);
+                if (!std::isfinite(actual_conv[c]) || error > 2e-5f * (1.f + std::fabs(expected)))
+                    conv_ok = false;
+                for (int r = 0; r + 1 < k::NG_HIST; ++r)
+                    hist_ref[(size_t) c * k::NG_HIST + r] = terms[r + 1];
+                hist_ref[(size_t) c * k::NG_HIST + k::NG_HIST - 1] = normalized[c];
+            }
             k::ple_history_advance(hist_a, nrm, s);
             ck(cudaMemcpyAsync(snap_a + (size_t) t * HS, hist_a, (size_t) HS * 4, cudaMemcpyDeviceToDevice, s), "snap");
         }
@@ -144,6 +173,10 @@ void ple(cudaStream_t s) {
         k::native_ple_postops_batch_snap(key1, hid1, val1, hist_b, w, qn, gated, gate, n, snap_b, s);
         ck(cudaStreamSynchronize(s), "ple");
         char what[128];
+        std::snprintf(what, sizeof what, "PLE direct history vs padded CPU conv, %d tokens", n);
+        std::printf("%-64s %s\n", what, conv_ok ? "within tolerance" : "DIFFERENT");
+        if (!conv_ok) ++g_fail;
+        std::printf("  max conv absolute error: %.9g\n", worst_conv_error);
         std::snprintf(what, sizeof what, "native_ple_postops_batch_snap, %d tokens: results", n);
         report(what, read(hid0, hid.size()) == read(hid1, hid.size()));
         std::snprintf(what, sizeof what, "native_ple_postops_batch_snap, %d tokens: history", n);
@@ -154,6 +187,54 @@ void ple(cudaStream_t s) {
                          gate})
             cudaFree(p);
     }
+    // The older ple_block path also reads history directly. Feed its exported normalized
+    // row into the same independent padded-history equation, with distinct history taps.
+    std::vector<float> key(D), hidden(D), value(N);
+    for (auto& x : key) x = 4.f * nd(rng);
+    for (auto& x : hidden) x = nd(rng);
+    for (auto& x : value) x = nd(rng);
+    float* d_key = upload(key);
+    float* d_hidden = upload(hidden);
+    float* d_value = upload(value);
+    float* d_history = upload(hist0);
+    float* d_normalized = dalloc<float>(D);
+    float* d_conv = dalloc<float>(D);
+    float* d_result = dalloc<float>(D);
+    uint8_t* scratch = dalloc<uint8_t>(k::ple_block_scratch_bytes());
+    w.pre_key = d_key;
+    w.pre_value = d_value;
+    k::PleOut out;
+    out.normalized = d_normalized;
+    out.conv = d_conv;
+    out.result = d_result;
+    k::ple_block(d_value, d_hidden, d_history, w, out, scratch, s);
+    ck(cudaStreamSynchronize(s), "legacy PLE conv sync");
+    const auto normalized = read(d_normalized, D);
+    const auto actual_conv = read(d_conv, D);
+    bool conv_ok = true;
+    float worst_conv_error = 0.f;
+    for (int c = 0; c < D; ++c) {
+        float terms[k::NG_HIST + 1];
+        for (int r = 0; r < k::NG_HIST; ++r)
+            terms[r] = hist0[(size_t) c * k::NG_HIST + r];
+        terms[k::NG_HIST] = normalized[c];
+        float sum = 0.f;
+        for (int tap = 0; tap < k::PLE_CONV_KERNEL; ++tap)
+            sum += k::f32_from_f16(conv[(size_t) c * k::PLE_CONV_KERNEL + tap]) *
+                   terms[tap * k::NGRAM_SIZE];
+        const float expected = sum / (1.f + std::exp(-sum));
+        const float error = std::fabs(actual_conv[c] - expected);
+        worst_conv_error = std::max(worst_conv_error, error);
+        if (!std::isfinite(actual_conv[c]) || error > 2e-5f * (1.f + std::fabs(expected)))
+            conv_ok = false;
+    }
+    std::printf("%-64s %s\n", "PLE legacy direct history vs padded CPU conv",
+                conv_ok ? "within tolerance" : "DIFFERENT");
+    std::printf("  max conv absolute error: %.9g\n", worst_conv_error);
+    if (!conv_ok) ++g_fail;
+    for (void* p : std::initializer_list<void*>{d_key, d_hidden, d_value, d_history, d_normalized, d_conv, d_result, scratch,
+                    (void*) w.norm_key, (void*) w.norm_query, (void*) w.norm_conv, (void*) w.conv1d_f16})
+        cudaFree(p);
 }
 
 }  // namespace
