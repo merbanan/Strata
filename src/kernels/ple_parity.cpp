@@ -252,6 +252,7 @@ int history_advance_regression() {
 int main(int argc, char** argv) {
     bool selftest = false;
     bool check_fixtures = false;
+    bool hash_only = false;
     std::string pack = "pack/full";
     // --gguf, else $STRATA_PLE_GGUF, else the development layout (run from the engine root)
     std::string gguf = std::getenv("STRATA_PLE_GGUF") ? std::getenv("STRATA_PLE_GGUF")
@@ -261,12 +262,17 @@ int main(int argc, char** argv) {
         const std::string a = argv[i];
         if (a == "--selftest") selftest = true;
         else if (a == "--check-fixtures") check_fixtures = true;
+        else if (a == "--hash-only") hash_only = true;
         else if (a == "--pack" && i + 1 < argc) pack = argv[++i];
         else if (a == "--gguf" && i + 1 < argc) gguf = argv[++i];
         else if (a == "--in" && i + 1 < argc) in_bin = argv[++i];
         else if (a == "--out" && i + 1 < argc) out_bin = argv[++i];
-        else { std::fprintf(stderr, "usage: ple_parity [--selftest] [--check-fixtures] [--pack D] [--gguf F] [--in F] [--out F]\n");
+        else { std::fprintf(stderr, "usage: ple_parity [--selftest] [--check-fixtures] [--hash-only] [--pack D] [--gguf F] [--in F] [--out F]\n");
                return 2; }
+    }
+    if (hash_only && (selftest || check_fixtures)) {
+        std::fprintf(stderr, "ple_parity: --hash-only cannot be combined with fixture modes\n");
+        return 2;
     }
     if (selftest && check_fixtures) {
         std::fprintf(stderr, "ple_parity: --check-fixtures is CPU-only; use it separately from --selftest\n");
@@ -305,7 +311,7 @@ int main(int argc, char** argv) {
             return 2;
         }
     }
-    int bad = history_advance_regression();
+    int bad = hash_only ? 0 : history_advance_regression();
     const k::PleConsts C = k::ple_artifact_consts();
 
     // ============================ A. THE HASH ============================
@@ -449,6 +455,11 @@ int main(int argc, char** argv) {
                     "cut propagates FORWARD vs only at the EOS position",
                     d > 0 ? "yes" : "*** NO ***", d, fwd.size());
         if (!d) ++bad;
+    }
+
+    if (hash_only) {
+        std::printf("\nple_parity hash-only: %s\n", bad ? "FAIL" : "PASS");
+        return bad ? 1 : 0;
     }
 
     // ============================ B. THE TABLE ============================
