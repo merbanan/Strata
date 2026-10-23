@@ -268,6 +268,54 @@ int run(int fmt, int64_t ctx, int64_t nq, int reps) {   // fmt 1 int8, 0 fp16, 2
         if (!f || std::fwrite(nw.data(), sizeof(float), nw.size(), f) != nw.size()) std::exit(2);
         if (std::fclose(f)) std::exit(2);
     }
+    bool ok_merge = true;
+#if !defined(__HIP_PLATFORM_AMD__)
+    if (fmt == 3 && std::getenv("QA_WINDOW_MERGE")) {
+        std::vector<int32_t> ids_a(ids.size(), 0), ids_b(ids.size(), 0);
+        std::vector<int32_t> steps_a = steps, steps_b = steps;
+        for (int64_t i = 0; i < nq; ++i) {
+            const int w = steps[i * k::kStepCount + k::kStepWidth];
+            const int cut = i % 3 == 0 ? 0 : i % 3 == 1 ? w : w / 2;
+            steps_a[i * k::kStepCount + k::kStepWidth] = cut;
+            steps_b[i * k::kStepCount + k::kStepWidth] = w - cut;
+            std::copy_n(ids.data() + i * cap, cut, ids_a.data() + i * cap);
+            std::copy_n(ids.data() + i * cap + cut, w - cut, ids_b.data() + i * cap);
+        }
+        const int32_t* da = up(ids_a); const int32_t* db = up(ids_b);
+        const int32_t* sa = up(steps_a); const int32_t* sb = up(steps_b);
+        float *oa = nullptr, *ob = nullptr, *la = nullptr, *lb = nullptr;
+        ck(cudaMalloc(&oa, nw.size() * sizeof(float)), "slice A output");
+        ck(cudaMalloc(&ob, nw.size() * sizeof(float)), "slice B output");
+        ck(cudaMalloc(&la, (size_t) (nq * NH) * sizeof(float)), "slice A lse");
+        ck(cudaMalloc(&lb, (size_t) (nq * NH) * sizeof(float)), "slice B lse");
+        if (!k::qsa_prompt_attn_batch_lse_k8v4(d_q, pl, da, sa, cap, s, oa, la, nq, nullptr) ||
+            !k::qsa_prompt_attn_batch_lse_k8v4(d_q, pl, db, sb, cap, s, ob, lb, nq, nullptr)) std::exit(2);
+        ck(cudaDeviceSynchronize(), "slice attention");
+        std::vector<float> ha(nw.size()), hb(nw.size()), hla((size_t) (nq * NH)), hlb(hla.size());
+        ck(cudaMemcpy(ha.data(), oa, ha.size() * 4, cudaMemcpyDeviceToHost), "slice A down");
+        ck(cudaMemcpy(hb.data(), ob, hb.size() * 4, cudaMemcpyDeviceToHost), "slice B down");
+        ck(cudaMemcpy(hla.data(), la, hla.size() * 4, cudaMemcpyDeviceToHost), "slice A lse down");
+        ck(cudaMemcpy(hlb.data(), lb, hlb.size() * 4, cudaMemcpyDeviceToHost), "slice B lse down");
+        double worst = 0, magnitude = 0;
+        for (int64_t i = 0; i < nq * NH; ++i) {
+            const double a = hla[i], b = hlb[i], m = std::max(a, b);
+            const double wa = std::isfinite(a) ? std::exp2(a - m) : 0.0;
+            const double wb = std::isfinite(b) ? std::exp2(b - m) : 0.0;
+            if (!(std::isfinite(a) || a == -INFINITY) || !(std::isfinite(b) || b == -INFINITY)) ok_merge = false;
+            for (int64_t d = 0; d < HD; ++d) {
+                const size_t at = (size_t) i * HD + d;
+                const double merged = wa + wb > 0.0 ? (wa * ha[at] + wb * hb[at]) / (wa + wb) : 0.0;
+                worst = std::max(worst, std::fabs(merged - nw[at]));
+                magnitude = std::max(magnitude, (double) std::fabs(nw[at]));
+            }
+        }
+        ok_merge = ok_merge && worst <= 3e-4 * std::max(magnitude, 1.0);
+        std::printf("%s K8V4 two-window LSE merge: max difference %.3g (output scale %.3g)\n",
+                    ok_merge ? "PASS" : "FAIL", worst, magnitude);
+        cudaFree((void*) da); cudaFree((void*) db); cudaFree((void*) sa); cudaFree((void*) sb);
+        cudaFree(oa); cudaFree(ob); cudaFree(la); cudaFree(lb);
+    }
+#endif
     // 1. FP64 reference on a sample of queries
     double err_old = 0, err_new = 0, ref_scale = 0;
     for (int64_t i = 0; i < nq; i += std::max<int64_t>(1, nq / 16)) {
@@ -375,7 +423,7 @@ int run(int fmt, int64_t ctx, int64_t nq, int reps) {   // fmt 1 int8, 0 fp16, 2
     cudaFree((void*) pl.k_q); cudaFree((void*) pl.v_q); cudaFree((void*) pl.k_scale); cudaFree((void*) pl.v_scale);
     cudaFree((void*) pl.k_pool); cudaFree((void*) pl.v_pool); cudaFree((void*) pl.page_table);
     cudaFree((void*) pl.k_q4); cudaFree((void*) pl.v_q4);
-    return ok1 && ok2 && ok4 ? 0 : 1;
+    return ok1 && ok2 && ok4 && ok_merge ? 0 : 1;
 }
 }  // namespace
 

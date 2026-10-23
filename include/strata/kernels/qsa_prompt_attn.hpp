@@ -29,6 +29,11 @@ namespace strata::kernels {
 bool qsa_prompt_attn_batch(const float* q, const QsaAttnPools& pools, const int32_t* ids, const int32_t* steps,
                            int64_t cap, const QsaShapes& s, float* attn, int64_t n_q, void* stream);
 
+/// Experimental CUDA K8V4 slice result for bounded-history tests. lse2 is [query, head] log2(sum(exp2(score))).
+/// Empty selections return -infinity LSE and zero attention. Returns false without launching on other backends.
+bool qsa_prompt_attn_batch_lse_k8v4(const float* q, const QsaAttnPools& pools, const int32_t* ids, const int32_t* steps,
+                                    int64_t cap, const QsaShapes& s, float* attn, float* lse2, int64_t n_q, void* stream);
+
 /// HIP, the STRATA_PA_FAST matrix-core kernel only: the same attention with the prompt path's gate_attn in its epilogue
 /// - out16[t, h * 256 + d] (row stride ld16) = FP16(attn * sigmoid(q_full[t, h, 256 + d])) with gate_attn's bits.
 /// Returns false (nothing launched) wherever qsa_prompt_attn_batch would not run that kernel: the caller then runs

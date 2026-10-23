@@ -110,7 +110,7 @@ __global__ void __launch_bounds__(THREADS) prompt_attn_kernel(const float* __res
                                                               const int32_t* __restrict__ ids,
                                                               const int32_t* __restrict__ steps, int n_kv_heads,
                                                               int page_size, float scale_log2, float* __restrict__ attn,
-                                                              int cap) {
+                                                              int cap, float* __restrict__ lse2) {
     extern __shared__ __align__(16) unsigned char smem_raw[];
     Smem<KV_MODE>& S = *reinterpret_cast<Smem<KV_MODE>*>(smem_raw);
     const int qi = blockIdx.x, kvh = blockIdx.y;
@@ -415,6 +415,11 @@ __global__ void __launch_bounds__(THREADS) prompt_attn_kernel(const float* __res
     __syncthreads();
     const float l0 = S.lsum[gid], l1 = S.lsum[gid + 8];
     const float i0 = l0 > 0.0f ? 1.0f / l0 : 0.0f, i1 = l1 > 0.0f ? 1.0f / l1 : 0.0f;
+    if (lse2 && warp == 0 && tig == 0) {
+        float* out = lse2 + (size_t) qi * n_head + kvh * G;
+        out[gid] = l0 > 0.0f ? S.mrow[gid] + log2f(l0) : -INFINITY;
+        if (gid + 8 < G) out[gid + 8] = l1 > 0.0f ? S.mrow[gid + 8] + log2f(l1) : -INFINITY;
+    }
 #pragma unroll
     for (int j = 0; j < 8; ++j) {
         const int d = warp * 64 + j * 8 + 2 * tig;
@@ -786,7 +791,7 @@ bool launch_i8(const float* q, const QsaAttnPools& pools, const int32_t* ids, co
 
 template <int KV_MODE>
 bool launch(const float* q, const QsaAttnPools& pools, const int32_t* ids, const int32_t* steps, int64_t cap,
-            const QsaShapes& s, float* attn, int64_t n_q, cudaStream_t st) {
+            const QsaShapes& s, float* attn, int64_t n_q, cudaStream_t st, float* lse2 = nullptr) {
     static bool attr[64] = {};   // per device, as above
     int dev = 0;
     cudaGetDevice(&dev);
@@ -805,7 +810,8 @@ bool launch(const float* q, const QsaAttnPools& pools, const int32_t* ids, const
         const int64_t nb = n_q - q0 < 65535 ? n_q - q0 : 65535;
         prompt_attn_kernel<KV_MODE><<<dim3((unsigned) nb, (unsigned) s.n_head_kv), THREADS, bytes, st>>>(
             q + q0 * s.n_head * HD, pools, ids + q0 * cap, steps + q0 * kStepCount, (int) s.n_head_kv,
-            (int) s.page_size, scale_log2, attn + q0 * s.n_head * HD, (int) cap);
+            (int) s.page_size, scale_log2, attn + q0 * s.n_head * HD, (int) cap,
+            lse2 ? lse2 + q0 * s.n_head : nullptr);
     }
     const cudaError_t e = cudaGetLastError();
     if (e != cudaSuccess) {
@@ -1642,6 +1648,28 @@ bool qsa_prompt_attn_batch(const float* q, const QsaAttnPools& pools, const int3
     if (!pools.k_pool || !pools.v_pool) return false;
     if (volta) return launch70<0>(q, pools, ids, steps, cap, s, attn, n_q, st);
     return launch<0>(q, pools, ids, steps, cap, s, attn, n_q, st);
+}
+
+bool qsa_prompt_attn_batch_lse_k8v4(const float* q, const QsaAttnPools& pools, const int32_t* ids, const int32_t* steps,
+                                    int64_t cap, const QsaShapes& s, float* attn, float* lse2, int64_t n_q, void* stream) {
+#if !defined(__HIPCC__)
+    if (n_q <= 0) return true;
+    if (!q || !attn || !lse2 || !ids || !steps || !pools.page_table || !pools.k_q || !pools.k_scale || !pools.v_q4 ||
+        cap <= 0 || s.head_dim != HD || s.n_head != (int64_t) G * s.n_head_kv) return false;
+    int dev = 0, major = 0, minor = 0;
+    if (cudaGetDevice(&dev) != cudaSuccess ||
+        cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, dev) != cudaSuccess ||
+        cudaDeviceGetAttribute(&minor, cudaDevAttrComputeCapabilityMinor, dev) != cudaSuccess) {
+        cudaGetLastError();
+        return false;
+    }
+    if (10 * major + minor < 75) return false;
+    return launch<3>(q, pools, ids, steps, cap, s, attn, n_q, (cudaStream_t) stream, lse2);
+#else
+    (void) q; (void) pools; (void) ids; (void) steps; (void) cap; (void) s;
+    (void) attn; (void) lse2; (void) n_q; (void) stream;
+    return false;
+#endif
 }
 
 bool qsa_prompt_attn_batch_gated(const float* q, const QsaAttnPools& pools, const int32_t* ids, const int32_t* steps,
