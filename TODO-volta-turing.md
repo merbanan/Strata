@@ -106,6 +106,7 @@ Previous lists had 110 implementation entries and 31 benchmark entries, includin
    1. **Pending:** After the storage correction, trace actual native scoring admission and distinguish prefill from verifier/decode routes.
    2. **Conditional:** Compare native scoring with cuBLAS plus exact top-k only on material large-prefill shapes; preserve ties and causal tails.
    3. **Pending:** Screen narrower pre-Ampere tiles and only uncovered 2–8-query shared-key reuse; account for corrected upstream performance attribution.
+   4. **Partial, Q4_0 Turing kernel screen:** The existing tensor-core prompt-attention path can be selected on sm75 with `STRATA_PA_Q4_TURING=1`. RTX 2060 SUPER FP64, changed-input graph, empty-selection and CUDA memcheck/racecheck/synccheck checks pass; sm70 translation-unit compilation passes. Isolated ABBA attention-call ratios are 3.06x at 4K, 2.95x at 16K and 2.67x at 32K. Full Q4_0 model inference remains to qualify. The installed K8V4 model does not exercise this path, so keep the opt-in off there. See [screen](bench/volta-turing/q4-prompt-attn-turing.md).
 
 13. **Further attention tuning — C08/C09: opt-in V layout adopted on RTX 2060 SUPER**
 

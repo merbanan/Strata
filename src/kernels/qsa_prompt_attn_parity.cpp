@@ -13,7 +13,7 @@
 // Hybrid K8V4 coverage includes the existing Q4-to-half rounding boundary.
 // QA_GRAPH=1 replays with changed queries and poisoned output; QA_EMPTY=1 includes
 // a zero-width selection. QA_OUTPUT writes output floats for cross-process A/B.
-// Usage: qsa_prompt_attn_parity [context=32768] [queries=2048] [reps=5] [format=0|1|3; default all]
+// Usage: qsa_prompt_attn_parity [context=32768] [queries=2048] [reps=5] [format=0|1|2|3; default all]
 #include "strata/kernels/qsa.hpp"
 #include "strata/kernels/qsa_decode_attn.hpp"
 #include "strata/kernels/qsa_prompt_attn.hpp"
@@ -51,13 +51,15 @@ uint16_t f2h(float f) { __half h = __float2half(f); return *reinterpret_cast<uin
 
 int run(int fmt, int64_t ctx, int64_t nq, int reps) {   // fmt 1 int8, 0 fp16, 2 q4_0, 3 k8v4
 #if !defined(__HIPCC__) && !defined(STRATA_USE_HIP)
-    if (fmt == 2) {   // mode 4 (Q4_0 KV) runs on sm_80 and newer only: below that the dispatcher keeps the old kernel
-        int dev = 0, major = 0;
+    if (fmt == 2) {   // mode 4 (Q4_0 KV) on sm75 needs an explicit parity-screen opt-in
+        int dev = 0, major = 0, minor = 0;
         ck(cudaGetDevice(&dev), "device");
         ck(cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, dev), "cc");
-        if (major < 8) {
-            std::printf("SKIP q4_0 ctx %lld: the tensor-core kernel takes Q4_0 KV on sm_80+ only (this device: sm_%d)\n",
-                        (long long) ctx, major);
+        ck(cudaDeviceGetAttribute(&minor, cudaDevAttrComputeCapabilityMinor, dev), "cc minor");
+        const char* q4t = std::getenv("STRATA_PA_Q4_TURING");
+        if (major < 8 && !(major == 7 && minor >= 5 && q4t != nullptr && q4t[0] == '1')) {
+            std::printf("SKIP q4_0 ctx %lld: set STRATA_PA_Q4_TURING=1 to screen sm75 Q4_0 (this device: sm_%d%d)\n",
+                        (long long) ctx, major, minor);
             return 0;
         }
     }
@@ -521,17 +523,25 @@ int run(int fmt, int64_t ctx, int64_t nq, int reps) {   // fmt 1 int8, 0 fp16, 2
     cudaEvent_t e0, e1;
     cudaEventCreate(&e0);
     cudaEventCreate(&e1);
+    auto timed = [&](bool old) {
+        ck(cudaEventRecord(e0), "time begin");
+        for (int r = 0; r < reps; ++r) { if (old) old_run(); else new_run(); }
+        ck(cudaEventRecord(e1), "time end");
+        ck(cudaEventSynchronize(e1), "time");
+        float ms = 0.0f;
+        ck(cudaEventElapsedTime(&ms, e0, e1), "elapsed");
+        return ms / reps;
+    };
     float ms_old = 0, ms_new = 0;
-    cudaEventRecord(e0);
-    for (int r = 0; r < reps; ++r) old_run();
-    cudaEventRecord(e1);
-    ck(cudaEventSynchronize(e1), "time");
-    cudaEventElapsedTime(&ms_old, e0, e1);
-    cudaEventRecord(e0);
-    for (int r = 0; r < reps; ++r) new_run();
-    cudaEventRecord(e1);
-    ck(cudaEventSynchronize(e1), "time");
-    cudaEventElapsedTime(&ms_new, e0, e1);
+    if (std::getenv("QA_ABBA")) {
+        const float a1 = timed(true), b1 = timed(false), b2 = timed(false), a2 = timed(true);
+        ms_old = (a1 + a2) * 0.5f;
+        ms_new = (b1 + b2) * 0.5f;
+        std::printf("ABBA old %.3f / %.3f ms, new %.3f / %.3f ms\n", a1, a2, b1, b2);
+    } else {
+        ms_old = timed(true);
+        ms_new = timed(false);
+    }
     // Hybrid prompt V rounds to FP16; the decode kernel keeps the product in
     // FP32. Bound the prompt result tightly against the rounded FP64 oracle,
     // while allowing that existing storage-boundary difference against decode.
@@ -541,7 +551,7 @@ int run(int fmt, int64_t ctx, int64_t nq, int reps) {   // fmt 1 int8, 0 fp16, 2
     std::printf("%s %s ctx %lld, %lld queries: vs FP64 old %.3g new %.3g (output scale %.3g); new vs old %.3g (%.2g of "
                 "scale); %.3f -> %.3f ms per chunk (%.2fx)\n",
                 ok1 && ok2 ? "PASS" : "FAIL", fmt == 3 ? "k8v4" : fmt == 2 ? "q4_0" : fmt == 1 ? "int8" : "fp16", (long long) ctx, (long long) nq, err_old,
-                err_new, ref_scale, diff, diff / scale, ms_old / reps, ms_new / reps, ms_old / ms_new);
+                err_new, ref_scale, diff, diff / scale, ms_old, ms_new, ms_old / ms_new);
     cudaFree((void*) d_ids); cudaFree((void*) d_steps); cudaFree((void*) d_q); cudaFree(d_old); cudaFree(d_new);
     cudaFree(scratch);
     ck(cudaEventDestroy(e0), "event destroy");
@@ -579,7 +589,8 @@ int main(int argc, char** argv) {
         return 2;
     }
     if (argc > 4) {
-        if (std::strcmp(argv[4], "0") && std::strcmp(argv[4], "1") && std::strcmp(argv[4], "3")) return 2;
+        if (std::strcmp(argv[4], "0") && std::strcmp(argv[4], "1") && std::strcmp(argv[4], "2") &&
+            std::strcmp(argv[4], "3")) return 2;
         return run(std::atoi(argv[4]), ctx, nq, reps);
     }
     if (std::getenv("QA_OUTPUT")) {
