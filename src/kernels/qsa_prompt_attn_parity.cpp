@@ -26,6 +26,7 @@
 #include <cuda_runtime.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -314,6 +315,131 @@ int run(int fmt, int64_t ctx, int64_t nq, int reps) {   // fmt 1 int8, 0 fp16, 2
                     ok_merge ? "PASS" : "FAIL", fmt == 3 ? "K8V4" : "FP16", worst, magnitude);
         cudaFree((void*) da); cudaFree((void*) db); cudaFree((void*) sa); cudaFree((void*) sb);
         cudaFree(oa); cudaFree(ob); cudaFree(la); cudaFree(lb);
+    }
+    if ((fmt == 0 || fmt == 3) && std::getenv("QA_BOUNDED_STAGE")) {
+        const int requested = std::atoi(std::getenv("QA_BOUNDED_STAGE"));
+        if (requested < 1) { std::fprintf(stderr, "QA_BOUNDED_STAGE needs a positive page count\n"); std::exit(2); }
+        std::vector<uint8_t> wanted((size_t) pages, 0);
+        for (int64_t qi = 0; qi < nq; ++qi)
+            for (int j = 0; j < steps[qi * k::kStepCount + k::kStepWidth]; ++j)
+                wanted[(size_t) (ids[qi * cap + j] / PS)] = 1;
+        std::vector<int32_t> selected_pages;
+        for (int64_t page = 0; page < pages; ++page)
+            if (wanted[(size_t) page]) selected_pages.push_back((int32_t) page);
+        const int slots = std::min<int64_t>(requested, std::max<size_t>(selected_pages.size(), 1));
+        const size_t block_rows = (size_t) (NKV * PS);
+        const size_t k_bytes = block_rows * HD * (fmt == 3 ? 1 : 2);
+        const size_t scale_bytes = block_rows * 4 * 2;
+        const size_t v_bytes = block_rows * (fmt == 3 ? ROW4 : HD * 2);
+        auto alloc = [](size_t bytes) {
+            void* p = nullptr;
+            ck(cudaMalloc(&p, bytes), "bounded stage alloc");
+            return p;
+        };
+        k::QsaAttnPools staged;
+        void* stage_k = alloc((size_t) slots * k_bytes);
+        void* stage_v = alloc((size_t) slots * v_bytes);
+        void* stage_scale = fmt == 3 ? alloc((size_t) slots * scale_bytes) : nullptr;
+        void *bounce_k = nullptr, *bounce_v = nullptr, *bounce_scale = nullptr;
+        ck(cudaHostAlloc(&bounce_k, (size_t) slots * k_bytes, cudaHostAllocDefault), "bounded K bounce");
+        ck(cudaHostAlloc(&bounce_v, (size_t) slots * v_bytes, cudaHostAllocDefault), "bounded V bounce");
+        if (fmt == 3) ck(cudaHostAlloc(&bounce_scale, (size_t) slots * scale_bytes, cudaHostAllocDefault),
+                         "bounded scale bounce");
+        int32_t* stage_table = (int32_t*) alloc((size_t) pages * 4);
+        staged.page_table = stage_table;
+        if (fmt == 3) {
+            staged.k_q = (int8_t*) stage_k;
+            staged.k_scale = (uint16_t*) stage_scale;
+            staged.v_q4 = (uint8_t*) stage_v;
+        } else {
+            staged.k_pool = (uint16_t*) stage_k;
+            staged.v_pool = (uint16_t*) stage_v;
+        }
+        int32_t* stage_ids = (int32_t*) alloc(ids.size() * 4);
+        int32_t* stage_steps = (int32_t*) alloc(steps.size() * 4);
+        float* stage_out = (float*) alloc(nw.size() * 4);
+        float* stage_lse = (float*) alloc((size_t) (nq * NH) * 4);
+        std::vector<int32_t> map((size_t) pages, -1), part_ids(ids.size(), 0), part_steps = steps;
+        std::vector<int64_t> covered((size_t) nq, 0);
+        std::vector<float> part_out(nw.size()), part_lse((size_t) (nq * NH));
+        std::vector<double> merged(nw.size(), 0.0), merged_lse(part_lse.size(), -INFINITY);
+        bool stage_ok = true;
+        size_t copied_bytes = 0;
+        int windows = 0;
+        const auto stage_start = std::chrono::steady_clock::now();
+        for (size_t begin = 0; begin < selected_pages.size(); begin += slots) {
+            const size_t count = std::min<size_t>(slots, selected_pages.size() - begin);
+            std::fill(map.begin(), map.end(), -1);
+            for (size_t slot = 0; slot < count; ++slot) {
+                const int32_t page = selected_pages[begin + slot];
+                const size_t source = (size_t) table[(size_t) page];
+                map[(size_t) page] = (int32_t) slot;
+                const uint8_t* src_k = (const uint8_t*) (fmt == 3 ? (const void*) kq.data() : (const void*) kh.data());
+                const uint8_t* src_v = (const uint8_t*) (fmt == 3 ? (const void*) v4.data() : (const void*) vh.data());
+                std::memcpy((uint8_t*) bounce_k + slot * k_bytes, src_k + source * k_bytes, k_bytes);
+                std::memcpy((uint8_t*) bounce_v + slot * v_bytes, src_v + source * v_bytes, v_bytes);
+                copied_bytes += k_bytes + v_bytes;
+                if (fmt == 3) {
+                    std::memcpy((uint8_t*) bounce_scale + slot * scale_bytes,
+                                (const uint8_t*) ks.data() + source * scale_bytes, scale_bytes);
+                    copied_bytes += scale_bytes;
+                }
+            }
+            ck(cudaMemcpyAsync(stage_k, bounce_k, count * k_bytes, cudaMemcpyHostToDevice, nullptr), "stage K run");
+            ck(cudaMemcpyAsync(stage_v, bounce_v, count * v_bytes, cudaMemcpyHostToDevice, nullptr), "stage V run");
+            if (fmt == 3)
+                ck(cudaMemcpyAsync(stage_scale, bounce_scale, count * scale_bytes, cudaMemcpyHostToDevice, nullptr),
+                   "stage K scale run");
+            for (int64_t qi = 0; qi < nq; ++qi) {
+                int width = 0;
+                for (int j = 0; j < steps[qi * k::kStepCount + k::kStepWidth]; ++j) {
+                    const int32_t cell = ids[qi * cap + j];
+                    if (map[(size_t) (cell / PS)] >= 0) part_ids[qi * cap + width++] = cell;
+                }
+                part_steps[qi * k::kStepCount + k::kStepWidth] = width;
+                covered[(size_t) qi] += width;
+            }
+            ck(cudaMemcpy(stage_table, map.data(), map.size() * 4, cudaMemcpyHostToDevice), "stage map");
+            ck(cudaMemcpy(stage_ids, part_ids.data(), part_ids.size() * 4, cudaMemcpyHostToDevice), "stage IDs");
+            ck(cudaMemcpy(stage_steps, part_steps.data(), part_steps.size() * 4, cudaMemcpyHostToDevice), "stage steps");
+            if (!k::qsa_prompt_attn_batch_lse(d_q, staged, stage_ids, stage_steps, cap, s,
+                                              stage_out, stage_lse, nq, nullptr)) std::exit(2);
+            ck(cudaDeviceSynchronize(), "bounded stage attention");
+            ck(cudaMemcpy(part_out.data(), stage_out, part_out.size() * 4, cudaMemcpyDeviceToHost), "stage output down");
+            ck(cudaMemcpy(part_lse.data(), stage_lse, part_lse.size() * 4, cudaMemcpyDeviceToHost), "stage LSE down");
+            for (int64_t head = 0; head < nq * NH; ++head) {
+                const double a = merged_lse[(size_t) head], b = part_lse[(size_t) head];
+                if (!std::isfinite(b)) { if (b != -INFINITY) stage_ok = false; continue; }
+                const double m = std::max(a, b);
+                const double wa = std::isfinite(a) ? std::exp2(a - m) : 0.0;
+                const double wb = std::exp2(b - m);
+                for (int64_t d = 0; d < HD; ++d) {
+                    const size_t at = (size_t) head * HD + d;
+                    merged[at] = (wa * merged[at] + wb * part_out[at]) / (wa + wb);
+                }
+                merged_lse[(size_t) head] = m + std::log2(wa + wb);
+            }
+            ++windows;
+        }
+        const double stage_ms = std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - stage_start).count();
+        double worst = 0, magnitude = 0;
+        for (int64_t qi = 0; qi < nq; ++qi)
+            if (covered[(size_t) qi] != steps[qi * k::kStepCount + k::kStepWidth]) stage_ok = false;
+        for (size_t i = 0; i < nw.size(); ++i) {
+            if (!std::isfinite(merged[i])) stage_ok = false;
+            worst = std::max(worst, std::fabs(merged[i] - nw[i]));
+            magnitude = std::max(magnitude, (double) std::fabs(nw[i]));
+        }
+        const bool pass = stage_ok && worst <= 3e-4 * std::max(magnitude, 1.0);
+        ok_merge = ok_merge && pass;
+        std::printf("%s %s bounded stage: %d windows, %d slots, %zu selected pages, %zu KV bytes copied, "
+                    "%.3f ms wall, max difference %.3g (output scale %.3g)\n",
+                    pass ? "PASS" : "FAIL", fmt == 3 ? "K8V4" : "FP16", windows, slots,
+                    selected_pages.size(), copied_bytes, stage_ms, worst, magnitude);
+        cudaFree(stage_k); cudaFree(stage_v); cudaFree(stage_scale); cudaFree(stage_table);
+        cudaFree(stage_ids); cudaFree(stage_steps); cudaFree(stage_out); cudaFree(stage_lse);
+        cudaFreeHost(bounce_k); cudaFreeHost(bounce_v); cudaFreeHost(bounce_scale);
     }
 #endif
     // 1. FP64 reference on a sample of queries
