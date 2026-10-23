@@ -322,7 +322,7 @@ bool run(int fmt) {
         ck(cudaStreamCreate(&cs), "bench stream");
         ck(cudaEventCreate(&begin), "bench begin event");
         ck(cudaEventCreate(&end), "bench end event");
-        for (const int misses : {1, 4, 16, 64}) {
+        for (const int misses : {1, 4, 16, 64, 256}) {
             if (misses > cap) continue;
             std::vector<int32_t> hids((size_t) cap, 0);
             for (int i = 0; i < misses; ++i) hids[(size_t) i] = i * (int) s.page_size;
@@ -358,6 +358,70 @@ bool run(int fmt) {
         ck(cudaEventDestroy(begin), "bench begin destroy");
         ck(cudaEventDestroy(end), "bench end destroy");
         ck(cudaStreamDestroy(cs), "bench stream destroy");
+    }
+    // Known contiguous prefix: the prompt path can stage it by DMA without a
+    // GPU residency lookup. Compare its complete three/four-run copy cost with
+    // the cold resolve path above; this is a transfer screen, not a policy.
+    if (std::getenv("STRATA_KV_TRANSFER_BENCH")) {
+        constexpr int repeats = 16, launches = 64;
+        cudaStream_t cs = nullptr;
+        cudaEvent_t begin = nullptr, end = nullptr;
+        ck(cudaStreamCreate(&cs), "DMA bench stream");
+        ck(cudaEventCreate(&begin), "DMA bench begin event");
+        ck(cudaEventCreate(&end), "DMA bench end event");
+        for (const int blocks : {1, 4, 16, 64, 256}) {
+            cudaGraph_t graph = nullptr;
+            cudaGraphExec_t graph_exec = nullptr;
+            ck(cudaStreamBeginCapture(cs, cudaStreamCaptureModeThreadLocal), "DMA capture begin");
+            for (int i = 0; i < repeats; ++i)
+                k::kv_stage_from_host(ref.attn(ident), host.p, fmt, blocks, s, cs);
+            ck(cudaStreamEndCapture(cs, &graph), "DMA capture end");
+            ck(cudaGraphInstantiate(&graph_exec, graph, nullptr, nullptr, 0), "DMA instantiate");
+            for (int i = 0; i < 4; ++i) ck(cudaGraphLaunch(graph_exec, cs), "DMA warmup");
+            ck(cudaStreamSynchronize(cs), "DMA warmup sync");
+            float samples[3] = {};
+            for (float& sample : samples) {
+                ck(cudaEventRecord(begin, cs), "DMA begin");
+                for (int i = 0; i < launches; ++i) ck(cudaGraphLaunch(graph_exec, cs), "DMA launch");
+                ck(cudaEventRecord(end, cs), "DMA end");
+                ck(cudaEventSynchronize(end), "DMA sync");
+                ck(cudaEventElapsedTime(&sample, begin, end), "DMA elapsed");
+            }
+            std::sort(samples, samples + 3);
+            const size_t rows = (size_t) blocks * s.n_head_kv * s.page_size;
+            auto equal = [&](const void* staged, const void* source, size_t bytes) {
+                std::vector<uint8_t> a(bytes), b(bytes);
+                ck(cudaMemcpy(a.data(), staged, bytes, cudaMemcpyDefault), "DMA staged bytes");
+                ck(cudaMemcpy(b.data(), source, bytes, cudaMemcpyDefault), "DMA host bytes");
+                return a == b;
+            };
+            bool identical = false;
+            if (fmt == k::kKvHybrid)
+                identical = equal(ref.p.k_q, host.p.k_q, rows * s.head_dim) &&
+                            equal(ref.p.k_scale, host.p.k_scale, rows * (s.head_dim / k::KV_Q8_GROUP) * 2) &&
+                            equal(ref.p.v_q4, host.p.v_q4, rows * k::kv_q4_bytes_per_head((int) s.head_dim));
+            else if (fmt == k::kKvQ4)
+                identical = equal(ref.p.k_q4, host.p.k_q4, rows * k::kv_q4_bytes_per_head((int) s.head_dim)) &&
+                            equal(ref.p.v_q4, host.p.v_q4, rows * k::kv_q4_bytes_per_head((int) s.head_dim));
+            else if (fmt == k::kKvInt8)
+                identical = equal(ref.p.k_q, host.p.k_q, rows * s.head_dim) &&
+                            equal(ref.p.v_q, host.p.v_q, rows * s.head_dim) &&
+                            equal(ref.p.k_scale, host.p.k_scale, rows * (s.head_dim / k::KV_Q8_GROUP) * 2) &&
+                            equal(ref.p.v_scale, host.p.v_scale, rows * (s.head_dim / k::KV_Q8_GROUP) * 2);
+            else
+                identical = equal(ref.p.k_pool, host.p.k_pool, rows * s.head_dim * 2) &&
+                            equal(ref.p.v_pool, host.p.v_pool, rows * s.head_dim * 2);
+            std::printf("  %s contiguous DMA stage, %d blocks (%llu bytes): %.3f us/call (median of 3 x %d)\n",
+                        name, blocks, (unsigned long long) (blocks * k::kv_block_bytes(s, fmt)),
+                        samples[1] * 1000.f / (repeats * launches), repeats * launches);
+            std::printf("  %s contiguous DMA bytes: %s\n", name, identical ? "identical" : "DIFFERS");
+            if (!identical) ++bad;
+            ck(cudaGraphExecDestroy(graph_exec), "DMA exec destroy");
+            ck(cudaGraphDestroy(graph), "DMA graph destroy");
+        }
+        ck(cudaEventDestroy(begin), "DMA bench begin destroy");
+        ck(cudaEventDestroy(end), "DMA bench end destroy");
+        ck(cudaStreamDestroy(cs), "DMA bench stream destroy");
     }
     return bad == 0;
 }
