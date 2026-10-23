@@ -1,0 +1,7 @@
+# Mode 8 4K prefill outlier in the v19 ABBA
+
+Reviewed 2026-10-23 from the four archived v19 `mode8-abba-2155` engine logs and request diagnostics. The second mode-8 4K request reports 25,865.2 ms prompt time, versus 8,374.4/8,578.2/8,400.4 ms in baseline-1/mode8-1/baseline-2. All four have 4,096 uncached prompt tokens and 256 generated tokens. The repeated mode-8 response hashes match, and the second baseline hash also matches them.
+
+The slow request reports 18,142.9 ms to lend the prompt path the drafter's 675 MiB room. The corresponding times for baseline-1/mode8-1/baseline-2 are 726.3/867.9/703.7 ms. The slow request's prompt time exceeds mode8-1 by 17,287.0 ms; its lending time exceeds mode8-1 by 17,275.0 ms. The 12 ms difference supports attributing the observed prefill outlier to that one lending operation. The logs do not reveal why the lending operation stalled; they do not establish a mode-8 kernel regression. All four runs started with the same 1,403 cache slots and 209 MiB free VRAM, then warned of low free VRAM.
+
+The original aggregate comparison must still retain the slow sample. This diagnosis is about the request time breakdown, not a replacement benchmark. Repeating explicit 0/4/8 against the default with a safer fixed VRAM budget and observing the lending phase remains pending.
