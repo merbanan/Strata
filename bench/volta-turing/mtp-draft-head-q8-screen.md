@@ -20,3 +20,21 @@ the full model unloaded. Each leg used 30 GPU-event-timed calls per shape.
 This rejects the existing one-row override as a Turing draft-head speedup.
 It does not test a new grouped-warp layout, real draft activations, sampler
 time or complete draft/verify rounds. No feature is enabled from this result.
+
+A second ABBA screen tried an opt-in four-output-row mapping in the exact Q8
+multi-column kernel, with the same one-matrix working set and 30 timed calls.
+`--hash` read back every output and computed a float-bit FNV hash after timing.
+For each column count, the four-row and existing two-row hashes matched.
+
+| Columns | Two rows, us | Four rows, us | Result |
+| ---: | ---: | ---: | --- |
+| 1 | 352.8 / 352.7 | 352.7 / 352.7 | tied |
+| 2 | 446.6 / 446.5 | 441.7 / 441.9 | four rows 1.1% faster |
+| 4 | 664.6 / 664.6 | 689.3 / 689.6 | four rows 3.7% slower |
+| 6 | 878.9 / 877.9 | 929.7 / 916.2 | four rows 4.4–5.9% slower |
+| 8 | 1078.4 / 1078.5 | 1208.6 / 1083.4 | unstable, no useful gain |
+
+The four-row production switch was removed after this screen. The small
+two-column kernel gain does not offset the losses at common wider calls, and
+complete draft/verify timing was not run. The benchmark's optional `--hash`
+check remains available for subsequent exact-output experiments.

@@ -4,7 +4,7 @@
 // cycled to miss the GPU's last-level cache, as a layer's call does.
 //
 //     build/q8_gemv_bench [--cols 1,2,3,4,6] [--iters 50] [--bw GB/s]
-//                         [--shape substring] [--working-set-mib 512]
+//                         [--shape substring] [--working-set-mib 512] [--hash]
 #include "strata/kernels/native_mmvq.hpp"
 
 #include <cuda_runtime.h>
@@ -50,6 +50,7 @@ int main(int argc, char** argv) {
     double bw = 0;
     std::string shape_filter;
     size_t working_set_mib = 512;
+    bool hash_outputs = false;
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
         if (a == "--cols" && i + 1 < argc) cols = ints(argv[++i]);
@@ -57,6 +58,7 @@ int main(int argc, char** argv) {
         else if (a == "--bw" && i + 1 < argc) bw = std::atof(argv[++i]);
         else if (a == "--shape" && i + 1 < argc) shape_filter = argv[++i];
         else if (a == "--working-set-mib" && i + 1 < argc) working_set_mib = std::max(1, std::atoi(argv[++i]));
+        else if (a == "--hash") hash_outputs = true;
     }
     cudaDeviceProp prop;
     ck(cudaGetDeviceProperties(&prop, 0), "props");
@@ -106,6 +108,17 @@ int main(int argc, char** argv) {
             const double us = 1000.0 * ms / iters, gbs = bytes / (us * 1e3);
             std::printf("  %d col%s: %8.1f us  %7.1f GB/s%s\n", c, c == 1 ? " " : "s", us, gbs,
                         bw > 0 ? (" = " + std::to_string((int) (100 * gbs / bw + 0.5)) + "% of bw").c_str() : "");
+            if (hash_outputs) {
+                std::vector<float> got((size_t) s.n_out * c);
+                ck(cudaMemcpy(got.data(), y, got.size() * sizeof(float), cudaMemcpyDeviceToHost), "hash readback");
+                uint64_t hash = 1469598103934665603ull;
+                for (float value : got) {
+                    uint32_t bits;
+                    std::memcpy(&bits, &value, sizeof bits);
+                    hash = (hash ^ bits) * 1099511628211ull;
+                }
+                std::printf("    output hash %016llx\n", (unsigned long long) hash);
+            }
         }
         for (auto p : w) cudaFree(p);
         cudaFree(x);
