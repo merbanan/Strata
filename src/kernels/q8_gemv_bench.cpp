@@ -4,6 +4,7 @@
 // cycled to miss the GPU's last-level cache, as a layer's call does.
 //
 //     build/q8_gemv_bench [--cols 1,2,3,4,6] [--iters 50] [--bw GB/s]
+//                         [--shape substring] [--working-set-mib 512]
 #include "strata/kernels/native_mmvq.hpp"
 
 #include <cuda_runtime.h>
@@ -25,7 +26,7 @@ const Shape SHAPES[] = {
     {"GDN qkv 2560->10240", 2560, 10240},  {"GDN gate 2560->6144", 2560, 6144}, {"GDN/QSA out 6144->2560", 6144, 2560},
     {"QSA q 2560->12288", 2560, 12288},    {"QSA k/v 2560->512", 2560, 512},    {"HC down 10240->320", 10240, 320},
     {"HC up 320->10240", 320, 10240},      {"shared gate/up 2560->640", 2560, 640}, {"shared down 640->2560", 640, 2560},
-    {"head 2560->248320", 2560, 248320},
+    {"head 2560->248320", 2560, 248320}, {"MTP draft head 2560->40525", 2560, 40525},
 };
 void ck(cudaError_t e, const char* w) {
     if (e != cudaSuccess) { std::fprintf(stderr, "%s: %s\n", w, cudaGetErrorString(e)); std::exit(1); }
@@ -47,19 +48,26 @@ int main(int argc, char** argv) {
     std::vector<int> cols = {1, 2, 3, 4, 6};
     int iters = 50;
     double bw = 0;
+    std::string shape_filter;
+    size_t working_set_mib = 512;
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
         if (a == "--cols" && i + 1 < argc) cols = ints(argv[++i]);
         else if (a == "--iters" && i + 1 < argc) iters = std::atoi(argv[++i]);
         else if (a == "--bw" && i + 1 < argc) bw = std::atof(argv[++i]);
+        else if (a == "--shape" && i + 1 < argc) shape_filter = argv[++i];
+        else if (a == "--working-set-mib" && i + 1 < argc) working_set_mib = std::max(1, std::atoi(argv[++i]));
     }
     cudaDeviceProp prop;
     ck(cudaGetDeviceProperties(&prop, 0), "props");
     std::printf("q8_gemv_bench: %s\n", prop.name);
     std::mt19937 rng(7);
+    int matched = 0;
     for (const Shape& s : SHAPES) {
+        if (!shape_filter.empty() && std::string(s.what).find(shape_filter) == std::string::npos) continue;
+        ++matched;
         const size_t bytes = (size_t) s.n_out * (s.n_in / 32) * 34;
-        const int copies = (int) std::max<size_t>(1, std::min<size_t>(16, ((size_t) 512 << 20) / bytes));
+        const int copies = (int) std::max<size_t>(1, std::min<size_t>(16, (working_set_mib << 20) / bytes));
         std::vector<uint8_t> host(bytes);
         for (size_t b = 0; b < bytes; b += 34) {   // fp16 scale 0.01 (0x211f), then random int8 weights
             host[b] = 0x1f;
@@ -105,5 +113,6 @@ int main(int argc, char** argv) {
         cudaFree(y);
         cudaStreamDestroy(st);
     }
-    return 0;
+    if (matched == 0) std::fprintf(stderr, "q8_gemv_bench: no shape matches '%s'\n", shape_filter.c_str());
+    return matched == 0 ? 2 : 0;
 }
