@@ -110,7 +110,10 @@ found 18.14 s spent lending prompt room versus 0.70–0.87 s in the other legs.
 Retain the raw data and investigate why that lending operation stalled.
 At 16K prefill, medians are 669.7/673.3 tok/s. All arms retain 1,403 cache slots,
 6,400-token prompt chunks and 39.60 GiB pinned expert RAM. Results and exact
-configs are in `mode8-abba-2155` under the artifact directory above.
+configs are in `mode8-abba-2155` under the artifact directory above. A later
+[eight-leg default/0/4/8 screen](dispatch-v19-screen.md) used a fixed larger VRAM
+reserve and confirmed no repeatable material gain; first-request 4K prefill is
+confounded by prompt-room lending time.
 
 Use `analyze-lookup.py DIRECTORY --source PATH/TO/src_edit.py` after a complete
 lookup ABBA. It checks requested edits using Python ASTs, detects unclosed code

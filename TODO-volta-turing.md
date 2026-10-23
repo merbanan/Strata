@@ -59,7 +59,7 @@ Previous lists had 110 implementation entries and 31 benchmark entries, includin
 6. **Expert dispatch by format and shape**
 
    1. **Complete:** Run the 90-case mode-0/4/8 screen and mode-8 engine ABBA; no consistent overall decode gain was established.
-   2. **Partial:** Finish the v19 default-versus-explicit-0/4/8 comparison, including mode 4's missing large-down fallback. The anomalous second mode-8 4K prefill is explained by an 18.14 s prompt-room lending operation (other legs 0.70–0.87 s); why that operation stalled remains unknown. See [outlier review](bench/volta-turing/mode8-4k-outlier.md).
+   2. **Complete, held:** Eight fresh v19 default/0/4/8 legs with fixed 1,024 MiB reserve match cache slots, chunks and pinned RAM. Mode 0/8 retain exact output hashes and draft counts; neither establishes a repeatable material decode or prefill gain. One mode 4 leg changes output and draft work. First-request 4K prefill is confounded by 0.68–13.92 s prompt-room lending, explaining the earlier 18.14 s mode-8 outlier as the same kind of setup stall. Keep default dispatch. See [screen](bench/volta-turing/dispatch-v19-screen.md) and [outlier review](bench/volta-turing/mode8-4k-outlier.md).
    3. **Pending:** Use measured production route frequencies and full-call costs to select opt-in format/shape cells; include GU/epilogue/down and input conversion costs.
    4. **Pending:** Validate numerics, teacher-forced output, acceptance and accepted tokens/s before promotion.
 
