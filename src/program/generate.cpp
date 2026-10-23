@@ -12462,6 +12462,14 @@ int main(int argc, char** argv) {
             const Clock::time_point d0 = Clock::now();
             // STRATA_DECODE_TIMING=1: where a request's decode time goes (one line per request)
             static const bool dec_timing = std::getenv("STRATA_DECODE_TIMING") != nullptr;
+            // STRATA_TRACE_WINDOWS=1: diagnostic only; one line per committed verify window.
+            // Pipeline windows overlap, so their dispatch counters cannot be assigned to one verdict.
+            static const bool trace_windows = [] {
+                const char* v = std::getenv("STRATA_TRACE_WINDOWS");
+                return v != nullptr && v[0] == '1' && v[1] == '\0';
+            }();
+            static int64_t next_trace_request = 0;   // the serve loop is serial
+            const int64_t trace_request = trace_windows ? ++next_trace_request : 0;
             struct DecSnap {
                 double wait, pool, host, plan, actq, jobs, run;
                 int64_t misses, entries, hits, pcie;
@@ -12994,6 +13002,12 @@ int main(int argc, char** argv) {
                     if (drive.d.fs) drive.d.fs->completed.fetch_add(1, std::memory_order_release);
                     ++dec_windows;
                     dec_T += A.T;
+                    if (trace_windows)
+                        std::fprintf(stderr, "strata window trace: req=%lld round=%lld pipeline=1 seq=%lld p=%lld "
+                                             "T=%d accepted=%d offered=%d speculative=%d suffix=%d "
+                                             "dispatch=overlapped\n",
+                                     (long long) trace_request, (long long) dec_windows, (long long) A.seq,
+                                     (long long) A.p, A.T, a, A.T - 1, (int) A.spec, (int) A.sfx);
                     const bool nf = nonfinite_hit(V1(A), "decode");   // #879: none of its tokens goes out
                     bool eos = false;
                     for (int i = 0; !nf && i <= a && produced_n < max_new && !eos; ++i) {
@@ -13188,6 +13202,7 @@ int main(int argc, char** argv) {
                 const int T_mtp = T;
                 T += chain_n;
                 const bool timed_round = !first_window;
+                const bool was_first = first_window;
                 const Clock::time_point round0 = Clock::now();
                 if (p + T > o.max_context) break;
                 window[0] = x;
@@ -13241,6 +13256,7 @@ int main(int argc, char** argv) {
                 }
                 tr("window", p, T);
                 const Clock::time_point tw0 = Clock::now();
+                const DecSnap ws0 = trace_windows ? dec_snap() : DecSnap{};
                 // STRATA_SPEC_PROB: the MTP drafts' distributions q, judged by rejection sampling (core/spec_prob.hpp);
                 // a suffix window and the lookup chain's tail are point masses and keep the exact-match rule
                 if (use_mtp && mtp.prob() && !from_sfx && T_mtp > 1) ver.set_spec_q(mtp.spec_q(), T_mtp - 1);
@@ -13322,6 +13338,20 @@ int main(int argc, char** argv) {
                     auto msd = [](Clock::time_point a0, Clock::time_point b0) { return std::chrono::duration<double, std::milli>(b0 - a0).count(); };
                     dt_run += msd(tw0, tw1); dt_commit += msd(tw1, tw2); dt_draft += msd(tw2, tw3);
                     ++dec_windows; dec_T += T;
+                    if (trace_windows) {
+                        const DecSnap ws1 = dec_snap();
+                        std::fprintf(stderr, "strata window trace: req=%lld round=%lld pipeline=0 p=%lld "
+                                             "T=%d mtp=%d chain=%d first=%d suffix=%d accepted=%d offered=%d "
+                                             "verify_ms=%.3f commit_ms=%.3f draft_ms=%.3f "
+                                             "cpu_misses=%lld cpu_entries=%lld vram_hits=%lld pcie_experts=%lld "
+                                             "pool_ms=%.3f gpu_stage_ms=%.3f\n",
+                                     (long long) trace_request, (long long) dec_windows, (long long) p,
+                                     T, T_mtp, chain_n, (int) was_first, (int) from_sfx, a, T - 1,
+                                     msd(tw0, tw1), msd(tw1, tw2), msd(tw2, tw3),
+                                     (long long) (ws1.misses - ws0.misses), (long long) (ws1.entries - ws0.entries),
+                                     (long long) (ws1.hits - ws0.hits), (long long) (ws1.pcie - ws0.pcie),
+                                     ws1.pool - ws0.pool, ws1.run - ws0.run);
+                    }
                 }
                 pcie_auto_step(req_pcie_frac);   // the default share, refined from the CPU pool's speed (PcieAuto); a request's own share is left alone
                 if (adapt_thr.joinable()) {

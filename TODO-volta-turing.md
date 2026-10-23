@@ -46,7 +46,7 @@ Previous lists had 110 implementation entries and 31 benchmark entries, includin
 
 5. **Measurement and correctness requirements — apply to every candidate**
 
-   1. **Pending:** Evaluate per-window acceptance/dispatch tracing from Strata #3631 and pinned-stage per-stream fences from #3483.
+   1. **Partial:** An opt-in per-window acceptance/dispatch trace is built in `generate.cpp`; serial windows report counter deltas and pipeline windows explicitly mark dispatch as overlapped. Runtime parity, overhead and route-frequency analysis remain pending while the service is stopped to free RAM. Pinned-stage per-stream fences from #3483 remain to evaluate. See [trace notes](bench/volta-turing/window-trace.md).
    2. **Ongoing:** Use same-day ABBA comparisons at short/4K/16K/32K with identical model, chunks, ring, residency, memory budgets and prefix state.
    3. **Ongoing:** Record accepted tokens/s, prefill/TTFT, draft/verify time, acceptance, PCIe traffic, graph/temporary bytes, cache slots, clocks and variance; separate profiling from serving timing.
    4. **Ongoing:** Check exact bytes where expected; otherwise teacher-forced scores/KL and task quality. Run kv1188 and appropriate CUDA sanitizers.
