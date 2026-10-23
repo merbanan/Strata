@@ -168,6 +168,11 @@ void format_round_trip(const std::string& dir, const k::PleFormatInfo& f, uint32
         if (g_fail) break;
         CHECK(std::strcmp(t.format(), f.name) == 0, "%s: format() says \"%s\"", f.name, t.format());
         CHECK(t.rows() == rows, "%s: rows %llu, not %u", f.name, (unsigned long long) t.rows(), rows);
+        float empty_guard[2] = {17.f, -23.f};
+        const uint64_t bytes_before_empty = t.bytes_read();
+        CHECK(t.gather_batch(nullptr, 0, empty_guard, err), "%s: %s: empty gather_batch: %s", f.name, name, err.c_str());
+        CHECK(empty_guard[0] == 17.f && empty_guard[1] == -23.f && t.bytes_read() == bytes_before_empty,
+              "%s: %s: empty gather_batch changed output or read bytes", f.name, name);
         std::vector<uint8_t> raw(f.row_bytes);
         float got[k::PLE_HEAD_DIM], ref[k::PLE_HEAD_DIM];
         for (uint32_t r : want) {
@@ -194,7 +199,7 @@ void format_round_trip(const std::string& dir, const k::PleFormatInfo& f, uint32
             const size_t nt = 700, nr = nt * 16;     // 11200 rows, three windows
             std::vector<uint32_t> br(nr);
             for (size_t i = 0; i < nr; ++i) br[i] = want[i % want.size()];
-            if (mode == k::PleIo::Mmap) br[5000] = rows + 7;   // out of range (mapped): zeros, as read_row gives
+            br[5000] = rows + 7;   // out of range in both modes: one zero row inside a live prompt batch
             std::vector<float> bo(nr * k::PLE_HEAD_DIM);
             std::string e2;
             CHECK(t.gather_batch(br.data(), nt, bo.data(), e2), "%s: %s: gather_batch: %s", f.name, name, e2.c_str());
