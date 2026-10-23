@@ -11,6 +11,7 @@
 #include <cuda_fp16.h>
 
 #include <cfloat>
+#include <type_traits>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -1225,7 +1226,7 @@ __global__ void __launch_bounds__(CL_T) block_topk_cluster_kernel(const float* _
 // butterfly's, operand for operand (float addition commutes): the same bits, with V - 1 shuffles plus the plain
 // butterfly's remaining stages instead of 5 V.  Lane l ends with value (l >> (5 - log2 V)); the query's 4 heads are
 // then gathered by its head-0 lane and summed in block_scores_multi_kernel's order.  STRATA_SCORES_HALVE=0: the old kernel.
-template <int V>
+template <int V, bool F16 = false>
 __global__ void __launch_bounds__(SCORE_WARPS * 32) block_scores_halve_kernel(const float* __restrict__ pooled,
                                                                               const float* __restrict__ dead,
                                                                               const float* __restrict__ q_idx,
@@ -1262,7 +1263,7 @@ __global__ void __launch_bounds__(SCORE_WARPS * 32) block_scores_halve_kernel(co
 #pragma unroll
     for (int qi = 0; qi < NQ; ++qi) s_nbid_r[qi] = (int) s_nbid[qi];
     for (int64_t b = (int64_t) blockIdx.x * SCORE_WARPS + (threadIdx.x >> 5); b <= top && b < max_blocks; b += wstride) {
-        const float4 kp = *reinterpret_cast<const float4*>(pooled + b * IDX_DIM + lane * 4);
+        const float4 kp = ld_key4<F16>(pooled, b * IDX_DIM + lane * 4);
         float v[V];
 #pragma unroll
         for (int qi = 0; qi < NQ; ++qi) {
@@ -1339,20 +1340,25 @@ void qsa_block_scores(const float* pooled, const float* dead, const float* q_idx
     static const bool multi = [] { const char* v = std::getenv("STRATA_SCORES_MULTI"); return v == nullptr || std::atoi(v) != 0; }();
     if (multi && nq <= MQ && active_blocks <= 0) {   // no active count: decode (captured or not) and prefill's pooled16
         if (scores_halve_on()) {   // Turing: block_scores_halve_kernel, the same bits
-            const cudaStream_t st = (cudaStream_t) stream;
-            if (nq <= 1) block_scores_halve_kernel<4><<<256, SCORE_WARPS * 32, 0, st>>>(pooled, dead, q_idx, steps, (int) nq, max_blocks, scores);
-            else if (nq <= 2) block_scores_halve_kernel<8><<<256, SCORE_WARPS * 32, 0, st>>>(pooled, dead, q_idx, steps, (int) nq, max_blocks, scores);
-            else if (nq <= 4) block_scores_halve_kernel<16><<<256, SCORE_WARPS * 32, 0, st>>>(pooled, dead, q_idx, steps, (int) nq, max_blocks, scores);
-            else {   // 5-8 queries: two calls of up to 4 (the register form; each query's scores are its own)
-                block_scores_halve_kernel<16><<<256, SCORE_WARPS * 32, 0, st>>>(pooled, dead, q_idx, steps, 4, max_blocks, scores);
-                const int rest = (int) nq - 4;
-                const float* q2 = q_idx + 4 * IDX_HEADS * IDX_DIM;
-                const int32_t* st2 = steps + 4 * kStepCount;
-                float* sc2 = scores + 4 * max_blocks;
-                if (rest <= 1) block_scores_halve_kernel<4><<<256, SCORE_WARPS * 32, 0, st>>>(pooled, dead, q2, st2, rest, max_blocks, sc2);
-                else if (rest <= 2) block_scores_halve_kernel<8><<<256, SCORE_WARPS * 32, 0, st>>>(pooled, dead, q2, st2, rest, max_blocks, sc2);
-                else block_scores_halve_kernel<16><<<256, SCORE_WARPS * 32, 0, st>>>(pooled, dead, q2, st2, rest, max_blocks, sc2);
-            }
+            auto launch = [&](auto storage) {
+                constexpr bool F16 = decltype(storage)::value;
+                const cudaStream_t st = (cudaStream_t) stream;
+                if (nq <= 1) block_scores_halve_kernel<4, F16><<<256, SCORE_WARPS * 32, 0, st>>>(pooled, dead, q_idx, steps, (int) nq, max_blocks, scores);
+                else if (nq <= 2) block_scores_halve_kernel<8, F16><<<256, SCORE_WARPS * 32, 0, st>>>(pooled, dead, q_idx, steps, (int) nq, max_blocks, scores);
+                else if (nq <= 4) block_scores_halve_kernel<16, F16><<<256, SCORE_WARPS * 32, 0, st>>>(pooled, dead, q_idx, steps, (int) nq, max_blocks, scores);
+                else {   // 5-8 queries: two calls of up to 4 (the register form; each query's scores are its own)
+                    block_scores_halve_kernel<16, F16><<<256, SCORE_WARPS * 32, 0, st>>>(pooled, dead, q_idx, steps, 4, max_blocks, scores);
+                    const int rest = (int) nq - 4;
+                    const float* q2 = q_idx + 4 * IDX_HEADS * IDX_DIM;
+                    const int32_t* st2 = steps + 4 * kStepCount;
+                    float* sc2 = scores + 4 * max_blocks;
+                    if (rest <= 1) block_scores_halve_kernel<4, F16><<<256, SCORE_WARPS * 32, 0, st>>>(pooled, dead, q2, st2, rest, max_blocks, sc2);
+                    else if (rest <= 2) block_scores_halve_kernel<8, F16><<<256, SCORE_WARPS * 32, 0, st>>>(pooled, dead, q2, st2, rest, max_blocks, sc2);
+                    else block_scores_halve_kernel<16, F16><<<256, SCORE_WARPS * 32, 0, st>>>(pooled, dead, q2, st2, rest, max_blocks, sc2);
+                }
+            };
+            if (qsa_idx_f16()) launch(std::true_type{});
+            else launch(std::false_type{});
             const cudaError_t e = cudaGetLastError();
             if (e != cudaSuccess) { std::fprintf(stderr, "qsa_block_scores halve: %s\n", cudaGetErrorString(e)); std::exit(1); }
             return;
