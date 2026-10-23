@@ -2,7 +2,7 @@
 
 Updated 2026-10-24. This is the authoritative task list, sorted by correctness, current RTX 2060 SUPER work, measured opportunity, and hardware dependencies. Parent order is research priority, not the order of already-running jobs. No running test was cancelled or reprioritized by this edit.
 
-**Execution resumed:** tasks 1 → 2 → 3 → 13 were completed in the earlier requested sequence. The user has asked to continue through this backlog; task 4's remaining compatible IQ2 layout is the current investigation. Local RTX 2060 SUPER results do not substitute for V100/T4 runtime qualification.
+**Execution resumed:** tasks 1 → 2 → 3 → 13 were completed in the earlier requested sequence. The user has asked to continue through this backlog; the current high-potential candidate is task 14.5's opt-in Turing key-head GDN. Local RTX 2060 SUPER results do not substitute for V100/T4 runtime qualification.
 
 Status: **Built** = host/compiler checks only; **Queued/Running** = GPU work outstanding; **Partial/Pending** = incomplete; **Held** = current candidate failed promotion gates; **Conditional/Hardware/Future/Deferred** = retained scope with an explicit prerequisite; **Complete** = stated investigation finished; **Adopted** = qualified and locally enabled. Ongoing requirements apply to every new candidate.
 
@@ -114,12 +114,13 @@ Previous lists had 110 implementation entries and 31 benchmark entries, includin
    3. **Complete on sm75; hardware-limited on sm70:** Grouped D256 heads, ragged/shuffled pages, empty selections, graph replay, exact logits, sanitizers, all-format and mode-3 fallback checks pass on RTX 2060 SUPER. The separate sm70/sm75 accumulator maps and sm70/sm75/sm80 translation-unit builds are checked; actual V100/T4 runtime and other head geometries require their hardware/model. The candidate adds no scratch allocation and retains existing host admission.
    4. **Conditional, not opened:** Direct Q4 code/scale arithmetic would change the tested FP16 rounding boundary; retain it as a separate numerical experiment, outside this adopted layout change.
 
-14. **Chunked GDN shared-buffer design — C10**
+14. **GDN prefill tuning — chunked C10 and Turing key-head**
 
-   1. **Pending:** Prototype native CUDA with no transposed-K copy, shared A/P lifetime reuse and loop-end synchronization, following the newer #1228 design.
-   2. **Pending:** Verify final FP32 recurrent state across chunk boundaries and speculative commits.
-   3. **Pending:** Admit by actual shared-memory capacity; test high-register variants only where occupancy is already constrained.
-   4. **Pending:** Measure complete preparation, recurrence and output costs plus displaced expert-cache slots; prior 4–7x-slower kernels remain rejected.
+   1. **Partial, Turing layouts rejected:** Standalone CUDA screens fit the existing chunked scan into 55,296 or 59,904 bytes of shared memory with one K buffer and either eight value columns or direct-global Q reads. Both are 1.5–1.7x slower than the current Turing column-split recurrence; neither is integrated. The distinct #1228 fused matrix-load/P-A schedule remains untested. See [screen](bench/volta-turing/gdn-turing-shared-screen.md).
+   2. **Partial:** Both standalone layouts match output and final FP32 state within 6.47e-7/5.59e-7 of the existing recurrence at 33/128/512/2048 tokens, and the 128-token FP64 comparison passes. Speculative commits and cross-chunk engine state remain untested.
+   3. **Partial:** The two sm75 layouts pass actual shared-memory admission and compile for sm70/sm75/sm80; each uses 168 scan registers per thread without spills. Runtime V100 and occupancy under production competition remain untested.
+   4. **Partial:** At 2048 tokens the standalone preparation costs 0.71 ms but the scan costs 4.89/5.16 ms, versus 3.77 ms for Turing's current column-split recurrence. Complete input preparation/output, expert-cache displacement and full prefill timing remain unmeasured; keep the earlier slow kernels rejected.
+   5. **Promising opt-in, full-model gate pending:** `STRATA_GDN_KEYHEAD_TURING=1` permits the existing bitwise key-head recurrence on occupancy-qualified sm75. On RTX 2060 SUPER, 12 chunk sizes through 8192 tokens match output/state/FP16 bits; production-call ABBA with matching hashes gains 1.33–1.34x at T=128/512/2048, and changed-input graph replay plus CUDA sanitizers pass. This is a GDN-call gain, not a proven prefill or decode gain. The full model is unloaded for host RAM, so matched request ABBA, quality and installed-release smoke are pending; keep the installed opt-in off until qualified. See [evidence](bench/volta-turing/gdn-turing-keyhead.md).
 
 15. **Graph memory and reuse — C18**
 

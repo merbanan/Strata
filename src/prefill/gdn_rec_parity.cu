@@ -17,6 +17,12 @@
 //                             fraction of a second (see native_grouped_parity); then both at 1 to 6 blocks per
 //                             SM, as on cards with more or fewer SMs (scale), and both with the engine's grids on
 //                             32 to all of this card's SMs, the others held by a sleeping kernel (fewer_sms)
+//   STRATA_GDN_CHUNKED_TURING=1|2 gdn_rec_parity --turing-screen: bounded sm75 scan-layout prototypes.
+//                             These modes exist only in this standalone screen, not in the engine.
+//   gdn_rec_parity --turing-keyhead: bounded bitwise and timing screen for the existing key-head recurrence on sm75.
+//   gdn_rec_parity --turing-production: hash and time the actual prefill dispatch, baseline versus opt-in in separate processes.
+//   gdn_rec_parity --turing-production-graph: changed-input CUDA graph replay of that same dispatch.
+#include "strata/prefill/kernels.hpp"
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
 
@@ -267,6 +273,11 @@ static_assert(GCH == 32, "gdn_chunk_prep_kernel: a lane per token of the chunk")
 constexpr size_t kChunkPrepSmem = sizeof(float) * (2 * GCH * (S + 1) + 2 * GCH * GTP);   // A over k / q
 static_assert(VPK * GCH * GTP <= 2 * GCH * (S + 1), "gdn_chunk_prep_kernel: A fits where k and q were");
 constexpr size_t kChunkScanSmem = sizeof(float) * (3 * GCH * GKP + VPK * (S * GDV + 3 * GCH * GDV));
+constexpr int GDV_TURING = 8;
+constexpr size_t kChunkScanSmemTuring = sizeof(float) *
+    (2 * GCH * GKP + VPK * (S * GDV_TURING + 3 * GCH * GDV_TURING));
+constexpr size_t kChunkScanSmemTuring16 = sizeof(float) *
+    (GCH * GKP + VPK * (S * GDV + 3 * GCH * GDV));
 
 __global__ void __launch_bounds__(256) gdn_chunk_prep_kernel(const float* __restrict__ h, const float* __restrict__ gate,
                                                              const float* __restrict__ beta, float* __restrict__ tm,
@@ -367,22 +378,24 @@ __device__ __forceinline__ void gdn_cp_wait_all() {
 // time).  A thread owns one token's row of the products (4 columns) and holds that token's T and P rows in registers,
 // loaded at the chunk's start so they land during the first product; the next chunk's k (a second buffer), q (after
 // this chunk's last read of q), v, gamma and beta load while this chunk computes.  Three barriers a chunk.
-__global__ void __launch_bounds__(128 * VPK) gdn_chunk_scan_kernel(float* __restrict__ state, const float* __restrict__ h,
+template<int COLS, bool PIPE, bool GLOBAL_Q>
+__global__ void __launch_bounds__(GCH * (COLS / 4) * VPK) gdn_chunk_scan_kernel(float* __restrict__ state, const float* __restrict__ h,
                                                                    const float* __restrict__ beta, const float* __restrict__ tm,
                                                                    const float* __restrict__ pm, const float* __restrict__ gm,
                                                                    float* __restrict__ oc_out, int64_t t0, int nch, int64_t T) {
     extern __shared__ __align__(16) float gsm[];
-    constexpr int NT = 128 * VPK, HEAD = S * GDV + 3 * GCH * GDV;   // threads; a head's shared floats
-    float* kbuf = gsm;                     // [2][GCH][GKP]  k, double-buffered
-    float* sq = kbuf + 2 * GCH * GKP;      // [GCH][GKP]
-    const int qh = blockIdx.x, c0 = blockIdx.y * GDV, j = threadIdx.x / 128, tid = threadIdx.x % 128;
+    constexpr int PER_HEAD = GCH * (COLS / 4), NT = PER_HEAD * VPK;
+    constexpr int HEAD = S * COLS + 3 * GCH * COLS;
+    float* kbuf = gsm;                     // two K tiles if pipelined, otherwise one
+    float* sq = kbuf + (PIPE ? 2 : 1) * GCH * GKP;
+    const int qh = blockIdx.x, c0 = blockIdx.y * COLS, j = threadIdx.x / PER_HEAD, tid = threadIdx.x % PER_HEAD;
     const int vh = qh + j * HK;
-    float* ss = sq + GCH * GKP + j * HEAD; // [S][GDV]  the state slice at the chunk's start
-    float* sy = ss + S * GDV;              // [GCH][GDV]  Y
-    float* sd = sy + GCH * GDV;            // [GCH][GDV]  D
-    float* sdd = sd + GCH * GDV;           // [GCH][GDV]  exp(gamma_last - gamma_t) D
-    const int rq = tid >> 2, vq = tid & 3;   // the update's tile: rows 4rq..4rq+3; both tiles: columns 4vq..4vq+3
-    const int tt = tid >> 2, vv = 4 * vq;    // the products' tile: token tt
+    float* ss = sq + (GLOBAL_Q ? 0 : GCH * GKP) + j * HEAD; // [S][COLS]
+    float* sy = ss + S * COLS;              // [GCH][COLS]  Y
+    float* sd = sy + GCH * COLS;            // [GCH][COLS]  D
+    float* sdd = sd + GCH * COLS;           // [GCH][COLS]  exp(gamma_last - gamma_t) D
+    const int rq = tid / (COLS / 4), vq = tid % (COLS / 4);
+    const int tt = rq, vv = 4 * vq;
     const size_t rs = (size_t) HV * S;
     auto stage_kq = [&](int64_t c_t0, int n, float* dst, bool isq) {   // k or q rows of a chunk, cp.async
         for (int p = threadIdx.x; p < GCH * (S / 4); p += NT) {
@@ -405,7 +418,7 @@ __global__ void __launch_bounds__(128 * VPK) gdn_chunk_scan_kernel(float* __rest
     for (int x = 0; x < 4; ++x) {
 #pragma unroll
         for (int y = 0; y < 4; ++y) s[x][y] = state[(size_t) (4 * rq + x) * rs + (size_t) vh * S + c0 + vv + y];
-        *reinterpret_cast<float4*>(&ss[(4 * rq + x) * GDV + vv]) = make_float4(s[x][0], s[x][1], s[x][2], s[x][3]);
+        *reinterpret_cast<float4*>(&ss[(4 * rq + x) * COLS + vv]) = make_float4(s[x][0], s[x][1], s[x][2], s[x][3]);
     }
     const float out_scale = rsqrtf((float) S);
     float4 v4;
@@ -413,7 +426,7 @@ __global__ void __launch_bounds__(128 * VPK) gdn_chunk_scan_kernel(float* __rest
     {
         const int n0 = (int) min((int64_t) GCH, T - t0);
         stage_kq(t0, n0, kbuf, false);
-        stage_kq(t0, n0, sq, true);
+        if constexpr (!GLOBAL_Q) stage_kq(t0, n0, sq, true);
         gdn_cp_commit();
         load_vgb(0, t0, n0, v4, gam, bet, glast);
         gdn_cp_wait_all();
@@ -425,7 +438,7 @@ __global__ void __launch_bounds__(128 * VPK) gdn_chunk_scan_kernel(float* __rest
         const bool more = ch + 1 < nch;
         const int64_t n_t0 = c_t0 + GCH;
         const int nn = more ? (int) min((int64_t) GCH, T - n_t0) : 0;
-        const float* sk = kbuf + (ch & 1) * GCH * GKP;
+        const float* sk = kbuf + (PIPE ? (ch & 1) : 0) * GCH * GKP;
         // this token's T and P rows into registers now: they land while the first product runs
         float tr[GCH], pr[GCH];
         {
@@ -455,11 +468,14 @@ __global__ void __launch_bounds__(128 * VPK) gdn_chunk_scan_kernel(float* __rest
 #pragma unroll 4
         for (int r = 0; r < S; r += 4) {
             const float4 k4 = *reinterpret_cast<const float4*>(&sk[tt * GKP + r]);
-            const float4 q4 = *reinterpret_cast<const float4*>(&sq[tt * GKP + r]);
+            const float4 q4 = GLOBAL_Q ?
+                (tt < n ? *reinterpret_cast<const float4*>(h + (c_t0 + tt) * C + qh * S + r) :
+                          make_float4(0.f, 0.f, 0.f, 0.f)) :
+                *reinterpret_cast<const float4*>(&sq[tt * GKP + r]);
             const float kk[4] = {k4.x, k4.y, k4.z, k4.w}, qq[4] = {q4.x, q4.y, q4.z, q4.w};
 #pragma unroll
             for (int jj = 0; jj < 4; ++jj) {
-                const float4 s4 = *reinterpret_cast<const float4*>(&ss[(r + jj) * GDV + vv]);
+                const float4 s4 = *reinterpret_cast<const float4*>(&ss[(r + jj) * COLS + vv]);
                 x[0] = fmaf(kk[jj], s4.x, x[0]); x[1] = fmaf(kk[jj], s4.y, x[1]);
                 x[2] = fmaf(kk[jj], s4.z, x[2]); x[3] = fmaf(kk[jj], s4.w, x[3]);
                 qs[0] = fmaf(qq[jj], s4.x, qs[0]); qs[1] = fmaf(qq[jj], s4.y, qs[1]);
@@ -467,31 +483,33 @@ __global__ void __launch_bounds__(128 * VPK) gdn_chunk_scan_kernel(float* __rest
             }
         }
         const float e = expf(gam);
-        *reinterpret_cast<float4*>(&sy[tt * GDV + vv]) = make_float4(bet * (v4.x - e * x[0]), bet * (v4.y - e * x[1]),
+        *reinterpret_cast<float4*>(&sy[tt * COLS + vv]) = make_float4(bet * (v4.x - e * x[0]), bet * (v4.y - e * x[1]),
                                                                      bet * (v4.z - e * x[2]), bet * (v4.w - e * x[3]));
         __syncthreads();   // (A) Y complete; every read of q done
-        if (more) {        // the next chunk's k into the other buffer, its q into the single q buffer
-            stage_kq(n_t0, nn, kbuf + ((ch + 1) & 1) * GCH * GKP, false);
-            stage_kq(n_t0, nn, sq, true);
-            gdn_cp_commit();
+        if constexpr (PIPE) {
+            if (more) {    // the next chunk's k into the other buffer, its q into the single q buffer
+                stage_kq(n_t0, nn, kbuf + ((ch + 1) & 1) * GCH * GKP, false);
+                if constexpr (!GLOBAL_Q) stage_kq(n_t0, nn, sq, true);
+                gdn_cp_commit();
+            }
         }
         // D = T Y (T is zero above its diagonal), and D decayed to the chunk's end for the update
         float d[4] = {0.f, 0.f, 0.f, 0.f};
 #pragma unroll
         for (int i = 0; i < GCH; ++i) {
-            const float4 y4 = *reinterpret_cast<const float4*>(&sy[i * GDV + vv]);
+            const float4 y4 = *reinterpret_cast<const float4*>(&sy[i * COLS + vv]);
             d[0] = fmaf(tr[i], y4.x, d[0]); d[1] = fmaf(tr[i], y4.y, d[1]);
             d[2] = fmaf(tr[i], y4.z, d[2]); d[3] = fmaf(tr[i], y4.w, d[3]);
         }
         const float f = expf(glast - gam);
-        *reinterpret_cast<float4*>(&sd[tt * GDV + vv]) = make_float4(d[0], d[1], d[2], d[3]);
-        *reinterpret_cast<float4*>(&sdd[tt * GDV + vv]) = make_float4(f * d[0], f * d[1], f * d[2], f * d[3]);
+        *reinterpret_cast<float4*>(&sd[tt * COLS + vv]) = make_float4(d[0], d[1], d[2], d[3]);
+        *reinterpret_cast<float4*>(&sdd[tt * COLS + vv]) = make_float4(f * d[0], f * d[1], f * d[2], f * d[3]);
         __syncthreads();   // (B) D complete
         // o = exp(gamma) Q S0 + P D (P is zero above its diagonal), the output
         float o[4] = {e * qs[0], e * qs[1], e * qs[2], e * qs[3]};
 #pragma unroll
         for (int i = 0; i < GCH; ++i) {
-            const float4 d4 = *reinterpret_cast<const float4*>(&sd[i * GDV + vv]);
+            const float4 d4 = *reinterpret_cast<const float4*>(&sd[i * COLS + vv]);
             o[0] = fmaf(pr[i], d4.x, o[0]); o[1] = fmaf(pr[i], d4.y, o[1]);
             o[2] = fmaf(pr[i], d4.z, o[2]); o[3] = fmaf(pr[i], d4.w, o[3]);
         }
@@ -507,7 +525,7 @@ __global__ void __launch_bounds__(128 * VPK) gdn_chunk_scan_kernel(float* __rest
 #pragma unroll 4
         for (int t = 0; t < GCH; ++t) {
             const float4 k4 = *reinterpret_cast<const float4*>(&sk[t * GKP + 4 * rq]);
-            const float4 d4 = *reinterpret_cast<const float4*>(&sdd[t * GDV + vv]);
+            const float4 d4 = *reinterpret_cast<const float4*>(&sdd[t * COLS + vv]);
             const float kx[4] = {k4.x, k4.y, k4.z, k4.w}, dy[4] = {d4.x, d4.y, d4.z, d4.w};
 #pragma unroll
             for (int xx = 0; xx < 4; ++xx)
@@ -516,8 +534,16 @@ __global__ void __launch_bounds__(128 * VPK) gdn_chunk_scan_kernel(float* __rest
         }
 #pragma unroll
         for (int xx = 0; xx < 4; ++xx)
-            *reinterpret_cast<float4*>(&ss[(4 * rq + xx) * GDV + vv]) = make_float4(s[xx][0], s[xx][1], s[xx][2], s[xx][3]);
+            *reinterpret_cast<float4*>(&ss[(4 * rq + xx) * COLS + vv]) = make_float4(s[xx][0], s[xx][1], s[xx][2], s[xx][3]);
         v4 = nv4; gam = ngam; bet = nbet; glast = nglast;
+        if constexpr (!PIPE) {
+            __syncthreads();  // all current K reads finish before its buffer is reused
+            if (more) {
+                stage_kq(n_t0, nn, kbuf, false);
+                if constexpr (!GLOBAL_Q) stage_kq(n_t0, nn, sq, true);
+                gdn_cp_commit();
+            }
+        }
         gdn_cp_wait_all();
         __syncthreads();   // (C) the new ss, the next k and q landed; every read of sd, sdd and this k buffer done
     }
@@ -551,13 +577,19 @@ float* gdn_chunk_scratch() {
 // could not be had, or the card has fewer than 128 SMs (a second wave of the scan would double it) or too little
 // shared memory for it (Turing).
 cudaError_t gdn_rec_chunked(float* state, const float* h, const float* gate, const float* beta, float* y, int64_t T,
-                            cudaStream_t s) {
+                            cudaStream_t s, cudaEvent_t* phase_marks = nullptr) {
     if (T <= 0) return cudaSuccess;
+    static const int turing_mode = [] {
+        const char* v = std::getenv("STRATA_GDN_CHUNKED_TURING");
+        return v != nullptr ? std::atoi(v) : 0;
+    }();
+    bool turing = false;
     {   // sm_80+ (cp.async), the scan's 128 blocks one an SM in one wave, and its 93.7 KB of shared memory (else:
         // another kernel)
-        int dev = 0, major = 0, sms = 0, smem = 0;
+        int dev = 0, major = 0, minor = 0, sms = 0, smem = 0;
         if (cudaGetDevice(&dev) != cudaSuccess ||
             cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, dev) != cudaSuccess ||
+            cudaDeviceGetAttribute(&minor, cudaDevAttrComputeCapabilityMinor, dev) != cudaSuccess ||
             cudaDeviceGetAttribute(&sms, cudaDevAttrMultiProcessorCount, dev) != cudaSuccess ||
             cudaDeviceGetAttribute(&smem, cudaDevAttrMaxSharedMemoryPerBlockOptin, dev) != cudaSuccess) {
             cudaGetLastError();
@@ -565,7 +597,9 @@ cudaError_t gdn_rec_chunked(float* state, const float* h, const float* gate, con
         }
         // as in kernels.cu: STRATA_GDN_CHUNKED=2 skips the SM-count test (to measure a card under 128 SMs)
         static const bool any_sms = [] { const char* v = std::getenv("STRATA_GDN_CHUNKED"); return v != nullptr && std::atoi(v) >= 2; }();
-        if (major < 8 || (!any_sms && sms < HK * (S / GDV)) || (size_t) smem < kChunkScanSmem)
+        turing = turing_mode >= 1 && turing_mode <= 2 && major == 7 && minor >= 5;
+        if (turing ? (size_t) smem < (turing_mode == 1 ? kChunkScanSmemTuring : kChunkScanSmemTuring16) :
+            major < 8 || (!any_sms && sms < HK * (S / GDV)) || (size_t) smem < kChunkScanSmem)
             return cudaErrorNotSupported;
     }
     float* scratch = gdn_chunk_scratch();
@@ -579,14 +613,30 @@ cudaError_t gdn_rec_chunked(float* state, const float* h, const float* gate, con
         cudaGetDevice(&dev);
         if (dev >= 0 && dev < 64 && !attrs[dev]) {
             cudaFuncSetAttribute(gdn_chunk_prep_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, (int) kChunkPrepSmem);
-            cudaFuncSetAttribute(gdn_chunk_scan_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, (int) kChunkScanSmem);
+            if (turing_mode == 1 && turing) cudaFuncSetAttribute(gdn_chunk_scan_kernel<GDV_TURING, false, false>,
+                                                                  cudaFuncAttributeMaxDynamicSharedMemorySize, (int) kChunkScanSmemTuring);
+            else if (turing) cudaFuncSetAttribute(gdn_chunk_scan_kernel<GDV, false, true>,
+                                                  cudaFuncAttributeMaxDynamicSharedMemorySize, (int) kChunkScanSmemTuring16);
+            else cudaFuncSetAttribute(gdn_chunk_scan_kernel<GDV, true, false>,
+                                      cudaFuncAttributeMaxDynamicSharedMemorySize, (int) kChunkScanSmem);
             attrs[dev] = true;
         }
     }
     for (int64_t t0 = 0; t0 < T; t0 += GSB) {
         const int nch = (int) ((std::min<int64_t>(GSB, T - t0) + GCH - 1) / GCH);
+        if (phase_marks) cudaEventRecord(phase_marks[0], s);
         gdn_chunk_prep_kernel<<<dim3((unsigned) nch, HK), 256, kChunkPrepSmem, s>>>(h, gate, beta, tm, pm, gm, t0, T);
-        gdn_chunk_scan_kernel<<<dim3(HK, S / GDV), 128 * VPK, kChunkScanSmem, s>>>(state, h, beta, tm, pm, gm, y, t0, nch, T);
+        if (phase_marks) cudaEventRecord(phase_marks[1], s);
+        if (turing && turing_mode == 1)
+            gdn_chunk_scan_kernel<GDV_TURING, false, false><<<dim3(HK, S / GDV_TURING), GCH * (GDV_TURING / 4) * VPK,
+                                                               kChunkScanSmemTuring, s>>>(state, h, beta, tm, pm, gm, y, t0, nch, T);
+        else if (turing)
+            gdn_chunk_scan_kernel<GDV, false, true><<<dim3(HK, S / GDV), GCH * (GDV / 4) * VPK,
+                                                      kChunkScanSmemTuring16, s>>>(state, h, beta, tm, pm, gm, y, t0, nch, T);
+        else
+            gdn_chunk_scan_kernel<GDV, true, false><<<dim3(HK, S / GDV), 128 * VPK, kChunkScanSmem, s>>>(
+                state, h, beta, tm, pm, gm, y, t0, nch, T);
+        if (phase_marks) cudaEventRecord(phase_marks[2], s);
     }
     return cudaSuccess;   // launch errors surface at the caller's check; an error above means nothing ran
 }
@@ -858,7 +908,7 @@ double max_rel_f64(const float* a, const double* ref, size_t n) {   // max |a - 
     }
     return mv > 0.0 ? md / mv : md;
 }
-int check_chunked(int64_t T, uint64_t seed) {
+int check_chunked(int64_t T, uint64_t seed, bool fp64 = true) {
     Inputs in(T, seed);
     const size_t st = (size_t) S * HV * S, oc_n = (size_t) T * HV * S;
     float* s0 = dalloc<float>(st);
@@ -878,9 +928,10 @@ int check_chunked(int64_t T, uint64_t seed) {
     ck(cudaDeviceSynchronize(), "chunked run");
     const double eo = max_rel(o0, o1, oc_n), es = max_rel(s0, s1, st);
     const bool bad = !(eo < 1e-4) || !(es < 1e-4);
-    std::printf("%s T=%-6lld chunked (STRATA_GDN_CHUNKED): output %.2e, state %.2e (max |diff| / max |value|)\n",
-                bad ? "FAIL" : "    ", (long long) T, eo, es);
-    if (T <= 8192) {   // both against FP64 (its output: 8 bytes a value, so not at 32K)
+    const char* screen_mode = std::getenv("STRATA_GDN_CHUNKED_TURING");
+    std::printf("%s T=%-6lld chunked (%s): output %.2e, state %.2e (max |diff| / max |value|)\n",
+                bad ? "FAIL" : "    ", (long long) T, screen_mode ? screen_mode : "production", eo, es);
+    if (fp64 && T <= 8192) {   // both against FP64 (its output: 8 bytes a value, so not at 32K)
         double* sd = dalloc<double>(st);
         double* od = dalloc<double>(oc_n);
         to_f64<<<1024, 256>>>(in.state0, sd, (int64_t) st);
@@ -897,6 +948,104 @@ int check_chunked(int64_t T, uint64_t seed) {
 float median(std::vector<float> v) {
     std::sort(v.begin(), v.end());
     return v.empty() ? 0.0f : v[v.size() / 2];
+}
+
+void turing_phases() {
+    constexpr int64_t T = 2048;  // one super-block: phase events bracket one prep and one scan
+    Inputs in(T, 0x75);
+    const size_t st = (size_t) S * HV * S;
+    float* state = dalloc<float>(st);
+    float* out = dalloc<float>((size_t) T * HV * S);
+    cudaEvent_t marks[3];
+    for (auto& e : marks) ck(cudaEventCreate(&e), "phase event");
+    std::vector<float> prep, scan;
+    for (int i = 0; i < 24; ++i) {
+        ck(cudaMemcpy(state, in.state0, st * sizeof(float), cudaMemcpyDeviceToDevice), "state copy");
+        ck(gdn_rec_chunked(state, in.h, in.gate, in.beta, out, T, 0, marks), "chunk phases");
+        ck(cudaEventSynchronize(marks[2]), "phase wait");
+        float a = 0.0f, b = 0.0f;
+        ck(cudaEventElapsedTime(&a, marks[0], marks[1]), "prep time");
+        ck(cudaEventElapsedTime(&b, marks[1], marks[2]), "scan time");
+        if (i >= 4) { prep.push_back(a); scan.push_back(b); }
+    }
+    std::printf("  Turing chunked T=2048 phases (20 event medians): prep %.3f ms, scan %.3f ms\n",
+                median(prep), median(scan));
+    for (auto e : marks) ck(cudaEventDestroy(e), "phase event destroy");
+    cudaFree(state); cudaFree(out);
+}
+
+uint64_t device_hash(const void* ptr, size_t bytes) {
+    std::vector<uint32_t> bits(bytes / 4);
+    ck(cudaMemcpy(bits.data(), ptr, bytes, cudaMemcpyDeviceToHost), "hash readback");
+    uint64_t hash = 1469598103934665603ull;
+    for (uint32_t v : bits) hash = (hash ^ v) * 1099511628211ull;
+    return hash;
+}
+void turing_production(int64_t T) {
+    Inputs in(T, 0x75);
+    const size_t st = (size_t) S * HV * S, out_n = (size_t) T * HV * S;
+    float* state = dalloc<float>(st);
+    float* out = dalloc<float>(out_n);
+    uint16_t* y16 = dalloc<uint16_t>(out_n);
+    cudaEvent_t a, b;
+    ck(cudaEventCreate(&a), "event"); ck(cudaEventCreate(&b), "event");
+    std::vector<float> times;
+    for (int i = 0; i < 24; ++i) {
+        ck(cudaMemcpy(state, in.state0, st * sizeof(float), cudaMemcpyDeviceToDevice), "state copy");
+        ck(cudaEventRecord(a), "start");
+        strata::prefill::gdn_recurrence(state, in.h, in.gate, in.beta, in.z, in.gamma,
+                                       1e-6f, out, y16, T, nullptr);
+        ck(cudaEventRecord(b), "stop");
+        ck(cudaEventSynchronize(b), "wait");
+        float ms = 0.0f;
+        ck(cudaEventElapsedTime(&ms, a, b), "time");
+        if (i >= 4) times.push_back(ms);
+    }
+    std::printf("  production T=%lld median=%.3f ms state=%016llx recurrence=%016llx y16=%016llx\n",
+                (long long) T, median(times), (unsigned long long) device_hash(state, st * sizeof(float)),
+                (unsigned long long) device_hash(out, out_n * sizeof(float)),
+                (unsigned long long) device_hash(y16, out_n * sizeof(uint16_t)));
+    ck(cudaEventDestroy(a), "event destroy"); ck(cudaEventDestroy(b), "event destroy");
+    cudaFree(state); cudaFree(out); cudaFree(y16);
+}
+void turing_production_graph() {
+    constexpr int64_t T = 129;
+    Inputs in(T, 0x75);
+    const size_t st = (size_t) S * HV * S, out_n = (size_t) T * HV * S;
+    float* state = dalloc<float>(st);
+    float* out = dalloc<float>(out_n);
+    uint16_t* y16 = dalloc<uint16_t>(out_n);
+    cudaStream_t stream;
+    ck(cudaStreamCreate(&stream), "graph stream");
+    // Resolve the device/occupancy dispatch before capture; the same choice is used on replay.
+    strata::prefill::gdn_recurrence(state, in.h, in.gate, in.beta, in.z, in.gamma,
+                                   1e-6f, out, y16, T, stream);
+    ck(cudaStreamSynchronize(stream), "dispatch warmup");
+    cudaGraph_t graph;
+    cudaGraphExec_t executable;
+    ck(cudaStreamBeginCapture(stream, cudaStreamCaptureModeGlobal), "begin capture");
+    ck(cudaMemcpyAsync(state, in.state0, st * sizeof(float), cudaMemcpyDeviceToDevice, stream), "graph state restore");
+    strata::prefill::gdn_recurrence(state, in.h, in.gate, in.beta, in.z, in.gamma,
+                                   1e-6f, out, y16, T, stream);
+    ck(cudaStreamEndCapture(stream, &graph), "end capture");
+    ck(cudaGraphInstantiate(&executable, graph, nullptr, nullptr, 0), "instantiate");
+    for (int replay = 0; replay < 2; ++replay) {
+        if (replay) {
+            fill_gauss<<<4096, 256, 0, stream>>>(in.h, T * C, 1.0f, 0x7654);
+            l2_rows<<<dim3(2 * HK, (unsigned) T), S, 0, stream>>>(in.h, 1e-6f);
+            fill_gates<<<1024, 256, 0, stream>>>(in.gate, in.beta, T * HV, 0x7655);
+        }
+        ck(cudaGraphLaunch(executable, stream), "graph replay");
+        ck(cudaStreamSynchronize(stream), "graph wait");
+        std::printf("  production graph replay=%d state=%016llx recurrence=%016llx y16=%016llx\n",
+                    replay, (unsigned long long) device_hash(state, st * sizeof(float)),
+                    (unsigned long long) device_hash(out, out_n * sizeof(float)),
+                    (unsigned long long) device_hash(y16, out_n * sizeof(uint16_t)));
+    }
+    ck(cudaGraphExecDestroy(executable), "destroy graph executable");
+    ck(cudaGraphDestroy(graph), "destroy graph");
+    ck(cudaStreamDestroy(stream), "destroy stream");
+    cudaFree(state); cudaFree(out); cudaFree(y16);
 }
 
 void bench(int64_t T) {
@@ -957,8 +1106,9 @@ void bench(int64_t T) {
                 1000.0f * r1 / (float) T, r0 / r1);
     if (can_chunk) {
         const float kh = median(t_kc[0]), kc = median(t_kc[1]);
-        std::printf("    recurrence, chunked (STRATA_GDN_CHUNKED=1)     %8.2f ms  (%.3f us per token)  %.2fx gdn_rec_kh_kernel\n",
-                    kc, 1000.0f * kc / (float) T, kh / kc);
+        const char* screen_mode = std::getenv("STRATA_GDN_CHUNKED_TURING");
+        std::printf("    recurrence, chunked (%s)                    %8.2f ms  (%.3f us per token)  %.2fx gdn_rec_kh_kernel\n",
+                    screen_mode ? screen_mode : "production", kc, 1000.0f * kc / (float) T, kh / kc);
     }
     std::printf("    output norm, before (FP32 and FP16 store)      %8.2f ms\n", n0);
     std::printf("    output norm, FP16 store only                   %8.2f ms  %.2fx\n", n1, n0 / n1);
@@ -1357,13 +1507,52 @@ void fewer_sms(int64_t T) {
 }  // namespace
 
 int main(int argc, char** argv) {
-    bool do_bench = false;
+    bool do_bench = false, turing_screen = false, turing_keyhead = false, turing_prod = false, turing_graph = false;
     for (int i = 1; i < argc; ++i)
         if (std::strcmp(argv[i], "--bench") == 0) do_bench = true;
+        else if (std::strcmp(argv[i], "--turing-screen") == 0) turing_screen = true;
+        else if (std::strcmp(argv[i], "--turing-keyhead") == 0) turing_keyhead = true;
+        else if (std::strcmp(argv[i], "--turing-production") == 0) turing_prod = true;
+        else if (std::strcmp(argv[i], "--turing-production-graph") == 0) turing_graph = true;
     cudaDeviceProp p{};
     ck(cudaGetDeviceProperties(&p, 0), "device");
     std::printf("gdn_rec_parity on %s (sm_%d%d)\n", p.name, p.major, p.minor);
     int fails = 0;
+    if (turing_graph) { turing_production_graph(); return 0; }
+    if (turing_prod) {
+        for (const int64_t T : {(int64_t) 128, (int64_t) 512, (int64_t) 2048}) turing_production(T);
+        return 0;
+    }
+    if (turing_keyhead) {
+        int per_sm = 0;
+        ck(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&per_sm, gdn_rec_kh_kernel, CB * RG, 0), "key-head occupancy");
+        std::printf("  key-head occupancy: %d blocks/SM x %d SMs, %d blocks in the recurrence grid\n",
+                    per_sm, p.multiProcessorCount, HK * NCB);
+        uint64_t seed = 0x75;
+        for (const int64_t T : {(int64_t) 1, (int64_t) 2, (int64_t) 3, (int64_t) 7, (int64_t) 8,
+                                (int64_t) 9, (int64_t) 31, (int64_t) 33, (int64_t) 257, (int64_t) 1000,
+                                (int64_t) 4099, (int64_t) 8192}) fails += check_bits(T, seed++);
+        bench(128);
+        bench(512);
+        bench(2048);
+        std::printf("gdn_rec_parity Turing key-head: %d failures\n", fails);
+        return fails ? 1 : 0;
+    }
+    if (turing_screen) {
+        if (std::getenv("STRATA_GDN_CHUNKED_TURING") == nullptr) {
+            std::fprintf(stderr, "--turing-screen requires STRATA_GDN_CHUNKED_TURING=1 or 2\n");
+            return 2;
+        }
+        uint64_t seed = 0x75;
+        for (const int64_t T : {(int64_t) 33, (int64_t) 128, (int64_t) 512, (int64_t) 2048})
+            fails += check_chunked(T, seed++, T == 128);
+        bench(128);
+        bench(512);
+        bench(2048);
+        turing_phases();
+        std::printf("gdn_rec_parity Turing screen: %d failures\n", fails);
+        return fails ? 1 : 0;
+    }
     const int64_t Ts[] = {1, 2, 3, 4, 5, 7, 8, 9, 15, 16, 17, 31, 33, 257, 1000, 4099};
     uint64_t seed = 11;
     for (const int64_t T : Ts) fails += check_bits(T, seed++);
