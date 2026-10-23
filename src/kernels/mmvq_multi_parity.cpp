@@ -58,6 +58,8 @@ struct Case {
 const Case CASES[] = {
     {"Q4_0", 2, 2048, 512, 32, 18, {0, -1}},          // Q40Block: half d
     {"Q8_0", 8, 2048, 512, 32, 34, {0, -1}},          // Q80Block: half d
+    {"Q8_0 MTP", 8, 2560, 40525, 32, 34, {0, -1}},    // draft-head-sized Q8_0 reference format
+    {"Q5_K MTP", 13, 2560, 40525, 256, 176, {0, 2}},  // installed IQ3_XXS draft-head storage shape
     {"Q4_K", 12, 2048, 512, 256, 144, {0, 2}},        // Q4KBlock: half2 dm
     {"Q5_K", 13, 2048, 512, 256, 176, {0, 2}},        // Q5KBlock: half2 dm
     {"Q6_K", 14, 2048, 512, 256, 210, {208, -1}},     // Q6KBlock: half d after ql, qh, scales
@@ -182,8 +184,10 @@ int sweep(bool exact, cudaStream_t s, Totals& t) {
     }
     std::printf("\n=== multi_exact %s ===\n", exact ? "ON (the default)" : "off (negative control)");
     std::printf("%-12s %3s %10s %10s %14s %10s\n", "type", "T", "outputs", "bits diff", "finite diff", "nonfinite");
-    int bad = 0;
+    int bad = 0, selected_cases = 0;
     for (const Case& c : CASES) {
+        if (const char* only = std::getenv("MMVQ_CASE"); only != nullptr && std::strcmp(only, c.name) != 0) continue;
+        ++selected_cases;
         long long case_wide = 0;
         for (int T : WIDTHS) {
             long long nf = 0, dfin = 0;
@@ -205,6 +209,7 @@ int sweep(bool exact, cudaStream_t s, Totals& t) {
         }
         if (!exact && case_wide == 0) ++t.powerless_cases;
     }
+    if (selected_cases == 0) { std::printf("MMVQ_CASE selected no cases\n"); ++bad; }
     return bad;
 }
 

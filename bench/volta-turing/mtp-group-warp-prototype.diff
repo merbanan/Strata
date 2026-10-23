@@ -1,0 +1,80 @@
+diff --git a/src/kernels/cuda/native_mmvq.cu b/src/kernels/cuda/native_mmvq.cu
+index 01acae9d..67397ef1 100644
+--- a/src/kernels/cuda/native_mmvq.cu
++++ b/src/kernels/cuda/native_mmvq.cu
+@@ -1261,6 +1261,39 @@ __global__ void native_mmvq_multi_kernel(const typename F::Block* __restrict__ w
+     }
+ }
+ 
++// Four independent output rows per CTA, one physical warp per row. Each lane replays the four virtual-warp
++// partials of native_mmvq_multi_kernel<F, NCOLS, 4, 2> in their original per-thread order, then combines them
++// in virtual-warp order before the same warp_sum. No cross-warp scratch or barrier is needed; every result must
++// retain the exact multi-column/single-column bit pattern.
++template<typename F, int NCOLS>
++__launch_bounds__(WARPS * WARP)
++__global__ void native_mtp_warp_rows_kernel(const typename F::Block* __restrict__ w, const Q81Block* __restrict__ x,
++                                            float* __restrict__ y, int n_in, int n_out) {
++    const int warp = int(threadIdx.y), lane = int(threadIdx.x);
++    const int row = int(blockIdx.x) * WARPS + warp;
++    if (row >= n_out) return;
++    const int blocks_per_row = n_in / F::DIV;
++    const int x_stride = n_in / Q8K;
++    float tmp[NCOLS][WARPS] = {};
++#pragma unroll
++    for (int v = 0; v < WARPS; ++v) {
++        const int kqs = F::kqs(v * WARP + lane);
++        for (int kbx = (v * WARP + lane) / F::T; kbx < blocks_per_row; kbx += F::BPI) {
++            const typename F::W wv = F::load(w + std::size_t(row) * blocks_per_row + kbx, kqs);
++#pragma unroll
++            for (int j = 0; j < NCOLS; ++j)
++                tmp[j][v] += F::apply(wv, x + std::size_t(j) * x_stride + kbx * F::KBY, kqs);
++        }
++    }
++#pragma unroll
++    for (int j = 0; j < NCOLS; ++j) {
++#pragma unroll
++        for (int v = 1; v < WARPS; ++v) tmp[j][0] += tmp[j][v];
++        const float sum = warp_sum(tmp[j][0]);
++        if (lane == 0) y[std::size_t(j) * n_out + row] = sum;
++    }
++}
++
+ // MODEL-UPDATE: the dense Q8_0 projections of Unsloth's files (all of attention, SSM and the shared expert are Q8_0
+ // there) take one row per block where that was measured faster - the same per-row sums and reduction as two rows per
+ // block (each row its own partials), so every output is the same bits.  q8_gemv_bench, 2-4 columns:
+@@ -1315,6 +1348,18 @@ void launch_multi_n(const void* weights, const void* x_q8_1, float* y, int n_in,
+                    (const typename F::Block*) nullptr, (float*) nullptr);
+         return;
+     }
++    if constexpr (std::is_same_v<F, SmallTraits<Q80Block, 8>> || std::is_same_v<F, Q5KTraits>) {
++        static const bool mtp_warp_rows = [] {
++            const char* e = std::getenv(std::is_same_v<F, Q5KTraits> ? "STRATA_MTP_Q5K_GROUP_WARPS"
++                                                              : "STRATA_MTP_Q8_GROUP_WARPS");
++            return e != nullptr && std::strcmp(e, "1") == 0;
++        }();
++        if (mtp_warp_rows && n_in == 2560 && n_out == 40525) {
++            const unsigned blocks = unsigned((std::size_t(n_out) + WARPS - 1) / WARPS);
++            native_mtp_warp_rows_kernel<F, NCOLS><<<blocks, dim3(WARP, WARPS), 0, s>>>(w, x, y, n_in, n_out);
++            return;
++        }
++    }
+     const dim3 threads(WARP, WARPS);
+     // the PAIR arguments, unused here (launch_pdl passes every parameter)
+     const typename F::Block* const no_w2 = nullptr;
+@@ -2538,6 +2583,16 @@ void native_q5_k_mmvq(const void* weights, const void* x_q8_1, float* y,
+     validate_pointer(x_q8_1);
+     validate_pointer(y);
+     validate_stream(stream);
++    static const bool mtp_warp_rows = [] {
++        const char* e = std::getenv("STRATA_MTP_Q5K_GROUP_WARPS");
++        return e != nullptr && std::strcmp(e, "1") == 0;
++    }();
++    if (mtp_warp_rows && g_multi_exact && n_in == 2560 && n_out == 40525 && ncols > 1) {
++        // Screen the draft-head layout against the actual STRATA_MMVQ_GROUP=16 serving path as well.
++        launch_multi<Q5KTraits>(weights, x_q8_1, y, n_in, n_out, ncols, stream);
++        launch_check();
++        return;
++    }
+     STRATA_STAGED_MMVQ(QKGroup<true>)
+     STRATA_WAVE_MMVQ(Q5KTraits)
+     if (ncols > 1) {

@@ -6,6 +6,10 @@ call on a synthetic Q8_0 matrix shaped like the 40,525-token draft head:
 and `--working-set-mib 128`, so it allocates one 110.23 MB matrix and leaves
 the full model unloaded. Each leg used 30 GPU-event-timed calls per shape.
 
+The installed IQ3_XXS run actually converts its head to native Q5_K and uses
+`STRATA_MMVQ_GROUP=16`; this Q8_0 screen does not measure that serving route.
+See the [configured-format grouped-warp screen](mtp-group-warp-screen.md).
+
 `STRATA_NO_MMVQ_ROWS2=0` keeps the existing two-output-row mapping;
 `=1` forces one row per block. The first four sizes ran ABBA:
 

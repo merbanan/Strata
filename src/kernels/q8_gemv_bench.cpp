@@ -4,7 +4,8 @@
 // cycled to miss the GPU's last-level cache, as a layer's call does.
 //
 //     build/q8_gemv_bench [--cols 1,2,3,4,6] [--iters 50] [--bw GB/s]
-//                         [--shape substring] [--working-set-mib 512] [--hash]
+//                         [--shape substring] [--working-set-mib 512] [--hash] [--type Q8_0|Q5_K]
+//                         [--warmup-iters 3]
 #include "strata/kernels/native_mmvq.hpp"
 
 #include <cuda_runtime.h>
@@ -51,6 +52,8 @@ int main(int argc, char** argv) {
     std::string shape_filter;
     size_t working_set_mib = 512;
     bool hash_outputs = false;
+    int ggml_type = 8;
+    int warmup_iters = 3;
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
         if (a == "--cols" && i + 1 < argc) cols = ints(argv[++i]);
@@ -59,6 +62,13 @@ int main(int argc, char** argv) {
         else if (a == "--shape" && i + 1 < argc) shape_filter = argv[++i];
         else if (a == "--working-set-mib" && i + 1 < argc) working_set_mib = std::max(1, std::atoi(argv[++i]));
         else if (a == "--hash") hash_outputs = true;
+        else if (a == "--type" && i + 1 < argc) {
+            const std::string t = argv[++i];
+            if (t == "Q8_0") ggml_type = 8;
+            else if (t == "Q5_K") ggml_type = 13;
+            else { std::fprintf(stderr, "q8_gemv_bench: unsupported type %s\n", t.c_str()); return 2; }
+        }
+        else if (a == "--warmup-iters" && i + 1 < argc) warmup_iters = std::max(0, std::atoi(argv[++i]));
     }
     cudaDeviceProp prop;
     ck(cudaGetDeviceProperties(&prop, 0), "props");
@@ -67,14 +77,16 @@ int main(int argc, char** argv) {
     int matched = 0;
     for (const Shape& s : SHAPES) {
         if (!shape_filter.empty() && std::string(s.what).find(shape_filter) == std::string::npos) continue;
+        if (ggml_type == 13 && s.n_in % 256 != 0) continue;
         ++matched;
-        const size_t bytes = (size_t) s.n_out * (s.n_in / 32) * 34;
+        const size_t bytes = K::native_mmvq_weight_bytes(ggml_type, s.n_in, s.n_out);
         const int copies = (int) std::max<size_t>(1, std::min<size_t>(16, (working_set_mib << 20) / bytes));
         std::vector<uint8_t> host(bytes);
-        for (size_t b = 0; b < bytes; b += 34) {   // fp16 scale 0.01 (0x211f), then random int8 weights
-            host[b] = 0x1f;
-            host[b + 1] = 0x21;
-            for (int k = 0; k < 32; ++k) host[b + 2 + k] = (uint8_t) (rng() & 0xff);
+        const size_t block_bytes = ggml_type == 8 ? 34 : 176;
+        for (size_t b = 0; b < bytes; b += block_bytes) {
+            for (size_t k = 0; k < block_bytes; ++k) host[b + k] = (uint8_t) (rng() & 0xff);
+            host[b] = 0x1f; host[b + 1] = 0x21;   // finite fp16 Q8_0 d or Q5_K d
+            if (ggml_type == 13) { host[b + 2] = 0x1f; host[b + 3] = 0x21; }   // finite Q5_K dmin
         }
         std::vector<void*> w(copies);
         for (auto& p : w) {
@@ -95,12 +107,12 @@ int main(int argc, char** argv) {
         cudaEvent_t e0, e1;
         cudaEventCreate(&e0);
         cudaEventCreate(&e1);
-        std::printf("\n%s: %.2f MB, %d copies\n", s.what, bytes / 1e6, copies);
+        std::printf("\n%s (%s): %.2f MB, %d copies\n", s.what, ggml_type == 8 ? "Q8_0" : "Q5_K", bytes / 1e6, copies);
         for (int c : cols) {
             K::native_quantize_q8_1(x, xq, s.n_in, c, st);
-            for (int i = 0; i < 3; ++i) K::native_mmvq(8, w[i % copies], xq, y, s.n_in, s.n_out, c, st);
+            for (int i = 0; i < warmup_iters; ++i) K::native_mmvq(ggml_type, w[i % copies], xq, y, s.n_in, s.n_out, c, st);
             cudaEventRecord(e0, st);
-            for (int i = 0; i < iters; ++i) K::native_mmvq(8, w[i % copies], xq, y, s.n_in, s.n_out, c, st);
+            for (int i = 0; i < iters; ++i) K::native_mmvq(ggml_type, w[i % copies], xq, y, s.n_in, s.n_out, c, st);
             cudaEventRecord(e1, st);
             ck(cudaEventSynchronize(e1), "sync");
             float ms = 0;
