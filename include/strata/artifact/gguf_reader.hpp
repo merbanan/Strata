@@ -618,6 +618,36 @@ inline std::string check_architecture_qwen35moe(const GgufFile& g) {
     return {};
 }
 
+/// Flint's metadata guard. The model has an explicit per-layer sliding/full
+/// attention pattern, so neither the Qwen GDN interval nor a guessed pattern
+/// may be used in its place.
+inline std::string check_architecture_flint(const GgufFile& g) {
+    static const char* const keys[] = {
+        "flint.block_count", "flint.embedding_length", "flint.attention.head_count",
+        "flint.attention.head_count_kv", "flint.attention.key_length", "flint.attention.value_length",
+        "flint.expert_count", "flint.expert_used_count", "flint.expert_feed_forward_length",
+        "flint.expert_shared_feed_forward_length", "flint.feed_forward_length",
+        "flint.leading_dense_block_count", "flint.expert_shared_count", "flint.attention.sliding_window",
+    };
+    for (const char* k : keys) {
+        const MetaValue* v = g.get(k);
+        if (!v) return std::string("missing ") + k;
+        if (!v->is_num() || v->type == MetaType::F32 || v->type == MetaType::F64 || v->type == MetaType::BOOL)
+            return std::string(k) + " is not an integer";
+    }
+    const auto layers = g.get("flint.block_count")->u;
+    const auto dense = g.get("flint.leading_dense_block_count")->u;
+    if (!layers || dense >= layers) return "flint.leading_dense_block_count must be smaller than block_count";
+    if (!g.get("flint.attention.sliding_window")->u) return "flint.attention.sliding_window must be positive";
+    for (const char* key : {"flint.attention.sliding_window_pattern", "flint.attention.rope_pattern"}) {
+        const MetaValue* v = g.get(key);
+        if (!v || v->type != MetaType::ARRAY || v->elem != MetaType::BOOL || v->count != layers ||
+            v->items.size() != layers)
+            return std::string(key) + " must be a boolean list with one entry per layer";
+    }
+    return {};
+}
+
 // ---- the model's geometry from its metadata, and the architecture guard (P1.S2).  The engine runs ONE
 // architecture, qwen4exp.  Its dimensions are read from the file (llama.cpp's key names under the arch prefix)
 // and then checked against the shape the kernels are compiled for (core/geometry.hpp), so a file of another
@@ -790,6 +820,7 @@ inline std::string check_architecture(const GgufFile& f) {
     if (!arch) return "missing general.architecture";
     const ModelFamily family = model_family_from_arch(arch->s);
     if (family == ModelFamily::Qwen35Moe) return check_architecture_qwen35moe(f);
+    if (family == ModelFamily::Flint) return check_architecture_flint(f);
     core::ModelGeometry g;   // anything else is refused by name by read_geometry
     std::string err = read_geometry(f, g);
     if (err.empty()) err = geometry_unsupported(g);

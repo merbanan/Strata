@@ -56,6 +56,8 @@ struct ModelGeometry {
 
     // appended for the model families (Qwen3.6 = qwen35moe); the defaults keep Flash-Next's values
     int64_t n_ff_shexp = 640;       ///< the shared expert's FFN width (qwen4exp: equal to n_ff, read_geometry checks)
+    int64_t n_ff_dense = 0;         ///< Flint feed_forward_length for its leading dense layers
+    int64_t n_dense_lead = 0;       ///< Flint leading_dense_block_count
     ModelFamily family = ModelFamily::Qwen4Exp;
     int64_t n_mtp_layers = 0;       ///< MTP blocks inside the model file, after the trunk (qwen35moe: blk.40)
 

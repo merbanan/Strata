@@ -39,6 +39,12 @@ inline Kv i32(const std::string& k, uint64_t v) { Kv r = make_kv(k, 5); r.u = v;
 inline Kv u32(const std::string& k, uint64_t v) { Kv r = make_kv(k, 4); r.u = v; return r; }
 inline Kv f32(const std::string& k, float v) { Kv r = make_kv(k, 6); r.f = v; return r; }
 inline Kv u32s(const std::string& k, std::vector<uint64_t> v) { Kv r = make_kv(k, 9); r.arr = std::move(v); return r; }
+inline Kv bools(const std::string& k, std::vector<uint64_t> v) {
+    Kv r = make_kv(k, 9);
+    r.elem = 7;
+    r.arr = std::move(v);
+    return r;
+}
 inline Kv strs(const std::string& k, std::vector<std::string> v) {
     Kv r = make_kv(k, 9);
     r.elem = 8;
@@ -90,6 +96,13 @@ inline Written write(const std::filesystem::path& path, const std::vector<Kv>& k
             put32(4);
             put64(k.arr.size());
             for (uint64_t x : k.arr) put32((uint32_t) x);
+        } else if (k.type == 9 && k.elem == 7) {
+            put32(7);
+            put64(k.arr.size());
+            for (uint64_t x : k.arr) {
+                const uint8_t v = x != 0;
+                put(&v, 1);
+            }
         } else if (k.type == 9 && k.elem == 8) {
             put32(8);
             put64(k.sarr.size());

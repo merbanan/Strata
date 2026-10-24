@@ -56,6 +56,22 @@ const Dims kFlashNext = {48, 2560, 24, 2, 256, 512, 10, 640, 640, 4, 128, 16, 48
 const Dims kTiny36 = {5, 64, 2, 1, 16, 4, 2, 32, 32, 4, 8, 2, 4, 32, 4, 1, 0, 0, 0, 0};
 const Dims kTinyFlash = {8, 64, 2, 1, 16, 4, 2, 32, 32, 4, 8, 2, 4, 32, 4, 0, 2, 8, 2, 8};
 
+std::vector<Kv> flint_metadata() {
+    return {fixture::str("general.architecture", "flint"),
+            fixture::u32("flint.block_count", 4), fixture::u32("flint.embedding_length", 64),
+            fixture::u32("flint.attention.head_count", 2), fixture::u32("flint.attention.head_count_kv", 1),
+            fixture::u32("flint.attention.key_length", 16), fixture::u32("flint.attention.value_length", 16),
+            fixture::u32("flint.expert_count", 4), fixture::u32("flint.expert_used_count", 2),
+            fixture::u32("flint.expert_feed_forward_length", 32),
+            fixture::u32("flint.expert_shared_feed_forward_length", 32),
+            fixture::u32("flint.feed_forward_length", 64),
+            fixture::u32("flint.leading_dense_block_count", 1), fixture::u32("flint.expert_shared_count", 2),
+            fixture::u32("flint.attention.sliding_window", 9),
+            fixture::bools("flint.attention.sliding_window_pattern", {0, 1, 1, 0}),
+            fixture::bools("flint.attention.rope_pattern", {0, 1, 1, 0}),
+            fixture::str_array("tokenizer.ggml.tokens", {"a", "b", "c", "d"})};
+}
+
 std::vector<Kv> metadata(const char* arch, const Dims& d, uint64_t vocab) {
     const std::string p = std::string(arch) + ".";
     std::vector<Kv> kv = {fixture::str("general.architecture", arch),
@@ -286,6 +302,33 @@ int main(int argc, char** argv) {
                 if (it->name == "blk.3.indexer.k_proj.weight") { ts.erase(it); break; }
         });
         check(e == "missing blk.3.indexer.k_proj.weight", "Flash-Next: a missing indexer tensor is refused (" + e + ")");
+    }
+    {
+        const fs::path path = d.path / "flint-tiny.gguf";
+        auto kv = flint_metadata();
+        fixture::write(path, kv, {});
+        const strata::GgufFile header(path.string());
+        check(strata::model_family(header) == strata::ModelFamily::Flint &&
+                  strata::check_architecture(header).empty() &&
+                  strata::check_engine_architecture(header).find("no Flint inference driver") != std::string::npos,
+              "Flint metadata is recognized while unsupported inference is refused");
+        strata::core::ModelGeometry g;
+        int64_t top_k = 0;
+        std::string err;
+        check(geometry_of(path, g, top_k, err) && g.n_layers == 4 && g.n_gdn_layers() == 0 &&
+                  g.n_dense_lead == 1 && g.n_ff_dense == 64 && top_k == 2,
+              "Flint geometry preserves dense lead and all-attention layers");
+        const auto ts = tensors_of(g);
+        fixture::write(path, kv, ts);
+        const strata::GgufModel model({path.string()});
+        size_t checked = 0;
+        check(strata::core::check_gguf_layout(model, g, err, &checked) && checked == ts.size(),
+              "Flint dense and MoE tensor layout passes completely");
+        for (auto& x : kv)
+            if (x.key == "flint.attention.rope_pattern") x.arr.pop_back();
+        fixture::write(path, kv, {});
+        check(strata::check_architecture(strata::GgufFile(path.string())).find("rope_pattern") != std::string::npos,
+              "Flint rejects a truncated per-layer RoPE pattern");
     }
     std::printf(g_fail ? "FAILED (%d)\n" : "ALL PASSED\n", g_fail);
     return g_fail ? 1 : 0;
