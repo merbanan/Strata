@@ -58,3 +58,31 @@ An upstream `llama-cli` single-turn smoke test at context 2048 generated
 "The capital of Sweden is Stockholm." The reference binary and raw JSONL,
 stderr and CLI logs are under `/run/media/benjamin/TMP/strata-flint/`. Both
 benchmark and CLI processes exited; the GPU returned to 2 MiB used.
+
+## Expert placement screen
+
+The 12-layer baseline leaves most attention work on the CPU. To mirror
+Strata's separation of dense weights and routed experts, a second llama.cpp
+screen put all 49 non-expert layers on the GPU (`-ngl 49`) and selectively
+kept expert tensors on the CPU (`-ncmoe N`). This is static *layer* placement,
+not Strata's per-expert cache; it supplies a stronger reference for the native
+cache work. All arms use the same model, CPU thread count, 512/64 token cases
+and two repetitions. The baseline row uses the three warmed PP and TG samples
+from the repeat run above.
+
+| Placement | PP512 tok/s | TG64 tok/s |
+| --- | ---: | ---: |
+| `-ngl 12`, default expert placement | 208.64–212.95 | 15.17–15.27 |
+| `-ngl 49 -ncmoe 49` (all experts on CPU) | 196.84–202.05 | 29.57–30.99 |
+| `-ngl 49 -ncmoe 40` (nine tail MoE layers on GPU) | 230.64–232.71 | 31.81–33.38 |
+| `-ngl 49 -ncmoe 36` (13 tail MoE layers on GPU) | 248.21–248.84 | 33.78–38.00 |
+| `-ngl 49 -ncmoe 32` (17 tail MoE layers on GPU) | 270.37–275.15 | 35.96–36.95 |
+| `-ngl 49 -ncmoe 31` (18 tail MoE layers on GPU) | 277.25–281.42 | 36.22–37.35 |
+
+`-ncmoe 30` (19 tail layers) failed to allocate a 313.25 MiB CUDA prompt
+compute buffer. The fastest fitting `-ncmoe 31` configuration is about 1.32x
+warm PP and 2.42x TG versus the initial placement, using mean rates. Its
+single-turn CLI run again answered Stockholm. This improves an upstream
+reference configuration; Strata-native expert residency, task quality and
+longer-context memory admission are still unmeasured. Keep this setting
+opt-in and leave GPU headroom for other applications.
