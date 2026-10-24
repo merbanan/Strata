@@ -12462,6 +12462,11 @@ int main(int argc, char** argv) {
             const Clock::time_point d0 = Clock::now();
             // STRATA_DECODE_TIMING=1: where a request's decode time goes (one line per request)
             static const bool dec_timing = std::getenv("STRATA_DECODE_TIMING") != nullptr;
+            if (dec_timing)
+                for (int st = 0; st < n_stages; ++st) {
+                    const std::string pr = stage_ver(st).profile_report();
+                    if (!pr.empty()) std::fprintf(stderr, "strata prompt-tail GPU stages, stage %d (ms/window):%s\n", st, pr.c_str());
+                }
             // STRATA_TRACE_WINDOWS=1: diagnostic only; one line per committed verify window.
             // Pipeline windows overlap, so their dispatch counters cannot be assigned to one verdict.
             static const bool trace_windows = [] {
@@ -12471,11 +12476,11 @@ int main(int argc, char** argv) {
             static int64_t next_trace_request = 0;   // the serve loop is serial
             const int64_t trace_request = trace_windows ? ++next_trace_request : 0;
             struct DecSnap {
-                double wait, pool, host, plan, actq, jobs, run;
+                double wait, pool, host, ple, plan, actq, jobs, run;
                 int64_t misses, entries, hits, pcie;
             };
             auto dec_snap = [&]() {
-                return DecSnap{ver.ms_wait, ver.ms_pool, ver.ms_host, drive.d.ms_plan, drive.d.ms_actq, drive.d.ms_jobs,
+                return DecSnap{ver.ms_wait, ver.ms_pool, ver.ms_host, ver.ms_ple, drive.d.ms_plan, drive.d.ms_actq, drive.d.ms_jobs,
                                drive.d.ms_run, drive.d.multi_misses, drive.d.multi_entries, drive.d.cache_hits,
                                drive.d.pcie_experts};
             };
@@ -13397,6 +13402,8 @@ int main(int argc, char** argv) {
                              (d1.host - ds0.host) / w, dt_commit / w, dt_draft / w, (d1.misses - ds0.misses) / (w * L),
                              (d1.entries - ds0.entries) / (w * L), (d1.hits - ds0.hits) / (w * L), (d1.pcie - ds0.pcie) / (w * L),
                              dt_adapt_wait / w, dt_adapt_join / w, (double) ((ajob ? a_swapped : adapt_nswaps) - dt_sw0) / w);
+                std::fprintf(stderr, "strata decode PLE host: %.3f ms/window, %.3f ms/request within verifier host work\n",
+                             (d1.ple - ds0.ple) / w, d1.ple - ds0.ple);
                 if (aov)
                     std::fprintf(stderr, "strata decode adapt overlap: %lld windows took swaps still landing, a layer waited %.2f ms in all so far\n",
                                  (long long) aov_flips, ver.ms_gate);
@@ -14677,6 +14684,9 @@ int main(int argc, char** argv) {
                         ver.ms_commit / rounds,
                         (double) (drive.d.multi_misses - misses0) / (double) (rounds * g.n_layers),
                         (double) (drive.d.multi_entries - entries0) / (double) (rounds * g.n_layers));
+        if (rounds > 0)
+            std::printf("%-24s %.3f ms/round (included in verify window host)\n", "verify PLE host",
+                        ver.ms_ple / rounds);
         if (rounds > 0)
             std::printf("%-24s gate/up %.3f  quantize %.3f  down %.3f ms/round; %.1f GB/s over the rows phases; "
                         "CPU pool call %.3f ms/round\n", "pool multi", pool.ms_multi_gu / rounds,

@@ -324,7 +324,7 @@ public:
     void set_pre_launch(std::function<bool(cudaStream_t cs, std::string& err)> f) { pre_launch_ = std::move(f); }
     /// the pool never plans a PCIe share (--pcie-frac 0): the window skips that path.  Before the first run.
 
-    double ms_wait = 0, ms_pool = 0, ms_host = 0, ms_commit = 0;
+    double ms_wait = 0, ms_pool = 0, ms_host = 0, ms_ple = 0, ms_commit = 0;
     int64_t windows = 0;
     /// STRATA_VERIFY_PROFILE=1 - GPU stage times of the windows since the last call (ms per
     /// window), as one line; empty when off.
@@ -375,6 +375,7 @@ private:
     bool instantiate_evicting(cudaGraphExec_t& ex, cudaGraph_t graph, const std::vector<int>& key, const char* what,
                               std::string& err);
     void collect_profile();   ///< STRATA_VERIFY_PROFILE: add the last window's stamps to prof_sum_
+    void collect_ple_profile(int groups);   ///< PLE-only stamps for split verifier windows
     void accumulate_profile(const unsigned long long* stamps);   ///< one window's stamps (host copy) into prof_sum_
     // pipelined windows (pl_launch ...)
     cudaStream_t ext_stream_ = nullptr;   ///< set_stream: the stage's shared stream (not destroyed here)
@@ -443,13 +444,14 @@ private:
     unsigned long long* trace_h_ = nullptr;
     unsigned long long* trace_m_ = nullptr;
     size_t trace_n_ = 0;
-    static constexpr int kProfPer = 33;              // stamps per layer (32 left the hc-read second
-                                      // half's up-stamp at slot 32 = the next layer's slot 0: D8)
+    static constexpr int kProfPer = 37;              // 33/34 and 35/36 bracket PLE's two token groups
     bool prof_on_ = false;
     unsigned long long* prof_ = nullptr;              // device: n_layers * kProfPer + 4 stamps
     std::vector<unsigned long long> prof_h_;
     double prof_sum_[2][kProfPer] = {};   // [GDN / QSA layers][stage]
     int64_t prof_windows_ = 0;
+    double prof_ple_ns_ = 0;
+    int64_t prof_ple_windows_ = 0;
 
     const WeightTable* wt_ = nullptr;
     const ModelGeometry* g_ = nullptr;

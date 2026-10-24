@@ -461,7 +461,8 @@ void Verifier::trace_dump(std::FILE* f) const {
     static const char* names[kProfPer] = {"pre", "hc-read0", "qkv gemv", "conv", "ab", "z", "rec", "kv-idx",
                                           "k/v rope", "kv append", "q", "scores+topk", "kv-resolve", "attention",
                                           "gate", "out-proj", "late rows", "router+ring", "shared", "waitA", "VRAM hits",
-                                          "waitB", "PCIe grp", "waitCPU", "combine", "", "head", "", "", "", "", "", ""};
+                                          "waitB", "PCIe grp", "waitCPU", "combine", "", "head", "", "", "", "", "", "",
+                                          "PLE g0 start", "PLE g0 end", "PLE g1 start", "PLE g1 end"};
     const uint64_t end = g_trace_next.load();
     const uint64_t n = end < 160 ? end : 160;
     std::fprintf(f, "strata verify trace (#649): the last %llu handshake events (host clock, us before the last; "
@@ -994,6 +995,11 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
         if (prof_on_ && grp == 0) gpu_stamp(prof_, (int) (l * kProfPer + i), cs);
         if (trace_m_ != nullptr) gpu_stamp(trace_m_, (int) ((l * kProfPer + i) * 2 + grp), cs);   // #649
     };
+    auto ple_stamp = [&](int64_t l, int grp, bool done) {
+        const int i = 33 + 2 * grp + (done ? 1 : 0);
+        if (prof_on_) gpu_stamp(prof_, (int) (l * kProfPer + i), cs);
+        if (trace_m_ != nullptr) gpu_stamp(trace_m_, (int) ((l * kProfPer + i) * 2 + grp), cs);
+    };
     const int tb_[2] = {0, (T + 1) / 2}, te_[2] = {G == 2 ? (T + 1) / 2 : T, T};
     // S26 STRATA_LFUSE=1: where the shared expert's gate / scale fusions apply (the paths they replace are the ones taken)
     auto lfuse_on = [&](int n) {
@@ -1151,6 +1157,7 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
                 if (ar_on()) wait_flag_ge(m_flag_, 1, cs);
                 copy_from_mapped(ple_, m_ple_, (int64_t) T * N, cs);
             }
+            ple_stamp(l, grp, false);
             float* normalized = (float*) ((uint8_t*) ss.ple.scratch + ple_block_scratch_bytes());
             static const bool ple_batch_env = [] {
                 const char* e = std::getenv("STRATA_PLE_BATCH");
@@ -1242,6 +1249,7 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
                 }
                 copy_from_mapped(hist_snap_ + (size_t) t * HS, hist, HS, cs);
             }
+            ple_stamp(l, grp, true);
             pending = false;
         }
         auto gr_read_group = [&](int half, bool apply, float* inj_prev, float* inj_out) {
@@ -2035,28 +2043,38 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
 }
 
 std::string Verifier::profile_report() {
-    if (!prof_on_ || prof_windows_ == 0) return std::string();
+    if (!prof_on_ || (prof_windows_ == 0 && prof_ple_windows_ == 0)) return std::string();
     static const char* names[kProfPer] = {"-", "hc-read0", "q8+qkv/q-idx gemv", "conv", "ab", "z", "rec", "q8+kv-idx",
                                           "k/v+norm-rope", "kv+idx append", "q+q-idx", "scores+topk", "kv-resolve",
                                           "attention", "gate", "out-proj", "late rows", "router+plan+bell", "shared+quant",
                                           "waitA", "VRAM hits", "waitB", "PCIe grp", "waitCPU", "copy+combine",
-                                          "(gap)", "head", "  hc0 norm", "  hc0 down", "  hc0 up", "  hc1 norm", "  hc1 down", "  hc1 up"};
+                                          "(gap)", "head", "  hc0 norm", "  hc0 down", "  hc0 up", "  hc1 norm", "  hc1 down", "  hc1 up",
+                                          "PLE g0 start", "PLE g0 end", "PLE g1 start", "PLE g1 end"};
     std::string out;
     char b[80];
     double total = 0;
-    for (int k = 0; k < 2; ++k) {
+    for (int k = 0; k < 2 && prof_windows_ > 0; ++k) {
         out += k == 0 ? " GDN layers:" : " | QSA layers:";
-        for (int i = 0; i < kProfPer; ++i) {
+        for (int i = 0; i < 33; ++i) {
             if (prof_sum_[k][i] <= 0) continue;
             total += prof_sum_[k][i];
             std::snprintf(b, sizeof b, " %s %.2f", names[i], prof_sum_[k][i] / 1e6 / (double) prof_windows_);
             out += b;
         }
     }
-    std::snprintf(b, sizeof b, " | total %.2f ms/window over %lld windows", total / 1e6 / (double) prof_windows_, (long long) prof_windows_);
-    out += b;
+    if (prof_windows_ > 0) {
+        std::snprintf(b, sizeof b, " | total %.2f ms/window over %lld windows", total / 1e6 / (double) prof_windows_, (long long) prof_windows_);
+        out += b;
+    }
+    if (prof_ple_windows_ > 0) {
+        std::snprintf(b, sizeof b, " | PLE GPU group sum %.3f ms/window over %lld windows",
+                      prof_ple_ns_ / 1e6 / (double) prof_ple_windows_, (long long) prof_ple_windows_);
+        out += b;
+    }
     for (auto& r : prof_sum_) for (double& d : r) d = 0;
     prof_windows_ = 0;
+    prof_ple_ns_ = 0;
+    prof_ple_windows_ = 0;
     return out;
 }
 
@@ -2419,6 +2437,18 @@ void Verifier::collect_profile() {
     accumulate_profile(prof_h_.data());
 }
 
+void Verifier::collect_ple_profile(int groups) {
+    if (lb_ > 1 || le_ <= 1 || !ss_->ple.ready()) return;
+    cudaMemcpy(prof_h_.data(), prof_, prof_h_.size() * 8, cudaMemcpyDeviceToHost);
+    const unsigned long long* p = prof_h_.data() + kProfPer;   // layer 1
+    const auto gap = [](unsigned long long end, unsigned long long begin) {
+        return begin != 0 && end >= begin ? (double) (end - begin) : 0.0;
+    };
+    prof_ple_ns_ += gap(p[34], p[33]);
+    if (groups > 1) prof_ple_ns_ += gap(p[36], p[35]);
+    ++prof_ple_windows_;
+}
+
 void Verifier::accumulate_profile(const unsigned long long* stamps) {
     const ModelGeometry& g = *g_;
     const int64_t L = g.n_layers;
@@ -2460,6 +2490,11 @@ void Verifier::accumulate_profile(const unsigned long long* stamps) {
     }
     if (le_ == L) prof_sum_[0][26] += gap(at(L, 1), at(L, 0));
     ++prof_windows_;
+    if (lb_ <= 1 && le_ > 1 && ss_->ple.ready()) {
+        const unsigned long long* p = stamps + kProfPer;
+        prof_ple_ns_ += gap(p[34], p[33]);
+        ++prof_ple_windows_;
+    }
 }
 
 // 0.1.43 (STRATA_ADAPT_OVERLAP): hold the host until the adaptive tier's copies up to `layer` have landed.  The wait
@@ -2557,7 +2592,9 @@ bool Verifier::run(int T, const int32_t* tokens, int64_t pos0, PoolMultiFn pool,
             std::atomic_thread_fence(std::memory_order_seq_cst);
             _mm_sfence();
             *flag = 1;
-            ms_host += ms_since(tp);
+            const double elapsed = ms_since(tp);
+            ms_host += elapsed;
+            ms_ple += elapsed;
         } else {
             *flag = 1;
         }
@@ -2652,7 +2689,9 @@ bool Verifier::run(int T, const int32_t* tokens, int64_t pos0, PoolMultiFn pool,
             if (!ss.ple.table->gather_batch(ple_rows, (size_t) T, h_ple_, err)) return false;
             std::atomic_thread_fence(std::memory_order_seq_cst);
             _mm_sfence();
-            ms_host += ms_since(tp);
+            const double elapsed = ms_since(tp);
+            ms_host += elapsed;
+            ms_ple += elapsed;
         }
         if (h_pflag_ != nullptr) raise_flag(h_pflag_, want);   // STRATA_VERIFY_DEFER_CPU_BELOW: (the pool raised it if it split)
         if (!(test_stall && k + 1 == steps)) *flag = want;
@@ -2688,7 +2727,10 @@ bool Verifier::run(int T, const int32_t* tokens, int64_t pos0, PoolMultiFn pool,
         cudaStreamSynchronize(copy_);   // no host function of this window may raise flag B in the next one
         copy_used_ = false;
     }
-    if (prof_on_ && G == 1) collect_profile();   // the window's GPU stage stamps
+    if (prof_on_) {
+        if (G == 1) collect_profile();   // full stage profile needs one token group
+        else collect_ple_profile(G);
+    }
     // ---- a sampled or penalized request: the head's sampling again, host-side so its parameters are this call's
     // own (a captured kernel would replay the same draws forever).  Row t's draw is Philox(seed, pos0 + t): tied to
     // the POSITION it samples, not to how the text was cut into windows, so a seed replays the same text whatever
@@ -3272,7 +3314,9 @@ bool Verifier::stage_batch(const int* rows, int S, int hbase, const int32_t* tok
             }
             ngram_rows(&tokens[t], prev, 1, ss_->ple.consts, ple_rows + t * PLE_N_HEADS);
         }
+        const Clock::time_point tp = Clock::now();
         if (!ss_->ple.table->gather_batch(ple_rows, (size_t) S, h_ple_, err)) return false;
+        ms_ple += ms_since(tp);
     }
     // Each slot owns a contiguous group. The default commit keeps all its rows; speculative
     // decoding may change the prefix length after comparing the draft with these picks.
@@ -3779,7 +3823,9 @@ int Verifier::service(PoolMultiFn pool, void* user, std::string& err) {
         if (!ss.ple.table->gather_batch(pl_ple_rows_.data(), (size_t) T, h_ple_, err)) return false;
         std::atomic_thread_fence(std::memory_order_seq_cst);
         _mm_sfence();
-        ms_host += ms_since(tp);
+        const double elapsed = ms_since(tp);
+        ms_host += elapsed;
+        ms_ple += elapsed;
         return true;
     };
     if (ar_on()) {   // the zero-doorbell graph never rings: it waits only for flag 1 (stage 0's PLE rows).
@@ -3931,14 +3977,18 @@ bool Verifier::pl_commit_async(int n_keep, std::string& err) {
 }
 
 void Verifier::absorb_stats(Verifier& o) {
-    ms_wait += o.ms_wait; ms_pool += o.ms_pool; ms_host += o.ms_host; ms_commit += o.ms_commit;
+    ms_wait += o.ms_wait; ms_pool += o.ms_pool; ms_host += o.ms_host; ms_ple += o.ms_ple; ms_commit += o.ms_commit;
     windows += o.windows;
-    o.ms_wait = o.ms_pool = o.ms_host = o.ms_commit = 0;
+    o.ms_wait = o.ms_pool = o.ms_host = o.ms_ple = o.ms_commit = 0;
     o.windows = 0;
     for (int k = 0; k < 2; ++k)
         for (int i = 0; i < kProfPer; ++i) { prof_sum_[k][i] += o.prof_sum_[k][i]; o.prof_sum_[k][i] = 0; }
     prof_windows_ += o.prof_windows_;
     o.prof_windows_ = 0;
+    prof_ple_ns_ += o.prof_ple_ns_;
+    prof_ple_windows_ += o.prof_ple_windows_;
+    o.prof_ple_ns_ = 0;
+    o.prof_ple_windows_ = 0;
 }
 
 }  // namespace strata::core
