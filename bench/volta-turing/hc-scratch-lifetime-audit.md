@@ -26,10 +26,34 @@ Two conversion scratches remain separate from the chunk layout:
 - `hc_f16_scratch` keeps one `STRATA_PF_HC_FAST` FP16 conversion buffer per
   device, also 6.25 MiB for the down/up matrix.
 
-Both features are enabled in the October 21 benchmark configs. Their buffers
-are reused across layers and prompts. Releasing them after the last projection
-requires a stream completion fence and a recapture/lifetime check if any
-captured work retains their addresses. The next qualification should compare
-actual free VRAM and expert-cache slots before/after release, plus full
-prefill and decode timing under the same chunk/ring/budget. A 12.5 MiB upper
-bound on these two buffers alone is too small to infer a useful chunk increase.
+Both features are enabled in the October 21 benchmark configs, but enabling
+them does not imply both buffers are allocated. Their buffers are reused across
+layers and prompts. Releasing either after the last projection would require
+completion of its stream and ownership across any concurrent prompt users;
+captured work would additionally retain its address. The 12.5 MiB sum above
+was a source-level upper bound, not the actual installed-route allocation.
+
+## Actual installed-route allocation (October 24)
+
+An opt-in `STRATA_HC_SCRATCH_TRACE=1` logs the fast-HC admission and each
+conversion-scratch allocation. The production IQ3_XXS/K8V4 configuration has
+both `STRATA_HC_REQ8=1` and `STRATA_PF_HC_FAST=1`. A real 4,096-token prompt
+on RTX 2060 SUPER used one 4,095-token prefill chunk, admitted fast HC, and
+allocated one 6.25 MiB FP16 conversion buffer. No BF16 expansion allocation
+or decode Q8-view scratch allocation was logged. The run completed its prompt
+at 506.9 tokens/s; this trace is not an A/B speed comparison. Raw config,
+binary hash, command, exit status and log are at
+`/run/media/benjamin/TMP/strata-v20-hc-scratch/trace-20261024a/`.
+
+The startup expert cache has 1,137 slots before the FP16 buffer is allocated.
+This configuration uses the cache's fixed `cudaMalloc` arena, not
+`--vram-elastic`; `ExpertCache::open` fixes the slot count, and ordinary prompt
+completion has no grow step. Freeing the 6.25 MiB conversion buffer at the end
+of a prompt would therefore release VRAM to the driver but create no expert
+slot or auto-chunk increase in this configuration. A future prompt would need
+the same buffer again; safe release would also need concurrent-prefill ownership
+tracking. We do not add a recurring free/reallocation path without a capacity
+or complete-inference gain to test. The existing HC region reuse remains the
+measured and enabled prefill improvement. Reopen this buffer-lifetime question
+if a different model makes the BF16 buffer active or an elastic cache can
+actually claim the freed memory.

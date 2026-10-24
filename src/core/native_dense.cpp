@@ -451,6 +451,9 @@ bool NativeDense::load(const std::vector<std::string>& shards, WeightTable& tabl
                 if (ref.hc_q8 != nullptr && ref.data == nullptr) elems = (std::max)(elems, (uint64_t) ref.elements);
             int dev = 0;
             if (elems != 0 && cudaGetDevice(&dev) == cudaSuccess && dev >= 0 && dev < 64 && g_hc_scratch[dev][0][0] == nullptr) {
+                if (std::getenv("STRATA_HC_SCRATCH_TRACE") != nullptr)
+                    std::fprintf(stderr, "strata HC scratch: decode Q8 views reserve four %.2f MiB buffers on device %d\n",
+                                 (double) (elems * 2) / 1048576.0, dev);
                 for (int c = 0; c < 2; ++c)
                     for (int i = 0; i < 2; ++i) {
                         void* b = nullptr;

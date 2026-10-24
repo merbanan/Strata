@@ -2230,6 +2230,9 @@ bool bf16_proj(Gemm& gm, const core::WeightRef* w, const uint16_t* X, float* Y, 
                 scratch = nullptr; cap = 0; err = "prefill: the STRATA_HC_REQ8 scratch"; return false;
             }
             cap = w->elements;
+            if (std::getenv("STRATA_HC_SCRATCH_TRACE") != nullptr)
+                std::fprintf(stderr, "strata HC scratch: BF16 expansion allocated %.2f MiB\n",
+                             (double) ((size_t) cap * 2) / 1048576.0);
         }
         strata::kernels::hc_q8_to_bf16(w->data, w->q8_scale, scratch, (long long) w->elements, stream);
         wb = scratch;
@@ -2254,6 +2257,9 @@ uint16_t* hc_f16_scratch(int64_t elems, std::string& err) {
             return nullptr;
         }
         cap[dev] = elems;
+        if (std::getenv("STRATA_HC_SCRATCH_TRACE") != nullptr)
+            std::fprintf(stderr, "strata HC scratch: FP16 conversion allocated %.2f MiB on device %d\n",
+                         (double) ((size_t) cap[dev] * 2) / 1048576.0, dev);
     }
     return buf[dev];
 }
@@ -2791,6 +2797,8 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
         // STRATA_PF_HC_FAST: decided once per chunk, since the previous half's fused write already emits xn16
         const bool hcf = pf_hc_fast() && !m.f16_io && !gr_unfused() && !hc_pad() && !hc_upmix() && !m.xn16_lo &&
                          !m.lo16_lo && T >= pf_switch_min_t();
+        if (std::getenv("STRATA_HC_SCRATCH_TRACE") != nullptr)
+            std::fprintf(stderr, "strata HC scratch: chunk %lld tokens, fast HC %d\n", (long long) T, (int) hcf);
         // #579 #613 (opt-in diagnosis, STRATA_PF_STEP_SYNC=1): the compute and copy streams are waited for after each
         // step named below, a step that took over 250 ms is logged, and a stall's report names the step it is in.
         // Slower (a sync per step); the bytes are the same.
