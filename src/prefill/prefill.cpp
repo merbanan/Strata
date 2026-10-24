@@ -3112,11 +3112,16 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                         // the scores on tensor cores (3xTF32: FP32-level, not bitwise), below sm_80 the FP32 tiled kernel with STRATA_SELECT_SIMT=1;
                         // STRATA_SELECT_OLD=1: the warp kernel
                         static const bool old_sel = std::getenv("STRATA_SELECT_OLD") != nullptr;
-                        if (old_sel || !strata::kernels::qsa_block_scores_tc(st.idx_pooled, st.idx_dead, m.q_idx + t0 * 512,
-                                                                             steps0, nb, m.max_blocks, s, m.sel_scores,
-                                                                             m.cs, active))
+                        const bool native_scores = !old_sel && strata::kernels::qsa_block_scores_tc(
+                            st.idx_pooled, st.idx_dead, m.q_idx + t0 * 512, steps0, nb, m.max_blocks, s,
+                            m.sel_scores, m.cs, active);
+                        if (!native_scores)
                             strata::kernels::qsa_block_scores(st.idx_pooled, st.idx_dead, m.q_idx + t0 * 512, steps0, nb,
                                                               m.max_blocks, s, m.sel_scores, m.cs, active);
+                        if (static const bool route_trace = std::getenv("STRATA_SELECT_ROUTE_TRACE") != nullptr; route_trace)
+                            std::fprintf(stderr, "strata select route: prefill pos=%lld qsa=%lld batch=%lld active=%lld route=%s\n",
+                                         (long long) p0, (long long) qsa_index, (long long) nb,
+                                         (long long) active, native_scores ? "qsa_block_scores_tc" : "qsa_block_scores");
                         strata::kernels::qsa_block_topk(m.sel_scores, steps0, nb, m.max_blocks, m.cap, s,
                                                         m.sel_ids + t0 * m.cap, m.cs, active);
                     }
