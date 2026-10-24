@@ -117,6 +117,14 @@ def main():
                 repeats *= 2
             cases.append({'name':f'{segment}-{target}','prefix':target,'tail':a.tail,
                           'corpus_repetitions':repeats,'ids':ids[:target+a.tail+1]})
+    max_context = None
+    for i, arg in enumerate(configs['base']['args'][:-1]):
+        if arg == '--max-context': max_context = int(configs['base']['args'][i + 1])
+    if max_context is not None:
+        for case in cases:
+            if len(case['ids']) + 1 > max_context:
+                raise ValueError(f"{case['name']}: {len(case['ids'])} prompt tokens plus one generated token "
+                                 f"exceed --max-context {max_context}")
     a.out = a.out.resolve()
     a.out.mkdir(parents=True,exist_ok=False)
     manifest = {'binary_sha256':binary_hash,'harness_sha256':digest(__file__),
