@@ -8,8 +8,11 @@ not an implementation of the upstream Triton kernel or a performance claim.
 """
 
 import argparse
+from array import array
 import json
 from collections import OrderedDict
+import struct
+import sys
 
 
 class Clock:
@@ -164,6 +167,39 @@ def replay(records, slots, block_bytes):
     }
 
 
+def qsa_dump_records(path, page_size):
+    """Actual prompt selections from STRATA_QSA_DUMP_STEPS=1, one query per record.
+
+    This is a what-if cache replay. Prompt attention does not call the streamed
+    decode resolver, so these records have no GPU miss count to validate against.
+    """
+    if sys.byteorder != "little" or array("i").itemsize != 4:
+        raise RuntimeError("the QSA dump contains little-endian 32-bit integers")
+    with open(path, "rb") as source:
+        while header := source.read(16):
+            if len(header) != 16:
+                raise ValueError("truncated QSA dump header")
+            layer, pos0, n_q, cap = struct.unpack("<4i", header)
+            if layer < 0 or pos0 < 0 or not 0 < n_q <= 65536 or not 0 < cap <= 65536:
+                raise ValueError(f"invalid QSA dump record: {(layer, pos0, n_q, cap)}")
+            ids_raw = source.read(n_q * cap * 4)
+            steps_raw = source.read(n_q * 4 * 4)
+            if len(ids_raw) != n_q * cap * 4 or len(steps_raw) != n_q * 4 * 4:
+                raise ValueError("truncated QSA dump selection/steps")
+            ids, steps = array("i"), array("i")
+            ids.frombytes(ids_raw)
+            steps.frombytes(steps_raw)
+            for q in range(n_q):
+                pos, n_kv, _, width = steps[q * 4:q * 4 + 4]
+                if pos != pos0 + q or n_kv != pos + 1 or not 0 < width <= cap:
+                    raise ValueError(f"invalid QSA step at layer {layer}, query {q}: {(pos, n_kv, width)}")
+                cells = ids[q * cap:q * cap + width]
+                if any(cell < 0 or cell > pos for cell in cells):
+                    raise ValueError(f"out-of-range QSA cell at layer {layer}, query {q}")
+                yield {"blocks": list(dict.fromkeys(cell // page_size for cell in cells)),
+                       "layer": layer, "pos": pos}
+
+
 def selftest():
     simple = [{"blocks": [0]}, {"blocks": [1]}, {"blocks": [0]}, {"blocks": [2]}]
     result = replay(simple, 2, 3264)
@@ -194,13 +230,22 @@ def main():
     parser.add_argument("--block-bytes", type=int, default=3264, help="K8V4 bytes per page")
     parser.add_argument("--selftest", action="store_true")
     parser.add_argument("--synthetic", choices=("shared-prefix", "disjoint-context"))
+    parser.add_argument("--qsa-dump", help="prompt selection dump made with STRATA_QSA_DUMP_STEPS=1")
+    parser.add_argument("--page-size", type=int, default=4, help="cells per KV page in --qsa-dump")
     parser.add_argument("--calls", type=int, default=160)
     args = parser.parse_args()
     if args.selftest:
         selftest()
         return
-    if args.slots < 1 or args.block_bytes < 1 or args.calls < 1:
-        parser.error("slots, block bytes, and calls must be positive")
+    if args.slots < 1 or args.block_bytes < 1 or args.calls < 1 or args.page_size < 1:
+        parser.error("slots, block bytes, calls, and page size must be positive")
+    if args.qsa_dump:
+        if args.trace or args.synthetic:
+            parser.error("choose one trace input")
+        report = replay(qsa_dump_records(args.qsa_dump, args.page_size), args.slots, args.block_bytes)
+        report["source_kind"] = "real prompt selections; hypothetical sequential-query cache replay, not streamed decode"
+        print(json.dumps(report, indent=2))
+        return
     if args.synthetic:
         if args.trace:
             parser.error("choose a trace or --synthetic")
