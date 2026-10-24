@@ -46,7 +46,7 @@ Previous lists had 110 implementation entries and 31 benchmark entries, includin
 
 5. **Measurement and correctness requirements — apply to every candidate**
 
-   1. **Partial:** An opt-in per-window acceptance/dispatch trace is built in `generate.cpp`; serial windows report counter deltas and pipeline windows explicitly mark dispatch as overlapped. Runtime parity, overhead and route-frequency analysis remain pending while the service is stopped to free RAM. Pinned-stage per-stream fences from #3483 remain to evaluate. See [trace notes](bench/volta-turing/window-trace.md).
+   1. **Complete on single GPU; pipeline hardware pending:** The opt-in per-window trace passed a four-leg RTX 2060 SUPER/K8V4 full-model gate: identical 4K/16K text, work and memory budgets; 124/125 contiguous serial windows in both traced legs; exact summed acceptance/offers; matching per-window width decisions; and no detectable overhead beyond run drift. The 4K/16K width frequencies and complete-window dispatch counters are recorded. Pipeline traces require a multi-GPU split for runtime qualification, and pinned-stage fences remain under the host-staging work. See [trace audit](bench/volta-turing/window-trace.md).
    2. **Ongoing:** Use same-day ABBA comparisons at short/4K/16K/32K with identical model, chunks, ring, residency, memory budgets and prefix state.
    3. **Ongoing:** Record accepted tokens/s, prefill/TTFT, draft/verify time, acceptance, PCIe traffic, graph/temporary bytes, cache slots, clocks and variance; separate profiling from serving timing.
    4. **Ongoing:** Check exact bytes where expected; otherwise teacher-forced scores/KL and task quality. Run kv1188 and appropriate CUDA sanitizers.
