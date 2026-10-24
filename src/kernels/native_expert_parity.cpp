@@ -46,7 +46,7 @@ static double rel(const std::vector<float>& a, const std::vector<float>& b) {
 
 namespace {
 constexpr int NT = 3, E = 7;
-constexpr int64_t H = 2560, FF = 640;
+int64_t H = 2560, FF = 640;
 
 // The three ways and the dequantizers for one expert blob; returns the number of failed checks.
 int check_blob(const cpu::NativeFmt& f, const std::vector<uint8_t>& blob, int seed, const std::string& label,
@@ -541,7 +541,9 @@ int main(int argc, char** argv) {
     setvbuf(stdout, nullptr, _IONBF, 0);   // keep the trail on a crash
     if (argc < 2) {
         std::fprintf(stderr, "usage: native_expert_parity <shard.gguf> [layer ...]\n"
+                             "       native_expert_parity --flint <flint.gguf> [layer ...]\n"
                              "       native_expert_parity --synthetic GU/DOWN ...   (ggml type names, e.g. q4_K/q5_1)\n"
+                             "       native_expert_parity --flint-synthetic GU/DOWN ... (2048/512 experts)\n"
                              "       native_expert_parity --q5_1-min\n"
                              "       native_expert_parity --bf16-embd\n");
         return 2;
@@ -562,7 +564,8 @@ int main(int argc, char** argv) {
         failures += check_q5_1_min(s);
     } else if (mode == "--bf16-embd") {
         failures += check_bf16_embd(s);
-    } else if (mode == "--synthetic") {
+    } else if (mode == "--synthetic" || mode == "--flint-synthetic") {
+        if (mode == "--flint-synthetic") { H = 2048; FF = 512; }
         for (int i = 2; i < argc; ++i) {
             const std::string arg = argv[i];
             const size_t slash = arg.find('/');
@@ -579,10 +582,13 @@ int main(int argc, char** argv) {
             failures += check_blob(f, synthetic_blob(f, i), i, "synthetic", s);
         }
     } else {
-        const strata::GgufModel model(strata::gguf_split_paths(argv[1]));
+        const bool flint = mode == "--flint";
+        if (flint && argc < 3) { std::fprintf(stderr, "--flint needs a GGUF path\n"); return 2; }
+        if (flint) { H = 2048; FF = 512; }
+        const strata::GgufModel model(strata::gguf_split_paths(argv[flint ? 2 : 1]));
         std::vector<int> layers;
-        for (int i = 2; i < argc; ++i) layers.push_back(std::atoi(argv[i]));
-        if (layers.empty()) layers = {0, 1, 2, 3, 20, 47};
+        for (int i = flint ? 3 : 2; i < argc; ++i) layers.push_back(std::atoi(argv[i]));
+        if (layers.empty()) layers = flint ? std::vector<int>{2, 14, 20, 47} : std::vector<int>{0, 1, 2, 3, 20, 47};
         for (int l : layers) {
             const strata::TensorInfo* t[3] = {};
             const uint8_t* data[3] = {};
@@ -597,6 +603,12 @@ int main(int argc, char** argv) {
             std::string err;
             if (!cpu::native_fmt((int) t[0]->type, (int) t[2]->type, H, FF, f, err)) {
                 std::printf("layer %d: %s\n", l, err.c_str()); ++failures; continue;
+            }
+            if (!strata::kernels::native_expert_supported(f.gu_type, f.d_type, H, FF)) {
+                std::printf("layer %d: this build has no GPU kernel for %s/%s\n", l,
+                            ggml_type_name((ggml_type) f.gu_type), ggml_type_name((ggml_type) f.d_type));
+                ++failures;
+                continue;
             }
             std::vector<uint8_t> blob(f.bytes);
             std::memcpy(blob.data(), data[0] + (size_t) E * f.up_off, f.up_off);

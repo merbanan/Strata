@@ -31,6 +31,18 @@ compute different layers. A native Flint driver still needs:
 4. Hybrid weight placement for the 8 GiB RTX 2060 SUPER, exact-logit and
    generated-text checks, then PP/TG and quality benchmarks.
 
+The native grouped expert path now has an opt-in `-DSTRATA_FLINT_EXPERTS=ON`
+build option for Flint's IQ3_S and Q4_K down rows. With this option on, a
+real-weight parity check on the RTX 2060 SUPER passed layers 2, 14, 20 and 47
+at the model's 2048/512 expert geometry, covering IQ4_XS, Q4_K and IQ3_S
+downs. GPU output differed from a float reference by 1.03–1.14% relative;
+CPU output by 1.48–1.75%, and all four checks passed the existing 3% gate.
+Run it with `native_expert_parity --flint <flint.gguf> 2 14 20 47`.
+The `native_expert_parity_flint_formats` synthetic CTest also passes on the
+RTX 2060 SUPER without requiring the model file.
+This enables the expert arithmetic needed by a future native driver; it does
+not yet connect those kernels to Flint inference or measure a cache speedup.
+
 Current upstream `ggml-org/llama.cpp` implements Flint in
 [`src/models/flint.cpp`](https://github.com/ggml-org/llama.cpp/blob/master/src/models/flint.cpp).
 That runtime is the reference for the first benchmark, not a Strata-native
