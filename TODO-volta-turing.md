@@ -127,7 +127,7 @@ Previous lists had 110 implementation entries and 31 benchmark entries, includin
 
    1. **Partial:** Extend measured solo-graph lifetimes/free-memory deltas to batch graphs and arena ownership; distinguish owned bytes from allocator deltas.
    2. **Complete:** Prototype and test bounded solo-graph LRU. Caps 2/3 were not adopted; archive their exact patches, quality results and regressions.
-   3. **Partial:** A standalone 4,307-node same-size update succeeded on RTX 2060 SUPER (2.08 ms update versus 19.98 ms fresh instantiate) with changed-input replay; a 4,306-node update failed as expected. Explore actual verifier batch state, common padded topology and reuse before adoption.
+   3. **Partial:** A standalone 4,307-node same-size update succeeded on RTX 2060 SUPER; changed kernel parameters and an output pointer survived 16 alternating changed-input updates (2.05 ms mean update versus 19.28 ms fresh instantiate in the follow-up). A 4,306-node update failed as expected. Explore actual verifier batch state, common padded topology and reuse before adoption.
    4. **Pending:** Include recurring preparation/recapture cost in lookup-policy measurements.
    5. **Pending:** Test padded CPU/GDN/KV state, mixed prefill/decode, concurrency, eviction/recreation, changing inputs and low-memory fallback.
    6. **Pending:** Measure full rounds and graph-padding inflation separately from draft time.

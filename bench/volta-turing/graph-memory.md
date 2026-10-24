@@ -125,9 +125,12 @@ returns `cudaErrorGraphExecUpdateFailure`, and the original updated executable
 still passes replay afterward. Each replay checks all 32 output lanes against
 an independent host sum.
 
-In this single unloaded-GPU run, initial instantiate took 18.49 ms, same-size
-update 2.08 ms, and fresh instantiate of the second graph 19.98 ms. These
-host times show API feasibility, not steady-state inference speed: this graph
-contains simple kernels rather than verifier graph topology, pointers, CPU/GDN
-state, KV state or batch layouts. A model recapture, state validation and
+In the first unloaded-GPU run, initial instantiate took 18.49 ms, same-size
+update 2.08 ms, and fresh instantiate of the second graph 19.98 ms. A follow-up
+changed the graph's output pointer as well as kernel scalars, then alternated
+between the two graphs for 16 updates and changed-input replays. All passed:
+the mean update took 2.05 ms, the first update 2.70 ms, and a fresh second
+instantiate 19.28 ms. These host times show API feasibility, not steady-state
+inference speed: this graph contains simple kernels rather than verifier graph
+topology, full session state, KV state or batch layouts. A model recapture, state validation and
 full-round timing are required before engine adoption.
