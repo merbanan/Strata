@@ -22,7 +22,8 @@ file's 779 tensors against its expected shape. It deliberately rejects an
 inference request because the existing Flash-Next and Qwen3.6 drivers would
 compute different layers. A native Flint driver still needs:
 
-1. A tokenizer and chat-template path that matches the Flint GGUF.
+1. Bring the now oracle-checked Python Flint tokenizer into the serving/native
+   path and apply the GGUF's chat template.
 2. Per-layer sliding/full KV state, conditional RoPE, Q/K RMSNorm and sinks,
    with decode and prompt attention checked against a reference.
 3. The two dense FFNs and the 47 top-6 MoE layers, including Flint's router
@@ -86,3 +87,20 @@ single-turn CLI run again answered Stockholm. This improves an upstream
 reference configuration; Strata-native expert residency, task quality and
 longer-context memory admission are still unmeasured. Keep this setting
 opt-in and leave GPU headroom for other applications.
+
+The same `-ngl 49 -ncmoe 31` placement also completed PP2048 at
+278.46/278.99 tok/s and TG128 at 38.20/36.81 tok/s. The same-day initial
+placement measured PP2048 at 206.59/215.20 and TG128 at 16.05/16.84
+tok/s, so the mean-rate gains are 1.32x PP and 2.28x TG at this longer
+case. These still do not measure a continuous serving request.
+
+## Tokenizer boundary
+
+`tools/strata_tokenizer.py` now implements Flint's ordered number, CJK and
+letter/punctuation pre-tokenization passes. A single combined regex changed
+three of 66 preliminary cases around whitespace next to CJK; the ordered
+implementation matches upstream `llama-tokenize` on 117 plain text cases,
+including 100 seeded random strings, and six special-token checks with and
+without special parsing. The local tokenizer regression suite passes. This
+validates Python token IDs on those cases, not the server chat template or a
+full-model Strata output path.

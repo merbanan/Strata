@@ -95,5 +95,16 @@ class ByteCache(unittest.TestCase):
             self.assertEqual(list(pool.map(decode, texts)), texts)
 
 
+class FlintPretokenizer(unittest.TestCase):
+    def test_ordered_passes_preserve_cjk_and_adjacent_whitespace(self):
+        tokens = [ST.BYTE_TO_UNICODE[b] for b in range(256)]
+        t = ST.Tokenizer(tokens, [], pre="flint")
+        self.assertEqual(list(t._plain_pieces("123456789")), ["123", "456", "789"])
+        self.assertEqual(list(t._plain_pieces("ナ漢\t\tナ")), ["ナ漢", "\t\t", "ナ"])
+        self.assertEqual(list(t._plain_pieces("  字\n")), ["  ", "字", "\n"])
+        for text in ("ナ漢\t\tナ!+カ_aY,á+́", "  字\n123456789", "hello\n\nworld"):
+            self.assertEqual(t.decode(t.encode(text), errors="strict"), text)
+
+
 if __name__ == "__main__":
     unittest.main()

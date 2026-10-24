@@ -63,6 +63,21 @@ QWEN35_PATTERN = (
     r"|\s+"
 )
 
+# Flint uses three ordered pre-tokenization expressions in llama.cpp:
+# numbers of up to three digits, CJK runs, then this letter/punctuation split.
+# They must be separate passes: merging them as alternatives lets the final
+# expression consume a tab before a CJK run, which changes token IDs.
+FLINT_PATTERN = (
+    r"[^\r\n\p{L}\p{N}]?[\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}]*"
+    r"[\p{Ll}\p{Lm}\p{Lo}\p{M}]+"
+    r"(?:'[sS]|'[tT]|'[rR][eE]|'[vV][eE]|'[mM]|'[lL][lL]|'[dD])?"
+    r"|[^\r\n\p{L}\p{N}]?[\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}]+"
+    r"[\p{Ll}\p{Lm}\p{Lo}\p{M}]*"
+    r"(?:'[sS]|'[tT]|'[rR][eE]|'[vV][eE]|'[mM]|'[lL][lL]|'[dD])?"
+    r"| ?[\p{P}\p{S}]+[\r\n]*"
+    r"|\s*[\r\n]+|\s+(?!\S)|\s+"
+)
+
 
 class Tokenizer:
     def __init__(self, tokens: list[str], merges: list[str], token_types: list[int] | None = None,
@@ -86,7 +101,9 @@ class Tokenizer:
             if parts[0] not in self.ids or parts[1] not in self.ids:
                 raise ValueError("merge %d names a token outside the vocabulary: %r" % (i, m))
             self.ranks[(parts[0], parts[1])] = i
-        self._re = regex.compile(QWEN35_PATTERN)
+        self._re = regex.compile(FLINT_PATTERN if pre == "flint" else QWEN35_PATTERN)
+        self._flint_presplit = (regex.compile(r"\p{N}{1,3}"),
+                                regex.compile(r"[一-龥぀-ゟ゠-ヿ]+")) if pre == "flint" else ()
 
         # The literals matched directly instead of being run through BPE.  GGUF token types: 3 = CONTROL,
         # 4 = USER_DEFINED.  The two classes behave DIFFERENTLY and llama.cpp's own tokenizer settled which:
@@ -214,12 +231,45 @@ class Tokenizer:
 
     PIECE_CACHE_MAX = 200_000    # pre-tokenizer pieces remembered (an agent resends its whole history every turn)
 
+    def _plain_pieces(self, text: str):
+        if not self._flint_presplit:
+            yield from self._re.findall(text)
+            return
+        spans = [(text, False)]
+        for pat in self._flint_presplit:
+            next_spans = []
+            for span, fixed in spans:
+                if fixed:
+                    next_spans.append((span, True))
+                    continue
+                at = 0
+                for match in pat.finditer(span):
+                    if match.start() > at:
+                        next_spans.append((span[at:match.start()], False))
+                    next_spans.append((match.group(), True))
+                    at = match.end()
+                if at < len(span):
+                    next_spans.append((span[at:], False))
+            spans = next_spans
+        for span, fixed in spans:
+            if fixed:
+                yield span
+            else:
+                at = 0
+                for match in self._re.finditer(span):
+                    if match.start() != at:
+                        raise ValueError("Flint pre-tokenizer did not cover the input")
+                    yield match.group()
+                    at = match.end()
+                if at != len(span):
+                    raise ValueError("Flint pre-tokenizer did not cover the input")
+
     def _encode_plain(self, text: str) -> list[int]:
         out: list[int] = []
         # A piece's ids depend on the piece alone, so repeated pieces (most of a resent conversation) are looked up
         # instead of merged again.  The ids are the ones _bpe gives: this only skips the work.
         cache = self._piece_ids
-        for piece in self._re.findall(text):
+        for piece in self._plain_pieces(text):
             got = cache.get(piece)
             if got is None:
                 mapped = "".join(BYTE_TO_UNICODE[b] for b in piece.encode("utf-8"))
