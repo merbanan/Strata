@@ -173,6 +173,12 @@ and generated;
 full 160K filled-context throughput, memory and quantized-KV quality remain
 unmeasured.
 
+A quick `llama-cli` benchmark of this exact launcher configuration used a
+2529-token repeated-text prompt (`llama-tokenize --show-count`) and 128 output
+tokens. One RTX 2060 SUPER run displayed **466.2 prompt tok/s** and **29.5
+generation tok/s**. The full 160K context was selected, but only the short
+prompt was populated; this does not measure throughput near the context limit.
+
 The same llama.cpp checkout has an experimental per-expert GPU MoE cache
 (`--moe-cache-mib` in `llama-cli`). For a controlled benchmark, the local
 `llama-bench` checkout on the TMP drive was patched to read
