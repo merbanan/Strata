@@ -3720,11 +3720,21 @@ void native_expert_grouped(const NativeExpertLayout& L, const unsigned long long
     const dim3 ggu((unsigned) ((2 * L.n_ff + gu_rows - 1) / gu_rows), (unsigned) gy);
 #if STRATA_EXP_LAYOUTS
 #if defined(STRATA_HIP_GFX906)
-    const int em0 = exp_mode();
+    const int em_base = exp_mode();
+    const int em0 = em_base;
 #else
     // CUDA: the AMD layouts launch a block row per possible group, so a call that strides (a verify window's PCIe
     // call, grid_groups 1..cap) keeps the CUDA layout: V100, 0 groups 11.3 vs 6.5 us, 1 group of 2 29.6 vs 21.3
-    const int em0 = (grid_groups > 0 && grid_groups < cap_groups) ? 0 : exp_mode();
+    const int em_base = (grid_groups > 0 && grid_groups < cap_groups) ? 0 : exp_mode();
+    // Opt-in local screen: keep the default sm75 down and strided PCIe routes, changing only the small resident
+    // IQ3_S/IQ2_S gate/up calls whose complete-call small-group screen beat mode 4. Forced bench modes win.
+    static const bool sm75_gu8_select = [] {
+        const char* v = std::getenv("STRATA_EXP_SM75_GU8_SELECT");
+        return v != nullptr && v[0] == '1';
+    }();
+    const int em0 = sm75_gu8_select && grid_groups == 0 && cap_groups <= 20 &&
+                    (L.gu_type == 21 || L.gu_type == 22) && em_base == 4 && g_exp_mode < 0 &&
+                    std::getenv("STRATA_EXP_MODE") == nullptr ? 8 : em_base;
 #endif
 #endif
 #if STRATA_EXP_LAYOUTS
@@ -3808,7 +3818,7 @@ void native_expert_grouped(const NativeExpertLayout& L, const unsigned long long
     const int d_rows = (!g_old_kernels && !g_no_sub16_gu && L.n_ff == 640) ? (L.d_type == 20 || L.d_type == 40 ? 32 : (L.d_type == 42 ? 16 : 8)) : 8;
     const dim3 gd((unsigned) ((L.n_embd + d_rows - 1) / d_rows), (unsigned) gy);
 #if STRATA_EXP_LAYOUTS
-    const int em0d = sm75_down_em(em0, cap_groups);
+    const int em0d = sm75_down_em(em_base, cap_groups);
     if ((em0d == 7 || em0d == 8) && (L.d_type == 20 || L.d_type == 42)) {
         const dim3 gl((unsigned) ((L.n_embd + LDS_RB - 1) / LDS_RB), (unsigned) cap_groups);
         const size_t sh = (size_t) LDS_NT * (size_t) (L.n_ff / 32) * sizeof(block_q8_1);

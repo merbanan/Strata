@@ -1,7 +1,7 @@
 // src/kernels/native_expert_bench.cpp - the grouped native experts on real GGUF rows: one AMD layout against
 // another, bit for bit, and each one's time.
 //
-//     build/native_expert_bench <shard1.gguf> <layer[,layer...]> <groups> <tokens per group> <ref mode> <mode> [iters]
+//     build/native_expert_bench <shard1.gguf> <layer[,layer...]> <groups> <tokens per group> <ref mode> <mode> [iters] [--with-input]
 //
 // Modes are STRATA_EXP_MODE values.  A group is one expert (distinct blobs, ~2 MB each, so G >= 8 does not fit
 // in L2); its entries read distinct tokens of an 8-token window.  The output must be bitwise equal to the
@@ -29,7 +29,7 @@ namespace K = strata::kernels;
 int main(int argc, char** argv) {
     setvbuf(stdout, nullptr, _IONBF, 0);
     if (argc < 7) {
-        std::fprintf(stderr, "usage: native_expert_bench <shard1.gguf> <layer[,layer]> <groups> <tokens> <ref mode> <mode> [iters]\n");
+        std::fprintf(stderr, "usage: native_expert_bench <shard1.gguf> <layer[,layer]> <groups> <tokens> <ref mode> <mode> [iters] [--with-input]\n");
         return 2;
     }
     strata::GgufFile gguf(argv[1]);
@@ -41,6 +41,8 @@ int main(int argc, char** argv) {
     }
     const int G = std::atoi(argv[3]), T = std::atoi(argv[4]), mref = std::atoi(argv[5]), mode = std::atoi(argv[6]);
     const int iters = argc > 7 ? std::atoi(argv[7]) : 200;
+    const bool with_input = argc > 8 && std::strcmp(argv[8], "--with-input") == 0;
+    if (argc > 8 && !with_input) { std::fprintf(stderr, "unknown option: %s\n", argv[8]); return 2; }
     const int NTOK = 8;
     if (T < 1 || T > NTOK || G < 1) { std::fprintf(stderr, "tokens 1..8, groups >= 1\n"); return 2; }
     const int64_t H = 2560, FF_FULL = 640, FF = FF_FULL;   // Flash-Next's expert geometry
@@ -105,7 +107,7 @@ int main(int argc, char** argv) {
             start[g] = g * T;
             for (int j = 0; j < T; ++j) {
                 dst[g * T + j] = g * T + j;
-                tok[g * T + j] = (g * 3 + j) % NTOK;
+                tok[g * T + j] = with_input ? j : (g * 3 + j) % NTOK;
             }
         }
         start[G] = NE;
@@ -118,6 +120,7 @@ int main(int argc, char** argv) {
         cudaMemcpy(dtok, tok.data(), (size_t) NE * 4, cudaMemcpyHostToDevice);
         K::quantize_q8_1_rows((const float*) dx, NTOK, H, dxq, s);
         auto run = [&](int m, int phase) {
+            if (with_input) K::quantize_q8_1_rows((const float*) dx, T, H, dxq, s);
             K::native_expert_set_mode(m, phase);
             K::native_expert_grouped(L, dptr, dstart, dn, ddst, dtok, G, NE, dxq, dscr, dout, s);
         };

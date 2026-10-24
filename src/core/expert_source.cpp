@@ -3926,6 +3926,7 @@ void expert_pool_dispatch_multi(ExpertDispatch& d, const float* x_f, const int32
             ++groups;
         }
         P.start[groups] = entries;
+        const int64_t resident_entries = entries;
         const uint64_t bb = lay.blob_bytes(d.layers);
         for (int q = 0; q < fetches; ++q) {       // the PCIe groups: staging slot q, entries after the VRAM ones
             const int64_t i0 = pcie_i0[q];
@@ -3987,6 +3988,18 @@ void expert_pool_dispatch_multi(ExpertDispatch& d, const float* x_f, const int32
         P.counts[0] = groups;
         P.counts[1] = entries;
         P.counts[2] = fetches;
+        static const bool exp_route_trace = [] {
+            const char* v = std::getenv("STRATA_EXP_ROUTE_TRACE");
+            return v != nullptr && v[0] == '1';
+        }();
+        if (exp_route_trace && native) {
+            const auto& f = lay.fmt[(size_t) d.layers];
+            std::fprintf(stderr,
+                         "strata expert route: layer=%lld gu=%d down=%d tokens=%lld k=%lld "
+                         "resident_groups=%d resident_entries=%lld pcie_groups=%d pcie_entries=%lld\n",
+                         (long long) d.layers, f.gu_type, f.d_type, (long long) n_tok, (long long) k,
+                         groups, (long long) resident_entries, fetches, (long long) (entries - resident_entries));
+        }
         std::atomic_thread_fence(std::memory_order_seq_cst);
         pt("publish", fetches);
         if (P.publish) P.publish(P.ctx);
