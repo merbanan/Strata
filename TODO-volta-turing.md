@@ -163,7 +163,7 @@ Previous lists had 110 implementation entries and 31 benchmark entries, includin
 19. **V100/Volta qualification — requires hardware / C25**
 
    1. **Hardware:** Run V100 separately before selecting sm70 defaults; also qualify T4 independently of the 2060 SUPER.
-   2. **Pending:** Compare merbanan/v100 e24e2b2e, upstream PF_WMMA2 and QPN register-fragment scheduling as design references.
+   2. **Complete source comparison:** Reviewed `merbanan/v100` through `e24e2b2e`, its Q2_0 and K-quant register-fragment kernels, upstream `STRATA_PF_WMMA2`, and 1Cat QPN MoE/Turing dispatch. The V100 branch's large prompt gains use Q2_0 or K-quants and do not directly qualify the installed mixed-format IQ3_XXS pack. WMMA2 covers only IQ2_S gate/up and IQ4_NL down; QPN's NVFP4/MXFP4 codes are not this GGUF pack. Original-byte, per-format experiments and V100 timing remain in 19.3–19.5. See [comparison](bench/volta-turing/v100-design-comparison.md).
    3. **Pending:** Extend the Q2 approach to IQ4_NL down and IQ2_S gate/up, then IQ3 if useful; retain small-batch DP4A.
    4. **Pending:** Validate lossless prepacking/LUT permutations and inverse mappings while retaining original GGUF bytes and source licenses.
    5. **Hardware:** Measure registers, spills, parity/numerics, occupancy and full inference on V100; compilation alone is insufficient.
