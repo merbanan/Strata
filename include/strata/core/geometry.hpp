@@ -58,11 +58,16 @@ struct ModelGeometry {
     int64_t n_ff_shexp = 640;       ///< the shared expert's FFN width (qwen4exp: equal to n_ff, read_geometry checks)
     int64_t n_ff_dense = 0;         ///< Flint feed_forward_length for its leading dense layers
     int64_t n_dense_lead = 0;       ///< Flint leading_dense_block_count
+    int64_t n_swa = 0;              ///< Flint attention.sliding_window
+    uint64_t sliding_mask = 0;      ///< Flint attention.sliding_window_pattern, one bit per layer
+    uint64_t rope_mask = 0;         ///< Flint attention.rope_pattern, one bit per layer
     ModelFamily family = ModelFamily::Qwen4Exp;
     int64_t n_mtp_layers = 0;       ///< MTP blocks inside the model file, after the trunk (qwen35moe: blk.40)
 
     constexpr bool has_indexer() const { return idx_q_heads > 0; }              ///< false: dense attention only
     constexpr bool has_hyper_connections() const { return hc > 0; }             ///< false: plain pre-norm residual
+    constexpr bool flint_sliding(int64_t layer) const { return layer >= 0 && layer < 64 && (sliding_mask & (uint64_t(1) << layer)); }
+    constexpr bool flint_rope(int64_t layer) const { return layer >= 0 && layer < 64 && (rope_mask & (uint64_t(1) << layer)); }
     constexpr int64_t hc_dim() const { return hc * n_embd; }
     /// `layer % qsa_interval == qsa_interval - 1` is full attention.  Derived, not a second list.
     constexpr int64_t n_qsa_layers() const { return n_layers / qsa_interval; }

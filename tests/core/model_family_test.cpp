@@ -190,6 +190,15 @@ int real_model(const std::string& any) {
                     (long long) g.ssm_state_size, (long long) g.ssm_conv_channels, (long long) g.ssm_d_conv,
                     (long long) g.n_expert, (long long) k, (long long) g.n_ff, (long long) g.n_ff_shexp,
                     (long long) g.hc, (long long) g.idx_q_heads, (long long) g.n_vocab);
+        if (g.family == strata::ModelFamily::Flint) {
+            int sliding = 0, rope = 0;
+            for (int64_t l = 0; l < g.n_layers; ++l) {
+                sliding += g.flint_sliding(l);
+                rope += g.flint_rope(l);
+            }
+            std::printf("  Flint attention: sliding %d, full %lld, RoPE %d, window %lld\n",
+                        sliding, (long long) g.n_layers - sliding, rope, (long long) g.n_swa);
+        }
         const std::string mm = strata::core::compiled_geometry_mismatch(g);
         std::printf("  compiled kernels: %s\n", mm.empty() ? "match" : mm.c_str());
         size_t n = 0;
@@ -316,8 +325,11 @@ int main(int argc, char** argv) {
         int64_t top_k = 0;
         std::string err;
         check(geometry_of(path, g, top_k, err) && g.n_layers == 4 && g.n_gdn_layers() == 0 &&
-                  g.n_dense_lead == 1 && g.n_ff_dense == 64 && top_k == 2,
-              "Flint geometry preserves dense lead and all-attention layers");
+                  g.n_dense_lead == 1 && g.n_ff_dense == 64 && top_k == 2 &&
+                  g.n_swa == 9 && g.sliding_mask == 0x6 && g.rope_mask == 0x6 &&
+                  !g.flint_sliding(0) && g.flint_sliding(1) && !g.flint_sliding(3) &&
+                  !g.flint_rope(0) && g.flint_rope(2),
+              "Flint geometry preserves dense lead, all-attention layers and per-layer patterns");
         const auto ts = tensors_of(g);
         fixture::write(path, kv, ts);
         const strata::GgufModel model({path.string()});

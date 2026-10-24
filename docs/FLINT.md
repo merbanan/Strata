@@ -242,8 +242,10 @@ The runtime still refuses Flint in `model_family_runs` and its Flash-Next
    use full context. FP16 K/V with four 128-wide KV heads costs 2048 bytes
    per layer-token. At context 2048, all-full KV is 196 MiB versus about
    91 MiB with sliding rings; at context 8192, 784 versus 259 MiB. These
-   are capacity estimates, not measured allocator savings. Spend the released
-   VRAM on the prefill workspace or expert cache, and validate sink and RoPE
+   are capacity estimates, not measured allocator savings. The GGUF reader now
+   preserves the per-layer sliding and RoPE masks and sliding-window size in
+   `ModelGeometry`; the native KV allocator still needs to use them. Spend the
+   released VRAM on the prefill workspace or expert cache, and validate sink and RoPE
    behavior against the reference.
 4. **Connect and measure Flint's sigmoid router and top-6 combine.**
    Flint applies sigmoid to 256 router logits, selects six experts and

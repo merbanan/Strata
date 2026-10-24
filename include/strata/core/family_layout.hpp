@@ -63,6 +63,13 @@ inline bool geometry_from_gguf(const strata::GgufFile& meta, ModelGeometry& g, i
     if (family == strata::ModelFamily::Flint) {
         num("feed_forward_length", g.n_ff_dense);
         num("leading_dense_block_count", g.n_dense_lead);
+        num("attention.sliding_window", g.n_swa);
+        for (int64_t l = 0; l < block_count; ++l) {
+            if (meta.get(p + "attention.sliding_window_pattern")->items[(size_t) l].u)
+                g.sliding_mask |= uint64_t(1) << l;
+            if (meta.get(p + "attention.rope_pattern")->items[(size_t) l].u)
+                g.rope_mask |= uint64_t(1) << l;
+        }
         g.n_mtp_layers = 0;
         g.qsa_interval = 1; // every Flint layer has attention; sliding/full is a separate per-layer pattern
         g.hc = g.hc_lr = 0;

@@ -638,6 +638,7 @@ inline std::string check_architecture_flint(const GgufFile& g) {
     const auto layers = g.get("flint.block_count")->u;
     const auto dense = g.get("flint.leading_dense_block_count")->u;
     if (!layers || dense >= layers) return "flint.leading_dense_block_count must be smaller than block_count";
+    if (layers > 64) return "flint.block_count exceeds the 64-layer pattern capacity";
     if (!g.get("flint.attention.sliding_window")->u) return "flint.attention.sliding_window must be positive";
     for (const char* key : {"flint.attention.sliding_window_pattern", "flint.attention.rope_pattern"}) {
         const MetaValue* v = g.get(key);

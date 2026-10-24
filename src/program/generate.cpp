@@ -9890,7 +9890,7 @@ int main(int argc, char** argv) {
             std::string e;
             const auto ranked = strata::core::rank_learned_profile(g.n_layers, g.n_expert, resident, heat,
                                                                    profile_loaded,
-                                                                   g.family == strata::ModelFamily::Flint ? 2 : 0);
+                                                                   g.family == strata::ModelFamily::Flint ? g.n_dense_lead : 0);
             if (strata::core::write_expert_profile(o.expert_profile_save, g.n_layers, g.n_expert, ranked, e))
                 std::fprintf(stderr, "strata serve: expert profile saved to %s (%s)\n", o.expert_profile_save.c_str(),
                              why);
