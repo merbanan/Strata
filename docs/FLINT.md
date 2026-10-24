@@ -255,9 +255,14 @@ The runtime still refuses Flint in `model_family_runs` and its Flash-Next
    tested llama.cpp SLRU cache lost decode speed at 1–2 GiB. Reuse Strata's
    bounded adaptive swaps, CPU/GPU overlap and prompt-informed refill, but
    first measure held-out routing hits, upload MiB, CPU miss time and GPU
-   waits. `tools/make_profile.py` fixes 48x512; accept Flint's 49x256 shape
-   with no routed experts in layers 0–1. `ExpertCache` storage itself accepts
-   dynamic dimensions. Compare every cache change with static placement.
+   waits. `tools/make_profile.py` now accepts Flint's 49x256 shape and excludes
+   routed experts from dense layers 0–1; the binary profile round trip is
+   tested. Build one with `--n-layer 49 --n-expert 256 --dense-lead 2 --no-base
+   --out PROFILE`. The shipped 48x512 base profile does not match Flint, so
+   `--no-base` is required unless a 49x256 base is provided. `ExpertCache`
+   storage accepts dynamic dimensions, but a native Flint driver must still
+   connect routing traces and cache residency. Compare each cache change with
+   static placement.
 6. **Keep packed MMQ coverage per layer.** `moe_mmq.cu` recognizes Flint's
    IQ3_S, IQ4_XS and Q4_K formats (Q4_K requires the K-quant build option).
    The Qwen3.6 driver enables MMQ only if every layer passes its format and

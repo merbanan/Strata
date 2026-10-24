@@ -19,7 +19,7 @@ carries the measured hit rates that say how far off that goes (94.9% claimed aga
 held, on the IQ3_S 4-way rig).
 
     python tools/make_profile.py [TRACE ...] [--base data/expert-profile.bin | --no-base] [--reorder] [--out PATH]
-                                 [--n-expert 256]      (a pruned model: GSQ-RCO Coder keeps 256 of 512)
+                                 [--n-layer 49 --n-expert 256 --dense-lead 2 --no-base] (Flint)
 
 A routing trace comes from a one-shot engine run with `--dump-routing FILE` (a prompt typical of your use; the
 routed experts of every layer and position are written).  Point the model config's `--expert-profile` at the result.
@@ -34,17 +34,17 @@ N_LAYER, N_EXPERT = 48, 512
 MAGIC, VERSION = b"STRP", 1
 
 
-def read_profile(path, n_expert=N_EXPERT):
+def read_profile(path, n_expert=N_EXPERT, n_layer=N_LAYER):
     blob = Path(path).read_bytes()
     if blob[:4] != MAGIC:
         raise SystemExit(f"{path}: not a Strata profile")
     ver, nl, ne, slots, n = struct.unpack_from("<5I", blob, 4)
-    if (nl, ne) != (N_LAYER, n_expert):
-        raise SystemExit(f"{path}: {nl}x{ne}, not {N_LAYER}x{n_expert}")
+    if (nl, ne) != (n_layer, n_expert):
+        raise SystemExit(f"{path}: {nl}x{ne}, not {n_layer}x{n_expert}")
     return [struct.unpack_from("<HH", blob, 24 + 4 * i) for i in range(n)]
 
 
-def read_trace(path, n_expert=N_EXPERT):
+def read_trace(path, n_expert=N_EXPERT, n_layer=N_LAYER, dense_lead=0):
     """(layer, k, k expert ids, k weights) records, as `--dump-routing` writes them."""
     blob = Path(path).read_bytes()
     off, freq = 0, defaultdict(int)
@@ -52,25 +52,26 @@ def read_trace(path, n_expert=N_EXPERT):
         layer, k = struct.unpack_from("<ii", blob, off)
         off += 8
         for e in struct.unpack_from("<%di" % k, blob, off):
-            if 0 <= layer < N_LAYER and 0 <= e < n_expert:
+            if dense_lead <= layer < n_layer and 0 <= e < n_expert:
                 freq[(layer, e)] += 1
         off += 8 * k                                    # the ids and the weights
     return freq
 
 
-def write_profile(path, ranked, n_expert=N_EXPERT):
-    table = [[-1] * n_expert for _ in range(N_LAYER)]
+def write_profile(path, ranked, n_expert=N_EXPERT, n_layer=N_LAYER):
+    table = [[-1] * n_expert for _ in range(n_layer)]
     for slot, (layer, e) in enumerate(ranked):
         table[layer][e] = slot
     with open(path, "wb") as f:
-        f.write(MAGIC + struct.pack("<5I", VERSION, N_LAYER, n_expert, len(ranked), len(ranked)))
+        f.write(MAGIC + struct.pack("<5I", VERSION, n_layer, n_expert, len(ranked), len(ranked)))
         for layer, e in ranked:
             f.write(struct.pack("<HH", layer, e))
-        for layer in range(N_LAYER):
+        for layer in range(n_layer):
             f.write(struct.pack("<%di" % n_expert, *table[layer]))
 
 
-def rank_profile(base_pairs, trace_freq, n_expert=N_EXPERT, no_base=False, reorder=False):
+def rank_profile(base_pairs, trace_freq, n_expert=N_EXPERT, no_base=False, reorder=False,
+                 n_layer=N_LAYER, dense_lead=0):
     """The ranked (layer, expert) list and the counts it was built from (`base`, `trace`, `fill`).
 
     Default: the base's order, then the traces' pairs most frequent first, then the fill.  With `reorder` (or
@@ -81,7 +82,7 @@ def rank_profile(base_pairs, trace_freq, n_expert=N_EXPERT, no_base=False, reord
     def take(pairs, key):
         for p in pairs:
             p = (int(p[0]), int(p[1]))
-            if p not in seen:
+            if dense_lead <= p[0] < n_layer and 0 <= p[1] < n_expert and p not in seen:
                 seen.add(p)
                 ranked.append(p)
                 counts[key] += 1
@@ -93,7 +94,7 @@ def rank_profile(base_pairs, trace_freq, n_expert=N_EXPERT, no_base=False, reord
         take(base_pairs, "base")
     if not (no_base or reorder):
         take(trace_pairs, "trace")
-    take(((layer, e) for e in range(n_expert) for layer in range(N_LAYER)), "fill")
+    take(((layer, e) for e in range(n_expert) for layer in range(dense_lead, n_layer)), "fill")
     return ranked, counts
 
 
@@ -106,18 +107,23 @@ def main():
                     help="rank the traces' pairs before the base's (the base, then the fill, follow); needed with a "
                          "base that already ranks every pair, where --base alone cannot change the order")
     ap.add_argument("--out", default=str(ROOT / "data" / "expert-profile.bin"))
+    ap.add_argument("--n-layer", type=int, default=N_LAYER, help="model layer count (default 48)")
     ap.add_argument("--n-expert", type=int, default=N_EXPERT, help="experts per layer (default 512)")
+    ap.add_argument("--dense-lead", type=int, default=0, help="leading layers without routed experts (default 0)")
     a = ap.parse_args()
 
-    ne = a.n_expert
+    ne, nl, dense_lead = a.n_expert, a.n_layer, a.dense_lead
+    if not (0 < ne <= 65536 and 0 < nl <= 65536 and 0 <= dense_lead < nl):
+        ap.error("require 1 <= n-layer,n-expert <= 65536 and 0 <= dense-lead < n-layer")
     freq = defaultdict(int)
     for t in a.traces:
-        for p, c in read_trace(t, ne).items():
+        for p, c in read_trace(t, ne, nl, dense_lead).items():
             freq[p] += c
-    base_pairs = [] if a.no_base else read_profile(a.base, ne)
-    ranked, counts = rank_profile(base_pairs, freq, ne, no_base=a.no_base, reorder=a.reorder)
-    write_profile(a.out, ranked, ne)
-    assert read_profile(a.out, ne) == ranked, "the profile did not survive the round trip"
+    base_pairs = [] if a.no_base else read_profile(a.base, ne, nl)
+    ranked, counts = rank_profile(base_pairs, freq, ne, no_base=a.no_base, reorder=a.reorder,
+                                  n_layer=nl, dense_lead=dense_lead)
+    write_profile(a.out, ranked, ne, nl)
+    assert read_profile(a.out, ne, nl) == ranked, "the profile did not survive the round trip"
     print(f"wrote {a.out}: {len(ranked)} ranked pairs ({counts['base']} from the base, {counts['trace']} from the "
           f"traces, {counts['fill']} filled in)")
 

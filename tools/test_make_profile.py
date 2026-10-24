@@ -15,7 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
 import make_profile as MP  # noqa: E402
 
-NE = 4   # a tiny "experts per layer"; the layer count is fixed at MP.N_LAYER
+NE = 4   # a tiny "experts per layer" for default-geometry tests
 
 
 def write_trace(path, records):
@@ -98,6 +98,25 @@ class Main(unittest.TestCase):
             # and without --reorder it is the base's order, untouched
             self.run_main([str(trace), "--base", str(base), "--n-expert", str(NE), "--out", str(out)])
             self.assertEqual(MP.read_profile(str(out), NE), full_base())
+
+    def test_flint_dense_lead_and_profile_table(self):
+        with tempfile.TemporaryDirectory() as d:
+            trace = Path(d) / "flint-trace.bin"
+            out = Path(d) / "flint-profile.bin"
+            write_trace(trace, [(0, [7]), (1, [8]), (2, [9]), (48, [255, 255]),
+                                (49, [1]), (3, [256])])
+            self.run_main([str(trace), "--no-base", "--n-layer", "49", "--n-expert", "256",
+                           "--dense-lead", "2", "--out", str(out)])
+            ranked = MP.read_profile(out, 256, 49)
+            self.assertEqual(len(ranked), 47 * 256)
+            self.assertEqual(ranked[:2], [(48, 255), (2, 9)])
+            self.assertEqual(len(set(ranked)), len(ranked))
+            self.assertTrue(all(2 <= layer < 49 and 0 <= expert < 256 for layer, expert in ranked))
+            blob = out.read_bytes()
+            self.assertEqual(struct.unpack_from("<5I", blob, 4), (1, 49, 256, 47 * 256, 47 * 256))
+            table_off = 24 + 4 * len(ranked)
+            self.assertEqual(struct.unpack_from("<512i", blob, table_off), (-1,) * 512)
+            self.assertEqual(struct.unpack_from("<i", blob, table_off + 4 * (48 * 256 + 255))[0], 0)
 
 
 if __name__ == "__main__":
