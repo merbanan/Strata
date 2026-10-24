@@ -100,6 +100,74 @@ reference configuration; Strata-native expert residency, task quality and
 longer-context memory admission are still unmeasured. Keep this setting
 opt-in and leave GPU headroom for other applications.
 
+## Pascal fork investigation and wider prefill workspaces
+
+[SirDebugALot's Pascal fork](https://github.com/SirDebugALot/Strata-Qwen3.6-35B-A3B-Pascal-Optimized)
+reports its largest long-prompt gains from layer-major prompt windows, packed
+expert MMQ and reusing decode-only VRAM for prompt workspace. It refills a
+prompt-informed GPU expert cache after prefill, then overlaps resident GPU
+experts with CPU misses and limits cache swaps. Strata's main path already has
+native packed experts, a borrowed expert-cache region for prompt buffers,
+adaptive residency and CPU/GPU miss work. The fork's bounded layer-major
+window and explicit phase switch are worth testing in a native Flint driver.
+The fork's MTP work does not transfer to this Flint GGUF, which has no MTP
+layer. Its Pascal launch geometry is not assumed best on Turing.
+
+The fork's workspace idea has an immediate, measurable effect in the upstream
+Flint reference. The table below is **llama.cpp**, not Strata; `-ncmoe N`
+places whole expert layers on CPU, and does not create a per-expert cache.
+All rows are same-day runs of llama.cpp `9ae73e6`, RTX 2060 SUPER, 12-core
+Ryzen 9 3900X, `-ngl 49`, FP16 KV, prompt 2048, generation 128,
+`-b 2048`, eight CPU threads. Each confirmed row has two repetitions.
+
+| CPU expert layers | Microbatch | PP2048 tok/s | TG128 tok/s |
+| ---: | ---: | ---: | ---: |
+| 32 | 512 | 267.05–269.00 | 36.67–37.64 |
+| 32 | 1024 | 467.82–473.84 | 36.43–36.84 |
+| 36 | 2048 | 713.41–718.57 | 32.15–34.32 |
+
+The middle row is a useful balanced opt-in profile: **1.76x** the matched
+PP2048 rate while TG stays close. The wide row is **2.67x** the matched PP
+rate but gives up about 10% TG because four more expert layers run on CPU.
+`-ncmoe 31 -ub 1024` failed to reserve a 626.51 MiB CUDA prompt buffer;
+32 CPU expert layers fit. A one-off 2048-microbatch run measured 709.67 PP
+before the repeated confirmation. The CPU thread screen at 512/64 with 8,
+12 and 16 threads moved PP only 271.78–275.18 and TG 36.43–38.15; it was
+much smaller than the workspace effect.
+
+Run the balanced reference with `llama-bench -m flint-UD-Q3_K_XL.gguf -p 2048
+-n 128 -r 2 -ngl 49 -ncmoe 32 -t 8 -b 2048 -ub 1024 -o jsonl`.
+Use `-ncmoe 36 -ub 2048` for prefill-focused measurement at this context.
+An upstream `llama-cli` smoke run with the balanced settings at context 2048
+generated "The capital of Sweden is Stockholm."
+These settings still require a context- and memory-fit check in a serving
+request. A native Flint implementation can avoid the static placement
+tradeoff by releasing decode cache slots for wide prefill, then refilling
+hot experts before generation. Measure prompt-to-decode transition cost and
+continuation correctness before claiming combined throughput.
+
+The same llama.cpp checkout has an experimental per-expert GPU MoE cache
+(`--moe-cache-mib` in `llama-cli`). For a controlled benchmark, the local
+`llama-bench` checkout on the TMP drive was patched to read
+`LLAMA_BENCH_MOE_CACHE_MIB` into its context parameters; this is a benchmark
+switch, not a Strata change. On the same RTX 2060 SUPER with all 49 expert
+layers on CPU, prompt 2048, generation 128, eight CPU threads and 1024
+microbatch, its first-pass results were:
+
+| GPU MoE cache | PP2048 tok/s | TG128 tok/s |
+| ---: | ---: | ---: |
+| Off | 349.74 | 28.86 |
+| 1 GiB | 340.50 | 17.86 |
+| 2 GiB | 349.77 | 21.37 |
+
+This cache is slower for Flint on this first-pass test. The code uses SLRU
+with uploads on misses and skips caching large prompt batches. A likely cause
+is PCIe upload cost and churn across 47 top-6 layers; the benchmark did not
+measure hits or transfer time, so that remains a hypothesis. Do not enable
+this cache from these results. The Pascal fork's bounded swaps and
+prompt-informed refill are the stronger decode-cache design to test once a
+native Flint driver exists.
+
 The same `-ngl 49 -ncmoe 31` placement also completed PP2048 at
 278.46/278.99 tok/s and TG128 at 38.20/36.81 tok/s. The same-day initial
 placement measured PP2048 at 206.59/215.20 and TG128 at 16.05/16.84
