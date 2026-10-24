@@ -22,4 +22,17 @@ A separate cold-server quality ABBA passed the same four retrieval markers at 1K
 
 The full-model prefill signal is substantial, but the Q4_0 opt-in remains off pending continuation/task qualification and serving smoke. The installed K8V4 profile cannot benefit from this Q4_0 path.
 
+## Fixed-continuation quality screen
+
+The existing teacher-forced harness now accepts a named single 0/1 environment switch, so the same real-batched-prefill protocol can compare `STRATA_PA_Q4_TURING`. Four direct-engine legs scored identical code and English corpora at 4K and 16K, with 128 fixed continuation positions per case: 16 requests and 2,048 scored positions. Each arm repeats its target log probabilities and top-1 choices exactly. Both cross-arm pairs agree with each other:
+
+| Case | Candidate/base perplexity | Top-1 agreement | Changed top-1 positions |
+| --- | ---: | ---: | ---: |
+| Code 4K | 0.727x | 89.84% | 13/128 |
+| Code 16K | 1.078x | 97.66% | 3/128 |
+| English 4K | 0.962x | 98.44% | 2/128 |
+| English 16K | 0.997x | 100% | 0/128 |
+
+The numerical changes are deterministic but mixed. The 16K code loss regresses 7.8% in perplexity while the 4K code loss improves; task usefulness cannot be inferred from either direction alone. This protocol records target-token log probabilities, not full-distribution continuation KL. It preserves the 4K/16K batched prompt and scores the tail through verifier windows; its instrumented timing is excluded from speed claims. Full records and coverage are under `/run/media/benjamin/TMP/strata-v20-q4attn-abba/teacher-20261024b/`. Broader task qualification remains required before enabling Q4_0 serving.
+
 At 1,500 context and 33 queries, changed-input graph replay and empty selection passed under CUDA memcheck, racecheck and synccheck; all three reported zero errors. The touched CUDA translation unit also compiles for sm70, though sm70 runtime stays on its original path. Sanitizer timings are instrumentation results and are excluded from the table.

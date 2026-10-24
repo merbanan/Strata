@@ -72,6 +72,8 @@ def main():
     parser.add_argument('--segments', default='code,docs,english,multilingual,agent')
     parser.add_argument('--tail', type=int, default=128)
     parser.add_argument('--arms', default='base,candidate,candidate,base')
+    parser.add_argument('--switch-env', default='STRATA_PF_FUSED',
+                        help='single 0/1 environment switch that distinguishes the arms')
     parser.add_argument('--prepare-only', action='store_true')
     a = parser.parse_args()
     assert 1 <= a.tail <= 512
@@ -85,7 +87,7 @@ def main():
     normalized = []
     for arm,value in [('base','0'),('candidate','1')]:
         cfg = json.loads(json.dumps(configs[arm]))
-        assert cfg['env'].pop('STRATA_PF_FUSED') == value
+        assert cfg['env'].pop(a.switch_env) == value
         cfg.pop('log',None)
         normalized.append(cfg)
     assert normalized[0] == normalized[1], 'only fused switch may differ'
@@ -119,7 +121,7 @@ def main():
     a.out.mkdir(parents=True,exist_ok=False)
     manifest = {'binary_sha256':binary_hash,'harness_sha256':digest(__file__),
                 'engine_runner_sha256':digest(Path(__file__).with_name('decode-compare.py')),
-                'sources':sources,'arms':arms,'scope':__doc__,
+                'sources':sources,'arms':arms,'switch_env':a.switch_env,'scope':__doc__,
                 'controls':'No adaptation; prefix snapshots/turn/root cuts disabled; pin creates the explicit prefix cut. Original auto prefill and cache budgets retained.'}
     (a.out/'manifest.json').write_text(json.dumps(manifest,indent=2)+'\n')
     (a.out/'cases.json').write_text(json.dumps(cases,indent=2)+'\n')
@@ -171,7 +173,7 @@ def main():
         windows = [int(n) for n in re.findall(r'strata trace: read (\d+) tokens \(windows\)',log)]
         assert batched == [c['prefix'] for c in cases],batched
         assert windows == [c['tail'] for c in cases],windows
-        if arm == 'candidate' and any(n >= 4096 for n in targets):
+        if a.switch_env == 'STRATA_PF_FUSED' and arm == 'candidate' and any(n >= 4096 for n in targets):
             assert 'prompt experts on the fused int8 kernels' in log, 'no fused route evidence'
         (directory/'coverage.json').write_text(json.dumps({'batched':batched,'windows':windows,'scored_positions':scored},indent=2)+'\n')
         time.sleep(3)
