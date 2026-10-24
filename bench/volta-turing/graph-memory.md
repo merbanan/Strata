@@ -113,3 +113,21 @@ A common padded topology would need a separate redesign and state/padding
 qualification. Same-size recaptures, batch layouts and individual-node updates
 are not ruled out by this result. Evidence:
 `solo-graph-limit-v1/graph-update-topology-audit.json`.
+
+### Same-size update probe, 2026-10-24
+
+`graph-same-size-update.cu` captures a 4,307-node sequential kernel graph on
+the RTX 2060 SUPER, instantiates it, then captures an equal-node-count graph
+with different kernel parameters. `cudaGraphExecUpdate` succeeds and the
+updated executable passes two changed-input replays. A fresh executable of
+the second graph also passes. The negative control has 4,306 nodes: the update
+returns `cudaErrorGraphExecUpdateFailure`, and the original updated executable
+still passes replay afterward. Each replay checks all 32 output lanes against
+an independent host sum.
+
+In this single unloaded-GPU run, initial instantiate took 18.49 ms, same-size
+update 2.08 ms, and fresh instantiate of the second graph 19.98 ms. These
+host times show API feasibility, not steady-state inference speed: this graph
+contains simple kernels rather than verifier graph topology, pointers, CPU/GDN
+state, KV state or batch layouts. A model recapture, state validation and
+full-round timing are required before engine adoption.
