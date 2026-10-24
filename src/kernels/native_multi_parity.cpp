@@ -127,10 +127,54 @@ int main(int argc, char**) {
         cudaFree(d_l); cudaFree(d_i); cudaFree(d_w);
     }
 
+#ifdef STRATA_FLINT_EXPERTS
+    // Flint: sigmoid logits, select six of 256, then normalize only those six.
+    // Check random rows, exact ties and saturated logits against a host reference.
+    for (int mode = 0; mode < 3; ++mode) {
+        constexpr int NE = 256, TOP = 6, NT = 17;
+        std::vector<float> lg((size_t) NT * NE);
+        for (auto& v : lg) v = gauss(rng) * 2.0f;
+        if (mode == 1) for (auto& v : lg) v = (float) (int) (v * 2.0f) * 0.5f;
+        if (mode == 2) for (size_t i = 0; i < lg.size(); i += 13) lg[i] = i & 1 ? 20.0f : -20.0f;
+        float* dl = up(lg);
+        int32_t* di = nullptr;
+        float* dw = nullptr;
+        check(cudaMalloc(&di, NT * TOP * sizeof(int32_t)), "Flint ids");
+        check(cudaMalloc(&dw, NT * TOP * sizeof(float)), "Flint weights");
+        native_router_sigmoid_top6(dl, di, dw, NT, st);
+        check(cudaStreamSynchronize(st), "Flint router");
+        const auto ids = down(di, NT * TOP);
+        const auto weights = down(dw, NT * TOP);
+        int cases_bad = 0;
+        for (int t = 0; t < NT; ++t) {
+            std::vector<int> ord(NE);
+            for (int e = 0; e < NE; ++e) ord[e] = e;
+            const float* row = lg.data() + (size_t) t * NE;
+            std::sort(ord.begin(), ord.end(), [&](int a, int b) {
+                return row[a] == row[b] ? a < b : row[a] > row[b];
+            });
+            double sum = 0.0;
+            for (int j = 0; j < TOP; ++j) sum += 1.0 / (1.0 + std::exp(-(double) row[ord[j]]));
+            for (int j = 0; j < TOP; ++j) {
+                const double want = (1.0 / (1.0 + std::exp(-(double) row[ord[j]]))) / sum;
+                if (ids[(size_t) t * TOP + j] != ord[j] ||
+                    std::fabs(weights[(size_t) t * TOP + j] - want) > 1e-5) ++cases_bad;
+            }
+        }
+        std::printf("  Flint sigmoid 256/top-6 mode %d: %s\n", mode, cases_bad ? "MISMATCH" : "ok");
+        bad += cases_bad;
+        cudaFree(dl); cudaFree(di); cudaFree(dw);
+    }
+#endif
+
     // ---- the combine
     struct Cfg { const char* name; int k; bool shared; int out_off; };
-    const Cfg cfgs[] = {{"k=10 + shared (float4 kernel)", 10, true, 0}, {"k=10 + shared, output misaligned", 10, true, 1},
-                        {"k=10 without shared", 10, false, 0}, {"k=9 + shared", 9, true, 0}};
+    std::vector<Cfg> cfgs = {{"k=10 + shared (float4 kernel)", 10, true, 0}, {"k=10 + shared, output misaligned", 10, true, 1},
+                             {"k=10 without shared", 10, false, 0}, {"k=9 + shared", 9, true, 0}};
+#ifdef STRATA_FLINT_EXPERTS
+    cfgs.push_back({"Flint k=6 + shared (float4 kernel)", 6, true, 0});
+    cfgs.push_back({"Flint k=6 + shared, output misaligned", 6, true, 1});
+#endif
     const int N = 2048;
     for (const Cfg& c : cfgs) {
         int cfg_bad = 0, cases = 0;

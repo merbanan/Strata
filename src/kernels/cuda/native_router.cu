@@ -151,7 +151,7 @@ __global__ void route_multi(const float* __restrict__ logits, int32_t* __restric
 // The same contract for other (experts, top-k) shapes - Qwen3.6-35B-A3B's 256 / 8 - one warp per token, n_tok tokens
 // (8 per block).  The 512 / 10 path keeps its own kernels above (the Flash-Next bits), this template is only used
 // for the other shapes.
-template <int NE, int K>
+template <int NE, int K, bool SIGMOID = false>
 __launch_bounds__(256, 1)
 __global__ void route_topk(const float* __restrict__ logits, int32_t* __restrict__ ids, float* __restrict__ weights,
                            int n_tok) {
@@ -164,21 +164,29 @@ __global__ void route_topk(const float* __restrict__ logits, int32_t* __restrict
     float values[V];
 #pragma unroll
     for (int i = 0; i < V; ++i) values[i] = logits[lane + i * 32];
-    float maximum = -INFINITY;
+    if constexpr (SIGMOID) {
 #pragma unroll
-    for (int i = 0; i < V; ++i) maximum = max(maximum, values[i]);
-    maximum = warp_max(maximum);
-    float sum = 0.0f;
+        for (int i = 0; i < V; ++i) {
+            values[i] = 1.0f / (1.0f + expf(-values[i]));
+            if (__isnanf(values[i])) values[i] = -FLT_MAX;
+        }
+    } else {
+        float maximum = -INFINITY;
 #pragma unroll
-    for (int i = 0; i < V; ++i) {
-        values[i] = expf(values[i] - maximum);
-        sum += values[i];
-    }
-    const float reciprocal = 1.0f / warp_sum(sum);
+        for (int i = 0; i < V; ++i) maximum = max(maximum, values[i]);
+        maximum = warp_max(maximum);
+        float sum = 0.0f;
 #pragma unroll
-    for (int i = 0; i < V; ++i) {
-        values[i] *= reciprocal;
-        if (__isnanf(values[i])) values[i] = -FLT_MAX;
+        for (int i = 0; i < V; ++i) {
+            values[i] = expf(values[i] - maximum);
+            sum += values[i];
+        }
+        const float reciprocal = 1.0f / warp_sum(sum);
+#pragma unroll
+        for (int i = 0; i < V; ++i) {
+            values[i] *= reciprocal;
+            if (__isnanf(values[i])) values[i] = -FLT_MAX;
+        }
     }
     float selected = 0.0f, selected_sum = 0.0f;
     for (int rank = 0; rank < K; ++rank) {
@@ -234,6 +242,20 @@ void native_router_top10_multi(const float* logits, int32_t* ids, float* weights
     if (error != cudaSuccess) throw std::runtime_error(cudaGetErrorString(error));
 }
 bool native_router_topk_supported(int n_expert, int k) { return (n_expert == 512 && k == 10) || (n_expert == 256 && k == 8); }
+#ifdef STRATA_FLINT_EXPERTS
+void native_router_sigmoid_top6(const float* logits, int32_t* ids, float* weights, int n_tok, void* stream) {
+    if (!stream || n_tok < 1 || !valid(logits, (size_t) n_tok * 256 * 4) ||
+        !valid(ids, (size_t) n_tok * 6 * 4) || !valid(weights, (size_t) n_tok * 6 * 4) ||
+        overlap(logits, (size_t) n_tok * 256 * 4, ids, (size_t) n_tok * 6 * 4) ||
+        overlap(logits, (size_t) n_tok * 256 * 4, weights, (size_t) n_tok * 6 * 4) ||
+        overlap(ids, (size_t) n_tok * 6 * 4, weights, (size_t) n_tok * 6 * 4))
+        throw std::invalid_argument("native_router_sigmoid_top6: a stream and disjoint [n,256]/[n,6] buffers");
+    route_topk<256, 6, true><<<(unsigned) ((n_tok + 7) / 8), dim3(32, 8), 0, static_cast<cudaStream_t>(stream)>>>(
+        logits, ids, weights, n_tok);
+    const auto error = cudaGetLastError();
+    if (error != cudaSuccess) throw std::runtime_error(cudaGetErrorString(error));
+}
+#endif
 void native_router_topk(const float* logits, int32_t* ids, float* weights, int n_expert, int k, int n_tok, void* stream) {
     if (n_expert == 512 && k == 10) {   // Flash-Next: the pinned kernels above, unchanged
         if (n_tok == 1) native_router_top10(logits, ids, weights, stream);

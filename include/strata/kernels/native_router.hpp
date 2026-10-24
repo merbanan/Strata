@@ -20,6 +20,12 @@ void native_router_top10_multi(const float* logits, int32_t* ids, float* weights
 /// 256 / 8 (Qwen3.6-35B-A3B).  logits [n_tok, n_expert], ids / weights [n_tok, k].  CUDA / HIP.
 bool native_router_topk_supported(int n_expert, int k);
 void native_router_topk(const float* logits, int32_t* ids, float* weights, int n_expert, int k, int n_tok, void* stream);
+#ifdef STRATA_FLINT_EXPERTS
+/// Flint's 256 experts, top 6: sigmoid each logit, select with lower-ID tie breaks,
+/// then normalize only the six selected weights (GGUF expert_gating_func=2, expert_weights_norm=true).
+/// Separate from native_router_topk so the existing softmax routes do not change.
+void native_router_sigmoid_top6(const float* logits, int32_t* ids, float* weights, int n_tok, void* stream);
+#endif
 /// STRATA_ROUTE_RESIDENT: swap non-resident tail-rank experts for resident ones within `margin` logits (see the .cu).
 /// `stats` is nullptr or 4 device uint64 counters: tail entries seen, swaps, non-resident before, non-resident after.
 void native_route_resident(const float* logits, int32_t* ids, float* weights, const int32_t* res_layer, int n_tok, float margin,

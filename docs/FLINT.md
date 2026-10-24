@@ -40,6 +40,11 @@ CPU output by 1.48–1.75%, and all four checks passed the existing 3% gate.
 Run it with `native_expert_parity --flint <flint.gguf> 2 14 20 47`.
 The `native_expert_parity_flint_formats` synthetic CTest also passes on the
 RTX 2060 SUPER without requiring the model file.
+An opt-in sigmoid 256/top-6 router now matches Flint's
+`flint.expert_gating_func=2` and normalized selected weights. The top-6 plus
+ungated shared-branch combine has a vectorized path. `native_multi_parity`
+passes sigmoid routing and bitwise combine checks, including a misaligned
+fallback. Neither kernel is connected to a full Flint driver yet.
 This enables the expert arithmetic needed by a future native driver; it does
 not yet connect those kernels to Flint inference or measure a cache speedup.
 
@@ -146,6 +151,28 @@ tradeoff by releasing decode cache slots for wide prefill, then refilling
 hot experts before generation. Measure prompt-to-decode transition cost and
 continuation correctness before claiming combined throughput.
 
+## Opt-in 160K K8V4 context profile
+
+`tools/run_flint_2060_160k.sh` configures the upstream llama.cpp reference
+runtime for the RTX 2060 SUPER with `-c 160000 -ctk q8_0 -ctv q4_0` (K8V4),
+flash attention, 49 GPU layers, 40 CPU expert layers and a 1024-token
+microbatch. Flint's GGUF declares a 262144-token maximum. Example:
+
+```sh
+STRATA_FLINT_LLAMA_CLI=/path/to/llama-cli \
+  tools/run_flint_2060_160k.sh /path/to/flint-UD-Q3_K_XL.gguf \
+  -n 64 -p 'What is the capital of Sweden? Answer in one sentence.'
+```
+
+This is an explicit opt-in launcher for llama.cpp until native Flint inference
+exists. A short-prompt CLI smoke test with the same 160000-token context and
+K8V4 cache answered Stockholm; the launcher run displayed 43.2 prompt tok/s
+and 30.9 generation tok/s for this brief request. The 512-token microbatch
+version peaked at 6733 MiB GPU usage. The 1024-token version also initialized
+and generated;
+full 160K filled-context throughput, memory and quantized-KV quality remain
+unmeasured.
+
 The same llama.cpp checkout has an experimental per-expert GPU MoE cache
 (`--moe-cache-mib` in `llama-cli`). For a controlled benchmark, the local
 `llama-bench` checkout on the TMP drive was patched to read
@@ -212,12 +239,12 @@ The runtime still refuses Flint in `model_family_runs` and its Flash-Next
    are capacity estimates, not measured allocator savings. Spend the released
    VRAM on the prefill workspace or expert cache, and validate sink and RoPE
    behavior against the reference.
-4. **Add 256/top-6 routing and a fast top-6 combine.**
-   `native_router_topk` supports 256/top-8 and 512/top-10, not Flint's
-   256/top-6. `native_moe_combine` has a vectorized shared-expert fast path
-   for top-10 only. The generic combine handles top-6, but a specialized
-   path may reduce decode memory traffic. Flint adds its shared branch
-   without Qwen3.6's sigmoid shared gate.
+4. **Connect and measure Flint's sigmoid router and top-6 combine.**
+   Flint applies sigmoid to 256 router logits, selects six experts and
+   normalizes their weights. The opt-in `native_router_sigmoid_top6` and
+   vectorized six-expert shared combine now pass kernel parity; wire them into
+   the native driver and measure decode. Flint adds its shared branch without
+   Qwen3.6's sigmoid shared gate.
 5. **Make cache decisions from Flint routing and transfer cost.** The
    tested llama.cpp SLRU cache lost decode speed at 1–2 GiB. Reuse Strata's
    bounded adaptive swaps, CPU/GPU overlap and prompt-informed refill, but
