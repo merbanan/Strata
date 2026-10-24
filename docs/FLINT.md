@@ -184,3 +184,56 @@ including 100 seeded random strings, and six special-token checks with and
 without special parsing. The local tokenizer regression suite passes. This
 validates Python token IDs on those cases, not the server chat template or a
 full-model Strata output path.
+
+## Strata code review: next speed work
+
+These are ranked implementation leads, not measured Strata-native gains.
+The runtime still refuses Flint in `model_family_runs` and its Flash-Next
+`--native` path requires a PLE tensor Flint does not contain.
+
+1. **Build a Flint driver around reusable native kernels.** The Qwen3.6 driver
+   (`src/qwen35/q36_engine.cu`) has expert grouping, CPU/GPU split, MMQ and
+   CUDA graphs, but its mixer, shared-expert gate and state differ. Flint
+   needs 49 attention layers with sinks, per-layer RoPE and sliding/full
+   selection, two dense FFNs and 47 top-6 MoE layers. Check full logits and
+   continuations against llama.cpp before tuning. The native expert
+   arithmetic is already parity-tested.
+2. **Loan more VRAM to prefill, then restore experts for decode.** The
+   measured 1024/2048 microbatch gains identify prompt workspace as a large
+   lever. Strata's prompt path already borrows expert-cache slots, but
+   `src/prefill/prefill.cpp` fixes width 2560, top-10/512 and FF 640. Adapt
+   the layout to Flint and test bounded layer-major windows: its stream-all
+   schedule builds a sequence of nonresident experts for every chunk, so
+   larger windows can reuse each transferred weight across more tokens.
+3. **Use a 513-cell KV ring in Flint's 35 sliding layers.** Fourteen layers
+   use full context. FP16 K/V with four 128-wide KV heads costs 2048 bytes
+   per layer-token. At context 2048, all-full KV is 196 MiB versus about
+   91 MiB with sliding rings; at context 8192, 784 versus 259 MiB. These
+   are capacity estimates, not measured allocator savings. Spend the released
+   VRAM on the prefill workspace or expert cache, and validate sink and RoPE
+   behavior against the reference.
+4. **Add 256/top-6 routing and a fast top-6 combine.**
+   `native_router_topk` supports 256/top-8 and 512/top-10, not Flint's
+   256/top-6. `native_moe_combine` has a vectorized shared-expert fast path
+   for top-10 only. The generic combine handles top-6, but a specialized
+   path may reduce decode memory traffic. Flint adds its shared branch
+   without Qwen3.6's sigmoid shared gate.
+5. **Make cache decisions from Flint routing and transfer cost.** The
+   tested llama.cpp SLRU cache lost decode speed at 1–2 GiB. Reuse Strata's
+   bounded adaptive swaps, CPU/GPU overlap and prompt-informed refill, but
+   first measure held-out routing hits, upload MiB, CPU miss time and GPU
+   waits. `tools/make_profile.py` fixes 48x512; accept Flint's 49x256 shape
+   with no routed experts in layers 0–1. `ExpertCache` storage itself accepts
+   dynamic dimensions. Compare every cache change with static placement.
+6. **Keep packed MMQ coverage per layer.** `moe_mmq.cu` recognizes Flint's
+   IQ3_S, IQ4_XS and Q4_K formats (Q4_K requires the K-quant build option).
+   The Qwen3.6 driver enables MMQ only if every layer passes its format and
+   shape check; one unsupported layer falls back for the whole model. A Flint
+   driver should dispatch per layer and compare with grouped experts on
+   `sm75` at prompt widths 512, 1024 and 2048.
+
+Performance gates: same-day PP512, PP2048, PP8192 and TG128 at fixed prompt
+token IDs; peak VRAM and host RAM; cache hits and uploaded bytes; logit and
+continuation parity; and prefill-to-decode transition time. The short
+512-token prompt has not gained from a wider microbatch and remains a
+separate target.
