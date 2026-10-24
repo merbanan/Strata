@@ -54,7 +54,8 @@ inline constexpr int32_t kNotResident = -1;
 bool read_expert_profile(const std::string& path, int64_t n_layers, int64_t n_expert,
                          std::vector<std::pair<int32_t, int32_t>>& ranked, int64_t& slots, std::string& err);
 
-/// #477 (--expert-profile-save): what the adaptive tier learned, as a profile ranking EVERY (layer, expert) pair -
+/// #477 (--expert-profile-save): what the adaptive tier learned, as a profile ranking every routed
+/// (layer, expert) pair. `first_routed_layer` skips a leading dense prefix (Flint has two dense layers) -
 /// the experts resident in VRAM now first (where the swaps left the cache), then the rest; within each, by `heat`
 /// (the routing the adaptive tier counted since the start, descending), then by `prior` (the profile the engine
 /// started from: an expert this run never routed keeps its old place), then by index.  A start from it begins
@@ -63,7 +64,8 @@ bool read_expert_profile(const std::string& path, int64_t n_layers, int64_t n_ex
 std::vector<std::pair<int32_t, int32_t>> rank_learned_profile(int64_t n_layers, int64_t n_expert,
                                                               const std::vector<uint8_t>& resident,
                                                               const std::vector<double>& heat,
-                                                              const std::vector<std::pair<int32_t, int32_t>>& prior);
+                                                              const std::vector<std::pair<int32_t, int32_t>>& prior,
+                                                              int64_t first_routed_layer = 0);
 
 /// #477: writes `ranked` in tools/make_profile.py's format, byte for byte: `STRP`, `1, n_layers, n_expert,
 /// n_ranked, n_ranked` (uint32), the pairs (uint16 layer, uint16 expert), then the n_layers x n_expert int32 table

@@ -143,8 +143,10 @@ bool read_expert_profile(const std::string& path, int64_t n_layers, int64_t n_ex
 std::vector<std::pair<int32_t, int32_t>> rank_learned_profile(int64_t n_layers, int64_t n_expert,
                                                               const std::vector<uint8_t>& resident,
                                                               const std::vector<double>& heat,
-                                                              const std::vector<std::pair<int32_t, int32_t>>& prior) {
+                                                              const std::vector<std::pair<int32_t, int32_t>>& prior,
+                                                              int64_t first_routed_layer) {
     const size_t n = (size_t) (n_layers * n_expert);
+    const int64_t first = std::clamp(first_routed_layer, int64_t(0), n_layers);
     std::vector<int64_t> prior_rank(n, INT64_MAX);
     for (size_t r = 0; r < prior.size(); ++r) {
         const auto [l, e] = prior[r];
@@ -153,8 +155,9 @@ std::vector<std::pair<int32_t, int32_t>> rank_learned_profile(int64_t n_layers, 
             if (pr == INT64_MAX) pr = (int64_t) r;
         }
     }
-    std::vector<int64_t> order(n);
-    for (size_t i = 0; i < n; ++i) order[i] = (int64_t) i;
+    std::vector<int64_t> order;
+    order.reserve((size_t) ((n_layers - first) * n_expert));
+    for (int64_t i = first * n_expert; i < n_layers * n_expert; ++i) order.push_back(i);
     auto res = [&](int64_t i) { return (size_t) i < resident.size() && resident[(size_t) i] != 0; };
     auto ht = [&](int64_t i) { return (size_t) i < heat.size() ? heat[(size_t) i] : 0.0; };
     std::stable_sort(order.begin(), order.end(), [&](int64_t a, int64_t b) {
@@ -163,8 +166,8 @@ std::vector<std::pair<int32_t, int32_t>> rank_learned_profile(int64_t n_layers, 
         if (prior_rank[(size_t) a] != prior_rank[(size_t) b]) return prior_rank[(size_t) a] < prior_rank[(size_t) b];
         return a < b;
     });
-    std::vector<std::pair<int32_t, int32_t>> ranked(n);
-    for (size_t r = 0; r < n; ++r)
+    std::vector<std::pair<int32_t, int32_t>> ranked(order.size());
+    for (size_t r = 0; r < order.size(); ++r)
         ranked[r] = {(int32_t) (order[r] / n_expert), (int32_t) (order[r] % n_expert)};
     return ranked;
 }

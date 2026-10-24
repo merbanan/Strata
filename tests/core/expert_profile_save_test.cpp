@@ -74,6 +74,22 @@ int main() {
     check(!strata::core::write_expert_profile(path, L, E, {{3, 0}}, err), "a pair out of range is refused");
     check(strata::core::read_expert_profile(path, L, E, back, slots, err) && back == r0,
           "a refused save keeps the file");
+    // A Flint-like dense prefix contributes no cacheable expert pairs, even if its
+    // unused heat/resident slots contain values from a caller's full-size arrays.
+    std::vector<uint8_t> flint_resident(12, 0);
+    std::vector<double> flint_heat(12, 0.0);
+    flint_resident[0] = flint_resident[7] = 1;
+    flint_heat[0] = 100.0;
+    flint_heat[7] = 3.0;
+    const auto flint = strata::core::rank_learned_profile(4, 3, flint_resident, flint_heat,
+                                                          {{0, 0}, {3, 2}}, 2);
+    check(flint.size() == 6 && flint[0] == Pair(2, 1) && flint[1] == Pair(3, 2),
+          "dense prefix is excluded while routed heat and prior are preserved");
+    for (const Pair& p : flint) check(p.first >= 2, "learned profile contains only routed layers");
+    const std::string flint_path = (dir / "dense-prefix.bin").string();
+    check(strata::core::write_expert_profile(flint_path, 4, 3, flint, err), "dense-prefix profile written");
+    check(strata::core::read_expert_profile(flint_path, 4, 3, back, slots, err) &&
+          back == flint && slots == 6, "dense-prefix profile read back");
     std::filesystem::remove_all(dir);
     if (fails == 0) std::puts("expert_profile_save_test: OK");
     return fails == 0 ? 0 : 1;

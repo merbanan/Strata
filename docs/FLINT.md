@@ -260,9 +260,10 @@ The runtime still refuses Flint in `model_family_runs` and its Flash-Next
    tested. Build one with `--n-layer 49 --n-expert 256 --dense-lead 2 --no-base
    --out PROFILE`. The shipped 48x512 base profile does not match Flint, so
    `--no-base` is required unless a 49x256 base is provided. `ExpertCache`
-   storage accepts dynamic dimensions, but a native Flint driver must still
-   connect routing traces and cache residency. Compare each cache change with
-   static placement.
+   storage accepts dynamic dimensions. Learned-profile saving now also skips
+   Flint's two dense layers, with a CPU regression test; a native Flint driver
+   must still connect routing traces and cache residency. Compare each cache
+   change with static placement.
 6. **Keep packed MMQ coverage per layer.** `moe_mmq.cu` recognizes Flint's
    IQ3_S, IQ4_XS and Q4_K formats (Q4_K requires the K-quant build option).
    The Qwen3.6 driver enables MMQ only if every layer passes its format and
