@@ -36,13 +36,35 @@ opt-in graph passes CUDA memcheck, racecheck and synccheck.
 Setting `STRATA_GDN_KEYHEAD=0` alongside the new opt-in returns production
 timing to the baseline and preserves the baseline output hashes.
 
-This establishes an exact, repeatable GDN-call speedup on this GPU. It does
-not establish a full-model prefill gain or unchanged task quality under an
-actual request. The full model remains unloaded to honor the current host
-RAM constraint. Before local adoption, run matched prefill/decode ABBA,
-inspect chunk selection and accepted-token quality, then smoke-test the
-installed binary and retain a rollback switch. Raw logs are under
+This establishes an exact, repeatable GDN-call speedup on this GPU. At the
+time of that isolated screen, the full model was left unloaded to honor the
+host RAM constraint. Raw logs are under
 `/run/media/benjamin/TMP/strata-codex-20261023/` as
 `gdn-turing-keyhead-8192.log`, `gdn-keyhead-prod-{a1,b1,b2,a2}.log` and
 `gdn-keyhead-graph-{base,candidate}.log` and
 `gdn-keyhead-prod-override.log`.
+
+## Full-model gate on 2026-10-24
+
+The current v20 source was rebuilt for sm75. Four fresh server processes used
+the installed IQ3_XXS/K8V4 configuration with one change:
+`STRATA_GDN_KEYHEAD_TURING=0` for base and `=1` for candidate. The run order
+was base/candidate/candidate/base, with 4,096- and 16,384-token prompts and
+256 output tokens per leg. Each leg passed the 156-token kv1188 correctness
+probe. Request hashes, generated text, prompt/output tokens, draft
+offers/accepts, expert RAM/file reads, hit rates and PCIe shares match across
+all four legs. The GPU expert cache had 1,403 slots and the prompt path
+borrowed 1,185 slots in every leg.
+
+| Prompt | Base prefill tok/s | Candidate prefill tok/s | Paired candidate/base | Base decode tok/s | Candidate decode tok/s | Paired candidate/base |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 4K | 503.6 / 452.7 | 503.3 / 486.6 | 0.999x / 1.075x | 30.45 / 27.57 | 27.84 / 27.13 | 0.914x / 0.984x |
+| 16K | 729.2 / 728.2 | 726.2 / 727.5 | 0.996x / 0.999x | 35.92 / 34.29 | 33.59 / 32.31 | 0.935x / 0.942x |
+
+The 16K prefill result is flat and decode regresses in both pairs. The 4K
+prefill result varies between pairs; server logs warned of only 63–209 MiB
+free VRAM during request setup, so the 4K variation is not an adoption signal.
+The isolated GDN-call gain does not improve this full-model configuration.
+Keep the opt-in disabled locally. The complete configs, response text,
+per-request work fields and server logs are in
+`/run/media/benjamin/TMP/strata-v20-gdn-abba/full-20261024a/`.
