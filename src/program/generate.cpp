@@ -13707,7 +13707,7 @@ int main(int argc, char** argv) {
                                  (long long) v.windows, v.ms_wait / w, v.ms_pool / w, v.ms_host / w, v.ms_commit / w);
                 }
             if (g.n_qsa_layers() > 0 && ss.qsa_states[ss.qsa_primary()].kv_mode == 1) {
-                // KV streaming, cumulative over the process: blocks the selections named vs blocks read from RAM
+                // KV streaming since the request's state reset: selected blocks vs blocks read from RAM
                 // (this device's owned ordinals; a split's other stages hold theirs)
                 uint64_t miss = 0, look = 0, host_bytes = 0;
                 bool over = false;
