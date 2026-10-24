@@ -3234,8 +3234,13 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                                        strata::kernels::qsa_prompt_attn_batch_gated(m.q, pools, m.sel_ids, m.steps_dev, m.cap,
                                                                                     s, m.Qf, m.attn_h, ld_a > 0 ? ld_a : ZV,
                                                                                     T, m.cs);
-                    if (!gated && (old_attn || !strata::kernels::qsa_prompt_attn_batch(m.q, pools, m.sel_ids, m.steps_dev, m.cap, s,
-                                                                            m.attn, T, m.cs)))
+                    const bool batch_attn = !gated && !old_attn && strata::kernels::qsa_prompt_attn_batch(
+                        m.q, pools, m.sel_ids, m.steps_dev, m.cap, s, m.attn, T, m.cs);
+                    if (static const bool route_trace = std::getenv("STRATA_PA_ROUTE_TRACE") != nullptr; route_trace)
+                        std::fprintf(stderr, "strata pa route: prefill pos=%lld qsa=%lld queries=%lld route=%s\n",
+                                     (long long) p0, (long long) qsa_index, (long long) T,
+                                     gated ? "gated" : batch_attn ? "batch" : "decode_fallback");
+                    if (!gated && !batch_attn)
                         for (int64_t t0 = 0; t0 < T; t0 += m.attn_batch) {
                             const int64_t nb = std::min(m.attn_batch, T - t0);
                             strata::kernels::qsa_decode_attn_batch(m.q + t0 * ZV, pools, m.sel_ids + t0 * m.cap,
